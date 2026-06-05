@@ -1,5 +1,6 @@
 from datetime import datetime
 from db import get_orders
+from swiggy_mcp import place_order
 
 orders = get_orders()
 
@@ -23,9 +24,9 @@ for order in orders:
             print(f"Recurring order found: {order}")
 
             if schedule_time == current_time:
-                print(f"PLACE ORDER -> {order[1]} x {order[2]}")
+                place_order(order[1], order[2])
 
     else:
 
         if schedule_time == current_time:
-            print(f"PLACE ORDER -> {order[1]} x {order[2]}")
+            place_order(order[1], order[2])

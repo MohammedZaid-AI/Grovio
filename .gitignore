@@ -1,6 +1,8 @@
-.env/
+.env
 
 database/
 
 venv/
+__pycache__/
+*.pyc
 
