@@ -8,16 +8,18 @@ from db import (
 
 def run_scheduler():
 
-    today = datetime.now().strftime(
+    now = datetime.now()
+
+    today = now.strftime(
         "%A"
     )
 
-    current_time = datetime.now().strftime(
+    current_time = now.strftime(
         "%H:%M"
     )
 
     print(
-        f"Today: {today}"
+        f"\nToday: {today}"
     )
 
     print(
@@ -25,6 +27,14 @@ def run_scheduler():
     )
 
     orders = get_orders()
+
+    if not orders:
+
+        print(
+            "\nNo recurring orders found."
+        )
+
+        return
 
     for order in orders:
 
@@ -58,10 +68,65 @@ def run_scheduler():
             for d in recurrence.split(",")
         ]
 
-        if (
-            today in days
-            and schedule_time == current_time
-        ):
+        print("\n----------------")
+
+        print(
+            f"Checking: {product_name}"
+        )
+
+        print(
+            f"Days: {days}"
+        )
+
+        print(
+            f"Schedule Time: {schedule_time}"
+        )
+
+        if today not in days:
+
+            print(
+                "Skipped (wrong day)"
+            )
+
+            continue
+
+        try:
+
+            scheduled = datetime.strptime(
+                schedule_time,
+                "%H:%M"
+            )
+
+        except Exception:
+
+            print(
+                f"Invalid time format: {schedule_time}"
+            )
+
+            continue
+
+        current_minutes = (
+            now.hour * 60
+            + now.minute
+        )
+
+        scheduled_minutes = (
+            scheduled.hour * 60
+            + scheduled.minute
+        )
+
+        difference = abs(
+            current_minutes
+            - scheduled_minutes
+        )
+
+        print(
+            f"Difference: {difference} minute(s)"
+        )
+
+        # Trigger if within 5 minutes
+
+        if difference <= 5:
 
             print(
                 "\nRecurring order triggered:"
@@ -81,5 +146,13 @@ def run_scheduler():
                 "Saved to pending orders"
             )
 
+        else:
+
+            print(
+                "Skipped (time not matched)"
+            )
+
+
 if __name__ == "__main__":
+
     run_scheduler()

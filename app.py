@@ -150,14 +150,15 @@ async def order_now():
         )
 
 
-def create_recurring():
+async def create_recurring():
+
+    swiggy = await (
+        SwiggyInstamart()
+        .initialize()
+    )
 
     product_name = input(
         "\nProduct Name: "
-    )
-
-    spin_id = input(
-        "Spin ID: "
     )
 
     quantity = int(
@@ -174,8 +175,62 @@ def create_recurring():
         "Time (08:00): "
     )
 
+    products = await swiggy.get_product_options(
+        product_name
+    )
+
+    if not products:
+
+        print(
+            "\nNo products found."
+        )
+
+        return
+
+    print(
+        f"\nResults for {product_name}:"
+    )
+
+    for i, product in enumerate(
+        products[:5],
+        start=1
+    ):
+
+        variant = product[
+            "variations"
+        ][0]
+
+        print(
+            f"{i}. "
+            f"{product['displayName']} "
+            f"({variant['quantityDescription']}) "
+            f"₹{variant['price']['offerPrice']}"
+        )
+
+    choice = int(
+        input(
+            "\nChoose product number: "
+        )
+    )
+
+    selected = products[
+        choice - 1
+    ]
+
+    variant = selected[
+        "variations"
+    ][0]
+
+    spin_id = variant[
+        "spinId"
+    ]
+
+    product_display_name = selected[
+        "displayName"
+    ]
+
     save_order(
-        product_name=product_name,
+        product_name=product_display_name,
         spin_id=spin_id,
         quantity=quantity,
         order_type="recurring",
@@ -184,7 +239,15 @@ def create_recurring():
     )
 
     print(
-        "\nRecurring order saved."
+        "\nRecurring order saved successfully."
+    )
+
+    print(
+        f"\nProduct: {product_display_name}"
+    )
+
+    print(
+        f"Spin ID: {spin_id}"
     )
 
 
@@ -235,7 +298,7 @@ async def main():
 
         elif choice == "2":
 
-            create_recurring()
+            await create_recurring()
 
         elif choice == "3":
 
