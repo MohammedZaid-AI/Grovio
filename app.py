@@ -4,7 +4,21 @@ from agent import parse_order
 from swiggy_mcp import SwiggyInstamart
 
 
-async def main():
+from db import (
+    save_order,
+    get_orders,
+    get_pending_orders
+)
+
+from scheduler import run_scheduler
+
+
+async def order_now():
+
+    swiggy = await (
+        SwiggyInstamart()
+        .initialize()
+    )
 
     user_text = input(
         "\nWhat would you like to order?\n\n"
@@ -14,49 +28,230 @@ async def main():
         user_text
     )
 
-    print("\nParsed Order:")
+    print("\nParsed:")
     print(parsed)
 
-    items = parsed.get(
-        "items",
-        []
-    )
+    final_items = []
 
-    if not items:
-        print(
-            "No items found."
+    for item in parsed["items"]:
+
+        products = await swiggy.get_product_options(
+            item["name"]
         )
-        return
 
-    swiggy = await (
-        SwiggyInstamart()
-        .initialize()
-    )
+        if not products:
 
-    await swiggy.place_multiple_items(
-        items
-    )
+            print(
+                f"\nNo results found for {item['name']}"
+            )
 
-    choice = input(
-        "\nPlace order? (yes/no): "
-    ).strip().lower()
+            continue
 
-    if choice != "yes":
         print(
-            "\nOrder cancelled."
+            f"\nResults for {item['name']}:"
         )
-        return
 
-    address_id = (
-        await swiggy.get_address_id()
+        for i, product in enumerate(
+            products[:5],
+            start=1
+        ):
+
+            variant = product[
+                "variations"
+            ][0]
+
+            print(
+                f"{i}. "
+                f"{product['displayName']} "
+                f"({variant['quantityDescription']}) "
+                f"₹{variant['price']['offerPrice']}"
+            )
+
+        choice = int(
+            input(
+                "\nChoose product number: "
+            )
+        )
+
+        selected = products[
+            choice - 1
+        ]
+
+        variant = selected[
+            "variations"
+        ][0]
+
+        final_items.append(
+            {
+                "spinId":
+                    variant["spinId"],
+                "quantity":
+                    item["quantity"]
+            }
+        )
+
+    print(
+        "\nFINAL ITEMS:"
     )
 
-    result = await swiggy.checkout(
-        address_id
+    print(
+        final_items
     )
 
-    print("\nRESULT:")
-    print(result)
+    await swiggy.clear_cart()
+
+    address_id = await (
+        swiggy.get_address_id()
+    )
+
+    await swiggy.update_cart(
+    address_id,
+    final_items
+    )
+
+    cart = await swiggy.get_cart()
+
+    print(
+        "\nCART:"
+    )
+
+    print(cart)
+
+    confirm = input(
+        "\nCheckout? (yes/no): "
+    )
+
+    if confirm.lower() == "yes":
+
+        latest_cart = await (
+            swiggy.get_cart()
+        )
+
+        print(
+            "\nLATEST CART:"
+        )
+
+        print(
+            latest_cart
+        )
+
+        result = await (
+            swiggy.checkout(
+                address_id
+            )
+        )
+
+        print(
+            "\nCHECKOUT RESULT:"
+        )
+
+        print(
+            result
+        )
+
+
+def create_recurring():
+
+    product_name = input(
+        "\nProduct Name: "
+    )
+
+    spin_id = input(
+        "Spin ID: "
+    )
+
+    quantity = int(
+        input(
+            "Quantity: "
+        )
+    )
+
+    recurrence = input(
+        "Days (Monday,Friday): "
+    )
+
+    schedule_time = input(
+        "Time (08:00): "
+    )
+
+    save_order(
+        product_name=product_name,
+        spin_id=spin_id,
+        quantity=quantity,
+        order_type="recurring",
+        schedule_time=schedule_time,
+        recurrence=recurrence
+    )
+
+    print(
+        "\nRecurring order saved."
+    )
+
+
+def view_orders_menu():
+
+    orders = get_orders()
+
+    print("\nOrders:\n")
+
+    for order in orders:
+        print(order)
+
+
+def view_pending():
+
+    orders = get_pending_orders()
+
+    print("\nPending Orders:\n")
+
+    for order in orders:
+        print(order)
+
+
+async def main():
+
+    while True:
+
+        print(
+            """
+=== GROVIO ===
+
+1. Order groceries now
+2. Create recurring order
+3. View recurring orders
+4. Run scheduler
+5. View pending orders
+6. Exit
+"""
+        )
+
+        choice = input(
+            "Select option: "
+        )
+
+        if choice == "1":
+
+            await order_now()
+
+        elif choice == "2":
+
+            create_recurring()
+
+        elif choice == "3":
+
+            view_orders_menu()
+
+        elif choice == "4":
+
+            run_scheduler()
+
+        elif choice == "5":
+
+            view_pending()
+
+        elif choice == "6":
+
+            break
 
 
 if __name__ == "__main__":

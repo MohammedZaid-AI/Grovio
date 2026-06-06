@@ -180,8 +180,12 @@ class SwiggyInstamart:
 
         result = await self.update_cart(
             address_id,
-            spin_id,
-            quantity
+            [
+                {
+                    "spinId": spin_id,
+                    "quantity": quantity
+                }
+            ]
         )
 
         print(
