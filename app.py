@@ -1,31 +1,63 @@
+import asyncio
+
 from agent import parse_order
-from db import (
-    init_db,
-    save_order,
-    get_orders
-)
+from swiggy_mcp import SwiggyInstamart
 
-init_db()
 
-text = input("Enter order: ")
+async def main():
 
-data = parse_order(text)
+    user_text = input(
+        "\nWhat would you like to order?\n\n"
+    )
 
-print("\nParsed JSON:")
-print(data)
+    parsed = parse_order(
+        user_text
+    )
 
-recurrence = data.get("recurrence")
+    print("\nParsed Order:")
+    print(parsed)
 
-if isinstance(recurrence, list):
-    recurrence = ",".join(recurrence)
+    items = parsed.get(
+        "items",
+        []
+    )
 
-save_order(
-    data["item"],
-    data["quantity"],
-    data["schedule_time"],
-    recurrence
-)
+    if not items:
+        print(
+            "No items found."
+        )
+        return
 
-print("\nOrder Saved")
+    swiggy = await (
+        SwiggyInstamart()
+        .initialize()
+    )
 
-print(get_orders())
+    await swiggy.place_multiple_items(
+        items
+    )
+
+    choice = input(
+        "\nPlace order? (yes/no): "
+    ).strip().lower()
+
+    if choice != "yes":
+        print(
+            "\nOrder cancelled."
+        )
+        return
+
+    address_id = (
+        await swiggy.get_address_id()
+    )
+
+    result = await swiggy.checkout(
+        address_id
+    )
+
+    print("\nRESULT:")
+    print(result)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

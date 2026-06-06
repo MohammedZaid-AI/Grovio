@@ -66,20 +66,14 @@ class SwiggyInstamart:
     async def update_cart(
         self,
         address_id,
-        spin_id,
-        quantity
+        items
     ):
 
         return await self.session.call_tool(
             "update_cart",
             {
                 "selectedAddressId": address_id,
-                "items": [
-                    {
-                        "spinId": spin_id,
-                        "quantity": quantity
-                    }
-                ]
+                "items": items
             }
         )
 
@@ -220,75 +214,150 @@ class SwiggyInstamart:
         return cart
 
     async def checkout(
-        self,
-        address_id,
-        payment_method="COD"
+    self,
+    address_id,
+    payment_method=None
     ):
+
+        payload = {
+        "addressId": address_id
+        }
+
+        if payment_method:
+            payload["paymentMethod"] = payment_method
 
         return await self.session.call_tool(
             "checkout",
-            {
-                "selectedAddressId": address_id,
-                "paymentMethod": payment_method
-            }
+            payload
+        )
+    
+    async def get_product_options(
+    self,
+    item_name
+    ):
+
+        address_id = await self.get_address_id()
+
+        search_result = await self.search_product(
+            address_id,
+            item_name
+        )
+
+        if getattr(
+            search_result,
+            "isError",
+            False
+        ):
+            return []
+
+        return search_result.structuredContent.get(
+            "products",
+            []
         )
 
 
 async def main():
 
-    swiggy = await (
-        SwiggyInstamart()
-        .initialize()
+    from agent import parse_order
+
+    swiggy = await SwiggyInstamart().initialize()
+
+    user_text = input(
+        "\nWhat would you like to order?\n\n"
     )
 
-    item = input(
-        "\nWhat do you want to order? "
+    parsed = parse_order(user_text)
+
+    print("\nParsed:")
+    print(parsed)
+
+    final_items = []
+
+    for item in parsed["items"]:
+
+        products = await swiggy.get_product_options(
+            item["name"]
+        )
+
+        if not products:
+
+            print(
+                f"\nNo results found for {item['name']}"
+            )
+            continue
+
+        print(
+            f"\nResults for {item['name']}:"
+        )
+
+        for i, product in enumerate(
+            products[:5],
+            start=1
+        ):
+
+            variant = product[
+                "variations"
+            ][0]
+
+            print(
+                f"{i}. "
+                f"{product['displayName']} "
+                f"({variant['quantityDescription']}) "
+                f"₹{variant['price']['offerPrice']}"
+            )
+
+        choice = int(
+            input(
+                "\nChoose product number: "
+            )
+        )
+
+        selected = products[
+            choice - 1
+        ]
+
+        variant = selected[
+            "variations"
+        ][0]
+
+        final_items.append(
+            {
+                "spinId":
+                    variant["spinId"],
+                "quantity":
+                    item["quantity"]
+            }
+        )
+
+    await swiggy.clear_cart()
+
+
+    address_id = await swiggy.get_address_id()
+
+    print("\nFINAL ITEMS:")
+    print(final_items)
+
+    await swiggy.update_cart(
+        address_id,
+        final_items
     )
 
-    quantity = int(
-        input("Quantity: ")
-    )
+    cart = await swiggy.get_cart()
 
-    order = [
-        {
-            "name": item,
-            "quantity": quantity
-        }
-    ]
-
-    cart = await swiggy.place_multiple_items(
-        order
-    )
-
-    print("\nFINAL CART:")
+    print("\nCART:")
     print(cart)
 
-    choice = input(
+    confirm = input(
         "\nCheckout? (yes/no): "
-    ).strip().lower()
+    )
 
-    if choice == "yes":
-
-        address_id = (
-            await swiggy.get_address_id()
-        )
+    if confirm.lower() == "yes":
 
         result = await swiggy.checkout(
             address_id
         )
 
-        print(
-            "\nCHECKOUT RESULT:"
-        )
-
         print(result)
-
-    else:
-
-        print(
-            "\nCheckout skipped."
-        )
-
 
 if __name__ == "__main__":
     asyncio.run(main())
