@@ -7,7 +7,8 @@ from swiggy_mcp import SwiggyInstamart
 from db import (
     save_order,
     get_orders,
-    get_pending_orders
+    get_pending_orders,
+    mark_pending_completed
 )
 
 from scheduler import run_scheduler
@@ -270,6 +271,144 @@ def view_pending():
     for order in orders:
         print(order)
 
+async def approve_pending_orders():
+
+    orders = get_pending_orders()
+
+    active_orders = [
+        o
+        for o in orders
+        if o[5] == "awaiting_confirmation"
+    ]
+
+    if not active_orders:
+
+        print(
+            "\nNo pending orders."
+        )
+
+        return
+
+    print(
+        "\nPending Orders:\n"
+    )
+
+    for order in active_orders:
+
+        print(
+            f"{order[0]}. "
+            f"{order[1]} "
+            f"x{order[3]}"
+        )
+
+    pending_id = int(
+        input(
+            "\nSelect order id: "
+        )
+    )
+
+    selected = None
+
+    for order in active_orders:
+
+        if order[0] == pending_id:
+
+            selected = order
+
+            break
+
+    if not selected:
+
+        print(
+            "Invalid selection"
+        )
+
+        return
+
+    swiggy = await (
+        SwiggyInstamart()
+        .initialize()
+    )
+
+    address_id = await (
+        swiggy.get_address_id()
+    )
+
+    await swiggy.clear_cart()
+
+    await swiggy.update_cart(
+        address_id,
+        [
+            {
+                "spinId": selected[2],
+                "quantity": selected[3]
+            }
+        ]
+    )
+
+    cart = await (
+    swiggy.get_cart()
+    )
+
+    if getattr(
+        cart,
+        "isError",
+        False
+    ):
+
+        print(
+            "\nStore unavailable."
+        )
+
+        print(
+            "Order remains pending."
+        )
+
+        return
+
+    print(
+        "\nCART:\n"
+    )
+
+    print(cart)
+
+    confirm = input(
+        "\nPlace order? (yes/no): "
+    )
+
+    if confirm.lower() != "yes":
+
+        print(
+            "\nCancelled."
+        )
+
+        return
+
+    result = await (
+        swiggy.checkout(
+            address_id
+        )
+    )
+
+    print(
+        "\nCHECKOUT RESULT:"
+    )
+
+    print(result)
+
+    if not getattr(
+        result,
+        "isError",
+        False
+    ):
+
+        mark_pending_completed(
+            pending_id
+        )
+
+        print(
+            "\nPending order marked completed."
+        )
 
 async def main():
 
@@ -284,7 +423,8 @@ async def main():
 3. View recurring orders
 4. Run scheduler
 5. View pending orders
-6. Exit
+6. Approve pending orders
+7. Exit
 """
         )
 
@@ -313,6 +453,10 @@ async def main():
             view_pending()
 
         elif choice == "6":
+
+            await approve_pending_orders()
+
+        elif choice == "7":
 
             break
 

@@ -182,3 +182,24 @@ def get_pending_orders():
     conn.close()
 
     return rows
+
+def mark_pending_completed(
+    pending_id
+):
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    conn.execute(
+        """
+        UPDATE pending_orders
+        SET status='completed'
+        WHERE id=?
+        """,
+        (pending_id,)
+    )
+
+    conn.commit()
+
+    conn.close()
