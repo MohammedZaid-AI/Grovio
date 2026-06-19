@@ -2,9 +2,9 @@ from datetime import datetime
 
 from db import (
     get_orders,
-    save_pending_order
+    save_pending_order,
+    pending_exists
 )
-
 
 def run_scheduler():
 
@@ -135,6 +135,17 @@ def run_scheduler():
             print(
                 product_name
             )
+
+            if pending_exists(
+                product_name,
+                spin_id
+            ):
+
+                print(
+                    "Pending order already exists"
+                )
+
+                continue
 
             save_pending_order(
                 product_name,

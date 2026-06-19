@@ -41,10 +41,29 @@ def init_db():
 
         quantity INTEGER,
 
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP
+        DEFAULT CURRENT_TIMESTAMP,
 
         status TEXT DEFAULT
         'awaiting_confirmation'
+    )
+    """)
+
+    conn.execute("""
+    CREATE TABLE IF NOT EXISTS order_history(
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        product_name TEXT,
+
+        quantity INTEGER,
+
+        amount REAL,
+
+        order_id TEXT,
+
+        ordered_at TIMESTAMP
+        DEFAULT CURRENT_TIMESTAMP
     )
     """)
 
@@ -118,7 +137,10 @@ def get_orders():
     )
 
     rows = conn.execute(
-        "SELECT * FROM orders"
+        """
+        SELECT *
+        FROM orders
+        """
     ).fetchall()
 
     conn.close()
@@ -176,12 +198,14 @@ def get_pending_orders():
         """
         SELECT *
         FROM pending_orders
+        WHERE status='awaiting_confirmation'
         """
     ).fetchall()
 
     conn.close()
 
     return rows
+
 
 def mark_pending_completed(
     pending_id
@@ -203,3 +227,108 @@ def mark_pending_completed(
     conn.commit()
 
     conn.close()
+
+
+def pending_exists(
+
+    product_name,
+
+    spin_id
+):
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM pending_orders
+        WHERE product_name=?
+        AND spin_id=?
+        AND status='awaiting_confirmation'
+        """,
+        (
+            product_name,
+
+            spin_id
+        )
+    ).fetchone()
+
+    conn.close()
+
+    return row is not None
+
+
+def save_order_history(
+
+    product_name,
+
+    quantity,
+
+    amount,
+
+    order_id
+):
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    conn.execute(
+        """
+        INSERT INTO order_history(
+
+            product_name,
+
+            quantity,
+
+            amount,
+
+            order_id
+
+        )
+        VALUES (?, ?, ?, ?)
+        """,
+        (
+            product_name,
+
+            quantity,
+
+            amount,
+
+            order_id
+        )
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+def get_order_history():
+
+    conn = sqlite3.connect(
+        DB_PATH
+    )
+
+    rows = conn.execute(
+        """
+        SELECT *
+        FROM order_history
+        ORDER BY id DESC
+        """
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+if __name__ == "__main__":
+
+    init_db()
+
+    print(
+        "Database initialized successfully"
+    )

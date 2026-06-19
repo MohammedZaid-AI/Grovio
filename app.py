@@ -8,7 +8,9 @@ from db import (
     save_order,
     get_orders,
     get_pending_orders,
-    mark_pending_completed
+    mark_pending_completed,
+    save_order_history,
+    get_order_history
 )
 
 from scheduler import run_scheduler
