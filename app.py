@@ -1,4 +1,6 @@
 import asyncio
+import json
+import re
 
 from agent import parse_order
 from swiggy_mcp import SwiggyInstamart
@@ -393,7 +395,25 @@ async def approve_pending_orders():
     )
 
     print(
-        "\nCHECKOUT RESULT:"
+    "\nCHECKOUT RESULT:"
+    )
+
+    print(result)
+
+    print(
+        "\nSTRUCTURED CONTENT:"
+    )
+
+    print(
+        result.structuredContent
+    )
+
+    print(
+        "\nCONTENT:"
+    )
+
+    print(
+        result.content
     )
 
     print(result)
@@ -402,7 +422,55 @@ async def approve_pending_orders():
         result,
         "isError",
         False
-    ):
+        ):
+
+        order_id = None
+    amount = 0
+
+    if result.structuredContent:
+
+        order_id = result.structuredContent.get(
+            "orderId"
+        )
+
+        amount = result.structuredContent.get(
+            "cartTotal"
+        )
+
+    else:
+
+        try:
+
+            raw_text = result.content[0].text
+
+            json_match = re.search(
+                r"\{.*\}",
+                raw_text,
+                re.DOTALL
+            )
+
+            if json_match:
+
+                data = json.loads(
+                    json_match.group()
+                )
+
+                order_id = data["data"]["orderId"]
+
+                amount = data["data"]["cartTotal"]
+
+        except Exception as e:
+
+            print(
+                f"Could not extract order details: {e}"
+            )
+
+        save_order_history(
+            product_name=selected[1],
+            quantity=selected[3],
+            amount=amount,
+            order_id=order_id
+        )
 
         mark_pending_completed(
             pending_id
@@ -410,6 +478,38 @@ async def approve_pending_orders():
 
         print(
             "\nPending order marked completed."
+        )
+
+        print(
+            "\nSaved to order history."
+        )
+
+def view_order_history():
+
+    rows = get_order_history()
+
+    if not rows:
+
+        print(
+            "\nNo order history."
+        )
+
+        return
+
+    print(
+        "\nORDER HISTORY\n"
+    )
+
+    for row in rows:
+
+        print(
+            f"""
+                Product : {row[1]}
+                Quantity: {row[2]}
+                Amount  : ₹{row[3]}
+                Order ID: {row[4]}
+                Date    : {row[5]}
+                """
         )
 
 async def main():
@@ -426,7 +526,8 @@ async def main():
 4. Run scheduler
 5. View pending orders
 6. Approve pending orders
-7. Exit
+7. Order History
+8. Exit
 """
         )
 
@@ -460,7 +561,13 @@ async def main():
 
         elif choice == "7":
 
+            view_order_history()
+
+        elif choice == "8":
+
             break
+
+
 
 
 if __name__ == "__main__":
