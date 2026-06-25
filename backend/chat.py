@@ -102,8 +102,6 @@ def process_message(message: str):
 
     elif "daily" in message:
 
-        generate_daily_brief()
-
-        return "Daily Brief generated in terminal."
+        return generate_daily_brief()
 
     return "I didn't understand that."

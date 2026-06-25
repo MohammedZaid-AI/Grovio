@@ -26,148 +26,61 @@ def generate_daily_brief():
     total_spend = 0.0
 
     for order in history:
-        # order_history table
-        # (id, product, quantity, amount, order_id, created_at)
-
-        amount = float(order[3])
-
-        total_spend += amount
+        total_spend += float(order[3])
 
     for order in orders:
 
         recurrence = order[6]
 
-        if not recurrence:
-            continue
+        if recurrence:
 
-        days = [
-            day.strip()
-            for day in recurrence.split(",")
-        ]
+            days = [
+                d.strip()
+                for d in recurrence.split(",")
+            ]
 
-        if today in days:
-
-            today_recurring.append(order)
+            if today in days:
+                today_recurring.append(order)
 
     completed_orders = len(history)
 
-    average_order = 0.0
-
-    if completed_orders > 0:
-
-        average_order = (
-            total_spend /
-            completed_orders
-        )
-
-    print()
-    print("=" * 55)
-    print("               GROVIO DAILY BRIEF")
-    print("=" * 55)
-    print()
-
-    print(
-        f"Date                 : "
-        f"{datetime.now().strftime('%d %B %Y')}"
+    average_order = (
+        total_spend / completed_orders
+        if completed_orders
+        else 0
     )
 
-    print(
-        f"Day                  : "
-        f"{today}"
-    )
+    report = f"""🤖 *GROVIO DAILY BRIEF*
 
-    print()
+📅 Date: {datetime.now().strftime('%d %B %Y')}
+📆 Day: {today}
 
-    print("-" * 55)
+📦 Pending Orders: {len(pending_orders)}
+🔁 Recurring Orders: {len(orders)}
+📌 Today's Recurring: {len(today_recurring)}
 
-    print()
+✅ Completed Orders: {completed_orders}
 
-    print(
-        f"Pending Orders       : "
-        f"{len(pending_orders)}"
-    )
+💰 Total Spend: ₹{total_spend:.2f}
+📊 Average Order: ₹{average_order:.2f}
 
-    print(
-        f"Recurring Orders     : "
-        f"{len(orders)}"
-    )
+🧠 AI Insights
+"""
 
-    print(
-        f"Today's Recurring    : "
-        f"{len(today_recurring)}"
-    )
-
-    print(
-        f"Completed Orders     : "
-        f"{completed_orders}"
-    )
-
-    print(
-        f"Restaurant Spend     : "
-        f"₹{total_spend:.2f}"
-    )
-
-    print(
-        f"Average Order Value  : "
-        f"₹{average_order:.2f}"
-    )
-
-    print()
-
-    print("-" * 55)
-
-    print()
-
-    print("AI INSIGHTS")
-    print()
-
-    if len(pending_orders) > 0:
-
-        print(
-            f"✓ {len(pending_orders)} order(s) waiting for approval."
-        )
-
+    if pending_orders:
+        report += f"\n• {len(pending_orders)} pending approval(s)."
     else:
+        report += "\n• No pending approvals."
 
-        print(
-            "✓ No pending approvals."
-        )
-
-    if len(today_recurring) > 0:
-
-        print(
-            f"✓ {len(today_recurring)} recurring order(s) scheduled today."
-        )
-
+    if today_recurring:
+        report += f"\n• {len(today_recurring)} recurring order(s) today."
     else:
+        report += "\n• No recurring orders today."
 
-        print(
-            "✓ No recurring orders scheduled today."
-        )
-
-    if completed_orders > 0:
-
-        print(
-            f"✓ Total procurement spend is ₹{total_spend:.2f}."
-        )
-
-        print(
-            f"✓ Average order value is ₹{average_order:.2f}."
-        )
-
-    else:
-
-        print(
-            "✓ No completed orders yet."
-        )
+    if completed_orders:
+        report += f"\n• Procurement spend: ₹{total_spend:.2f}"
 
     if total_spend > 5000:
+        report += "\n• Spending is unusually high."
 
-        print(
-            "✓ Spending is relatively high. Consider reviewing procurement."
-        )
-
-    print()
-
-    print("=" * 55)
-    print()
+    return report
