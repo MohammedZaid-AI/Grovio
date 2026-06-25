@@ -5,6 +5,9 @@ import re
 from agent import parse_order
 from swiggy_mcp import SwiggyInstamart
 
+from ai.daily_brief import (
+    generate_daily_brief
+)
 
 from db import (
     save_order,
@@ -513,6 +516,8 @@ def view_order_history():
         )
 
 async def main():
+
+    generate_daily_brief()
 
     while True:
 
