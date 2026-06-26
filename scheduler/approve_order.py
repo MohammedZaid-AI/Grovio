@@ -1,7 +1,7 @@
 import asyncio
 
 from db import get_pending_orders
-from swiggy_mcp import SwiggyInstamart
+from mcp.swiggy_mcp import SwiggyInstamart
 
 
 async def main():

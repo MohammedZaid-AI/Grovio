@@ -1,4 +1,4 @@
-from ai.memory import RestaurantMemory
+from ai.intelligence.memory import RestaurantMemory
 
 memory = RestaurantMemory()
 

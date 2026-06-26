@@ -1,6 +1,6 @@
-from ai.daily_brief import generate_daily_brief
-from ai.procurement_forecaster import ProcurementForecaster
-from ai.pattern_detector import PatternDetector
+from ai.reports.daily_brief import generate_daily_brief
+from ai.agents.procurement_forecaster import ProcurementForecaster
+from ai.intelligence.pattern_detector import PatternDetector
 from db import get_order_history, get_pending_orders
 
 

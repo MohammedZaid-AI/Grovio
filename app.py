@@ -3,9 +3,9 @@ import json
 import re
 
 from agent import parse_order
-from swiggy_mcp import SwiggyInstamart
+from mcp.swiggy_mcp import SwiggyInstamart
 
-from ai.daily_brief import (
+from ai.reports.daily_brief import (
     generate_daily_brief
 )
 
@@ -18,7 +18,7 @@ from db import (
     get_order_history
 )
 
-from scheduler import run_scheduler
+from scheduler.scheduler import run_scheduler
 
 
 async def order_now():

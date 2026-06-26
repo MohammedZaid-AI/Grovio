@@ -1,5 +1,5 @@
 import asyncio
-from swiggy_mcp import SwiggyInstamart
+from mcp.swiggy_mcp import SwiggyInstamart
 
 async def main():
 

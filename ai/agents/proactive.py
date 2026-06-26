@@ -1,7 +1,7 @@
-from ai.memory import RestaurantMemory
-from ai.procurement_forecaster import ProcurementForecaster
-from ai.pattern_detector import PatternDetector
-from ai.daily_brief import generate_daily_brief
+from ai.intelligence.memory import RestaurantMemory
+from ai.agents.procurement_forecaster import ProcurementForecaster
+from ai.intelligence.pattern_detector import PatternDetector
+from ai.reports.daily_brief import generate_daily_brief
 
 
 class ProactiveCOO:
