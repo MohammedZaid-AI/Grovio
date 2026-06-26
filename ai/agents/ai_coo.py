@@ -1,15 +1,11 @@
 import json
-import os
 
-from dotenv import load_dotenv
-from groq import Groq
+from core.llm import llm
 
 from ai.intelligence.memory import RestaurantMemory
 from ai.intelligence.pattern_detector import PatternDetector
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.reports.daily_brief import generate_daily_brief
-
-load_dotenv()
 
 
 class AICOO:
@@ -20,25 +16,22 @@ class AICOO:
 
     It never talks directly to the database.
 
-    It receives structured context
-    from other intelligence modules.
+    It receives structured context from the
+    intelligence layer and produces executive
+    insights for the restaurant owner.
     """
 
     def __init__(self):
 
-        self.client = Groq(
+        self.memory = RestaurantMemory()
 
-            api_key=os.getenv(
+        self.patterns = PatternDetector()
 
-                "GROQ_API_KEY"
+        self.forecaster = ProcurementForecaster()
 
-            )
-
-        )
-
-    # -----------------------------------
-    # Build Restaurant Context
-    # -----------------------------------
+    # --------------------------------------------------
+    # Build Context
+    # --------------------------------------------------
 
     def build_context(self):
 
@@ -46,15 +39,15 @@ class AICOO:
 
             "memory":
 
-                RestaurantMemory().execute(),
+                self.memory.execute(),
 
             "patterns":
 
-                PatternDetector().execute(),
+                self.patterns.execute(),
 
             "forecast":
 
-                ProcurementForecaster().execute(),
+                self.forecaster.execute(),
 
             "daily_brief":
 
@@ -62,34 +55,29 @@ class AICOO:
 
         }
 
-    # -----------------------------------
+    # --------------------------------------------------
     # AI Analysis
-    # -----------------------------------
+    # --------------------------------------------------
 
     def analyze(self):
 
         context = self.build_context()
 
         prompt = f"""
-You are the AI COO of a restaurant.
+You are Grovio AI COO.
 
-Below is the current restaurant context.
+Below is the complete restaurant context.
 
 {json.dumps(context, indent=2, default=str)}
 
-Your job is to act like an experienced restaurant COO.
+You are NOT allowed to invent information.
 
-ONLY use the supplied data.
+Only use the supplied context.
 
-Never invent information.
+Your responsibility is to think like an experienced
+Restaurant COO.
 
-Never assume inventory.
-
-Never assume suppliers.
-
-Never assume profits.
-
-Produce a structured report with these sections.
+Generate a report using the following sections.
 
 1. Executive Summary
 
@@ -99,66 +87,57 @@ Produce a structured report with these sections.
 
 4. Procurement Forecast
 
-5. Risks
+5. Business Risks
 
 6. Opportunities
 
 7. Recommendations
 
-8. Suggested Actions For Tomorrow
+8. Actions For Tomorrow
 
-Keep the response practical.
+Rules:
 
-Use bullet points whenever possible.
+• Never invent suppliers.
+• Never invent inventory.
+• Never invent profits.
+• Never invent menu items.
+• Mention when historical data is limited.
+• Keep recommendations practical.
+• Use bullet points.
 """
 
-        response = self.client.chat.completions.create(
+        analysis = llm.chat(
 
-            model="openai/gpt-oss-20b",
+            system="""
+You are an experienced Restaurant COO.
 
-            temperature=0.2,
+You analyse restaurant operations,
+procurement,
+inventory,
+and purchasing behaviour.
 
-            messages=[
+Always answer using the provided context only.
+""",
 
-                {
-
-                    "role": "system",
-
-                    "content": "You are an experienced restaurant COO."
-
-                },
-
-                {
-
-                    "role": "user",
-
-                    "content": prompt
-
-                }
-
-            ]
+            user=prompt
 
         )
 
         return {
 
-            "context": context,
+            "context":
+
+                context,
 
             "analysis":
 
-                response
-
-                .choices[0]
-
-                .message
-
-                .content
+                analysis
 
         }
 
-    # -----------------------------------
-    # CLI Report
-    # -----------------------------------
+    # --------------------------------------------------
+    # CLI Formatter
+    # --------------------------------------------------
 
     def format_report(self):
 
@@ -168,7 +147,7 @@ Use bullet points whenever possible.
 
         report.append("=" * 70)
 
-        report.append("              GROVIO AI COO")
+        report.append("                 GROVIO AI COO")
 
         report.append("=" * 70)
 

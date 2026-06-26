@@ -2,7 +2,7 @@ from ai.intelligence.memory import RestaurantMemory
 from ai.intelligence.pattern_detector import PatternDetector
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.reports.daily_brief import generate_daily_brief
-
+from ai.intelligence.inventory import Inventory
 
 class DecisionEngine:
 
@@ -23,6 +23,8 @@ class DecisionEngine:
         self.patterns = PatternDetector()
 
         self.forecast = ProcurementForecaster()
+
+        self.inventory = Inventory()
 
     # ------------------------------------
     # Restaurant Health
@@ -90,6 +92,42 @@ class DecisionEngine:
 
         }
 
+    def inventory_decision(self):
+
+        inventory = self.inventory.execute()
+
+        if inventory["health_score"] >= 90:
+
+            status = "Excellent"
+
+        elif inventory["health_score"] >= 70:
+
+            status = "Good"
+
+        elif inventory["health_score"] >= 50:
+
+            status = "Needs Attention"
+
+        else:
+
+            status = "Critical"
+
+        return {
+
+            "health_score":
+
+                inventory["health_score"],
+
+            "status":
+
+                status,
+
+            "low_stock":
+
+                inventory["low_stock"]
+
+        }
+
     # ------------------------------------
     # Forecast Decision
     # ------------------------------------
@@ -147,6 +185,16 @@ class DecisionEngine:
                 "Pending approvals require attention."
 
             )
+        
+        inventory = self.inventory.execute()
+
+        if inventory["low_stock"]:
+
+            risks.append(
+
+                f"{len(inventory['low_stock'])} item(s) are below minimum stock."
+
+            )
 
         if memory["restaurant_spend"] > 5000:
 
@@ -157,6 +205,8 @@ class DecisionEngine:
             )
 
         return risks
+
+    
 
     # ------------------------------------
     # Business Opportunities
@@ -176,6 +226,17 @@ class DecisionEngine:
 
             )
 
+        inventory = self.inventory.execute()
+
+        if inventory["health_score"] > 80:
+
+            opportunities.append(
+
+                "Inventory levels are healthy."
+
+            )
+
+
         if len(patterns["top_products"]) > 0:
 
             opportunities.append(
@@ -185,6 +246,8 @@ class DecisionEngine:
             )
 
         return opportunities
+
+        
 
     # ------------------------------------
     # AI Context
@@ -212,7 +275,11 @@ class DecisionEngine:
 
             "opportunities":
 
-                self.opportunities()
+                self.opportunities(),
+
+            "inventory":
+
+                self.inventory_decision()
 
         }
 

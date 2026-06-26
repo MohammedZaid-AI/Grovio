@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Form
 from fastapi.responses import PlainTextResponse
-
+from ai.langgraph.graph import graph
 from backend.chat import process_message
 
 router = APIRouter()
@@ -12,6 +12,23 @@ async def webhook(
     Body: str = Form(...)
 ):
 
-    reply = process_message(Body)
+
+    result = graph.invoke(
+
+        {
+
+            "message": message,
+
+            "selected_agents": [],
+
+            "results": {},
+
+            "response": ""
+
+        }
+
+    )
+
+    reply = result["response"]
 
     return PlainTextResponse(reply)

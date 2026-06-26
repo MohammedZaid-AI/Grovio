@@ -138,8 +138,8 @@ def init_db():
     """)
 
     # --------------------------------------------------
-    # Product Price History
-    # --------------------------------------------------
+# Product Price History
+# --------------------------------------------------
 
     cursor.execute("""
     CREATE TABLE IF NOT EXISTS product_price_history(
@@ -157,9 +157,33 @@ def init_db():
     )
     """)
 
+    # --------------------------------------------------
+    # Inventory
+    # --------------------------------------------------
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS inventory(
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        product_name TEXT UNIQUE,
+
+        current_stock REAL,
+
+        minimum_stock REAL,
+
+        unit TEXT,
+
+        updated_at TIMESTAMP
+        DEFAULT CURRENT_TIMESTAMP
+
+    )
+    """)
+
+    # Close connection ONLY AFTER all tables are created
+
     conn.commit()
     conn.close()
-
 
 # ======================================================
 # ORDERS
@@ -966,6 +990,172 @@ def get_dashboard_stats():
             len(get_all_products())
 
     }
+
+# ======================================================
+# INVENTORY
+# ======================================================
+
+def save_inventory(
+
+    product_name,
+
+    current_stock,
+
+    minimum_stock,
+
+    unit
+
+):
+
+    conn = get_connection()
+
+    conn.execute(
+
+        """
+        INSERT OR REPLACE INTO inventory(
+
+            product_name,
+
+            current_stock,
+
+            minimum_stock,
+
+            unit
+
+        )
+
+        VALUES (?, ?, ?, ?)
+        """,
+
+        (
+
+            product_name,
+
+            current_stock,
+
+            minimum_stock,
+
+            unit
+
+        )
+
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+def update_inventory(
+
+    product_name,
+
+    quantity_change
+
+):
+
+    conn = get_connection()
+
+    conn.execute(
+
+        """
+        UPDATE inventory
+
+        SET
+
+            current_stock = current_stock + ?,
+
+            updated_at = CURRENT_TIMESTAMP
+
+        WHERE product_name=?
+        """,
+
+        (
+
+            quantity_change,
+
+            product_name
+
+        )
+
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+def get_inventory():
+
+    conn = get_connection()
+
+    rows = conn.execute(
+
+        """
+        SELECT *
+
+        FROM inventory
+
+        ORDER BY product_name
+        """
+
+    ).fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def get_product_inventory(
+
+    product_name
+
+):
+
+    conn = get_connection()
+
+    row = conn.execute(
+
+        """
+        SELECT *
+
+        FROM inventory
+
+        WHERE product_name=?
+        """,
+
+        (
+
+            product_name,
+
+        )
+
+    ).fetchone()
+
+    conn.close()
+
+    return row
+
+
+def get_low_stock_items():
+
+    conn = get_connection()
+
+    rows = conn.execute(
+
+        """
+        SELECT *
+
+        FROM inventory
+
+        WHERE current_stock <= minimum_stock
+        """
+
+    ).fetchall()
+
+    conn.close()
+
+    return rows
 
 
 if __name__ == "__main__":
