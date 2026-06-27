@@ -2,6 +2,16 @@ from db import get_price_history
 
 
 class PriceTracker:
+    """
+    Price Intelligence.
+
+    Responsible for analyzing
+    product price history.
+    """
+
+    # -----------------------------------
+    # Price Analysis
+    # -----------------------------------
 
     def analyze(self, product):
 
@@ -49,29 +59,48 @@ class PriceTracker:
 
         return f"{product} price unchanged."
 
-        def latest_price(self, product):
-            """
-            Returns the latest known price
-            for a product.
+    # -----------------------------------
+    # Latest Price
+    # -----------------------------------
 
-            Used by the Purchase Order Generator.
-            """
+    def latest_price(self, product):
+        """
+        Returns the latest known price
+        of a product.
+        """
 
-            history = get_price_history(product)
+        history = get_price_history(product)
 
-            if not history:
+        if not history:
 
-                return 0.0
+            return 0.0
 
-            return history[0][1]
+        return history[0][1]
+
 
 if __name__ == "__main__":
 
     tracker = PriceTracker()
 
+    print()
+
     print(
 
         tracker.analyze(
+
+            "Nandini Milk"
+
+        )
+
+    )
+
+    print()
+
+    print(
+
+        "Latest Price:",
+
+        tracker.latest_price(
 
             "Nandini Milk"
 

@@ -1,6 +1,7 @@
 import sqlite3
 
 DB_PATH = "database/orders.db"
+from database import *
 
 
 def get_connection():
@@ -176,6 +177,45 @@ def init_db():
 
         updated_at TIMESTAMP
         DEFAULT CURRENT_TIMESTAMP
+
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS purchase_orders(
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        supplier TEXT NOT NULL,
+
+        status TEXT DEFAULT 'DRAFT',
+
+        total_amount REAL DEFAULT 0,
+
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+
+    )
+    """)
+
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS purchase_order_items(
+
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+        purchase_order_id INTEGER,
+
+        product TEXT,
+
+        quantity REAL,
+
+        unit TEXT,
+
+        estimated_price REAL,
+
+        subtotal REAL,
+
+        FOREIGN KEY(purchase_order_id)
+            REFERENCES purchase_orders(id)
 
     )
     """)
@@ -487,6 +527,105 @@ def get_order_history():
         """
 
     ).fetchall()
+
+    conn.close()
+
+    return rows
+
+def create_purchase_order(
+    supplier,
+    total_amount
+):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO purchase_orders(
+            supplier,
+            total_amount
+        )
+        VALUES(?,?)
+        """,
+        (
+            supplier,
+            total_amount
+        )
+    )
+
+    purchase_order_id = cursor.lastrowid
+
+    conn.commit()
+
+    conn.close()
+
+    return purchase_order_id
+
+def add_purchase_order_item(
+    purchase_order_id,
+    product,
+    quantity,
+    unit,
+    estimated_price,
+    subtotal
+):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO purchase_order_items(
+
+            purchase_order_id,
+            product,
+            quantity,
+            unit,
+            estimated_price,
+            subtotal
+
+        )
+        VALUES(?,?,?,?,?,?)
+        """,
+        (
+            purchase_order_id,
+            product,
+            quantity,
+            unit,
+            estimated_price,
+            subtotal
+        )
+    )
+
+    conn.commit()
+
+    conn.close()
+
+def get_purchase_orders():
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    cursor.execute("""
+
+        SELECT
+            id,
+            supplier,
+            status,
+            total_amount,
+            created_at
+
+        FROM purchase_orders
+
+        ORDER BY created_at DESC
+
+    """)
+
+    rows = cursor.fetchall()
 
     conn.close()
 
@@ -1156,6 +1295,57 @@ def get_low_stock_items():
     conn.close()
 
     return rows
+
+# ======================================================
+# PURCHASE ORDER APPROVAL
+# ======================================================
+
+def approve_purchase_order(purchase_order_id):
+
+    conn = get_connection()
+
+    conn.execute(
+        """
+        UPDATE purchase_orders
+
+        SET status='APPROVED'
+
+        WHERE id=?
+        """,
+
+        (purchase_order_id,)
+    )
+
+    conn.commit()
+
+    conn.close()
+
+
+def get_latest_purchase_order():
+
+    conn = get_connection()
+
+    row = conn.execute(
+        """
+        SELECT
+
+            id,
+            supplier,
+            status,
+            total_amount,
+            created_at
+
+        FROM purchase_orders
+
+        ORDER BY id DESC
+
+        LIMIT 1
+        """
+    ).fetchone()
+
+    conn.close()
+
+    return row
 
 
 if __name__ == "__main__":

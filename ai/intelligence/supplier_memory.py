@@ -9,10 +9,24 @@ from db import (
 
 
 class SupplierMemory:
+    """
+    Supplier Intelligence.
+
+    Responsible for analyzing supplier
+    performance, pricing and recommendations.
+    """
+
+    # -----------------------------------
+    # All Suppliers
+    # -----------------------------------
 
     def get_all_suppliers(self):
 
         return get_top_suppliers()
+
+    # -----------------------------------
+    # Supplier Summary
+    # -----------------------------------
 
     def supplier_summary(self, supplier):
 
@@ -24,7 +38,9 @@ class SupplierMemory:
 
         for product in get_all_products():
 
-            prices = get_supplier_prices(product)
+            prices = get_supplier_prices(
+                product
+            )
 
             for s, price in prices:
 
@@ -51,6 +67,10 @@ class SupplierMemory:
 
         }
 
+    # -----------------------------------
+    # Cheapest Supplier Per Product
+    # -----------------------------------
+
     def cheapest_products(self):
 
         cheapest = []
@@ -66,16 +86,22 @@ class SupplierMemory:
                 cheapest.append(
 
                     {
+
                         "product": product,
 
                         "supplier": supplier[0],
 
                         "price": supplier[1]
+
                     }
 
                 )
 
         return cheapest
+
+    # -----------------------------------
+    # Supplier Score
+    # -----------------------------------
 
     def supplier_score(self, supplier):
 
@@ -94,6 +120,10 @@ class SupplierMemory:
             score -= 10
 
         return score
+
+    # -----------------------------------
+    # Supplier Report
+    # -----------------------------------
 
     def supplier_report(self):
 
@@ -115,51 +145,56 @@ class SupplierMemory:
                         supplier[0]
                     ),
 
-                    "summary":
-
-                        self.supplier_summary(
-                            supplier[0]
-                        )
+                    "summary": self.supplier_summary(
+                        supplier[0]
+                    )
 
                 }
 
             )
 
         return report
-        
-        def best_supplier(self, product):
-            """
-            Returns the recommended supplier
-            for a given product.
 
-            Currently selects the supplier
-            offering the cheapest price.
+    # -----------------------------------
+    # Best Supplier
+    # -----------------------------------
 
-            Later this can include:
-            - delivery reliability
-            - supplier score
-            - quality rating
-            """
+    def best_supplier(self, product):
+        """
+        Returns the recommended supplier
+        for a product.
 
-            supplier = get_cheapest_supplier(product)
+        Currently chooses the supplier
+        with the cheapest known price.
 
-            if supplier is None:
+        Later this can include:
+        - Supplier score
+        - Delivery reliability
+        - Quality rating
+        - Historical performance
+        """
 
-                return {
+        supplier = get_cheapest_supplier(
+            product
+        )
 
-                    "name": "Unknown Supplier",
-
-                    "price": 0
-
-                }
+        if supplier is None:
 
             return {
 
-                "name": supplier[0],
+                "name": "Unknown Supplier",
 
-                "price": supplier[1]
+                "price": 0
 
-            }    
+            }
+
+        return {
+
+            "name": supplier[0],
+
+            "price": supplier[1]
+
+        }
 
 
 if __name__ == "__main__":
@@ -169,45 +204,45 @@ if __name__ == "__main__":
     print()
 
     print("=" * 60)
-
     print("SUPPLIER REPORT")
-
     print("=" * 60)
-
     print()
 
     for supplier in memory.supplier_report():
 
         print(
-
             supplier["supplier"]
-
         )
 
         print(
-
             "Orders :",
-
             supplier["orders"]
-
         )
 
         print(
-
             "Score :",
-
             supplier["score"]
-
         )
 
         print(
-
             "Spend : ₹",
-
             supplier["summary"]["total_spend"]
-
         )
 
         print()
 
     print("=" * 60)
+
+    print()
+
+    print("Best Supplier For Milk")
+
+    print(
+
+        memory.best_supplier(
+
+            "Milk"
+
+        )
+
+    )

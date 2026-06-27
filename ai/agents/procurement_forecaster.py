@@ -1,51 +1,50 @@
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import datetime
 
-from ai.intelligence.memory import RestaurantMemory
+from ai.intelligence.procurement_memory import ProcurementMemory
 
 
 class ProcurementForecaster:
-
     """
-    Predicts upcoming procurement needs
-    using historical purchasing behaviour.
+    Forecasts future procurement
+    using purchase invoice history.
     """
 
     def __init__(self):
 
-        self.memory = RestaurantMemory()
+        self.memory = ProcurementMemory()
 
-    # ---------------------------------------
-    # Forecast Engine
-    # ---------------------------------------
+    # -----------------------------------
+    # Forecast
+    # -----------------------------------
 
     def forecast(self):
 
-        history = self.memory.history
-
-        if not history:
-
-            return []
-
         counter = Counter()
 
-        for order in history:
+        total = 0
 
-            product = order[1]
+        for product in self.memory.products:
 
-            quantity = order[2]
+            history = self.memory.product_history(product)
+
+            quantity = len(history)
 
             counter[product] += quantity
 
-        recommendations = []
+            total += quantity
 
-        total_orders = len(history)
+        if total == 0:
+
+            return []
+
+        recommendations = []
 
         for product, quantity in counter.items():
 
             probability = round(
 
-                (quantity / total_orders) * 100,
+                (quantity / total) * 100,
 
                 2
 
@@ -55,33 +54,18 @@ class ProcurementForecaster:
 
                 {
 
-                    "product":
+                    "product": product,
 
-                        product,
+                    "purchase_probability": probability,
 
-                    "purchase_probability":
-
-                        probability,
-
-                    "recommended_quantity":
-
-                        max(
-
-                            1,
-
-                            round(
-
-                                quantity /
-
-                                total_orders
-
-                            )
-
-                        ),
+                    "recommended_quantity": max(
+                        1,
+                        quantity
+                    ),
 
                     "reason":
 
-                        f"Purchased {quantity} unit(s) in {total_orders} historical orders."
+                        f"Purchased {quantity} time(s) previously."
 
                 }
 
@@ -89,9 +73,7 @@ class ProcurementForecaster:
 
         recommendations.sort(
 
-            key=lambda item:
-
-                item["purchase_probability"],
+            key=lambda x: x["purchase_probability"],
 
             reverse=True
 
@@ -99,35 +81,31 @@ class ProcurementForecaster:
 
         return recommendations
 
-    # ---------------------------------------
-    # Confidence Score
-    # ---------------------------------------
+    # -----------------------------------
+    # Confidence
+    # -----------------------------------
 
     def confidence_score(self):
 
-        total_orders = self.memory.total_completed_orders()
+        invoices = self.memory.total_invoices()
 
-        if total_orders == 0:
-
+        if invoices == 0:
             return 0
 
-        if total_orders < 5:
-
+        if invoices < 5:
             return 30
 
-        if total_orders < 20:
-
+        if invoices < 20:
             return 60
 
-        if total_orders < 50:
-
+        if invoices < 50:
             return 80
 
         return 95
 
-    # ---------------------------------------
-    # AI Context
-    # ---------------------------------------
+    # -----------------------------------
+    # Execute
+    # -----------------------------------
 
     def execute(self):
 
@@ -155,87 +133,15 @@ class ProcurementForecaster:
 
         }
 
-    # ---------------------------------------
-    # CLI Formatter
-    # ---------------------------------------
-
-    def format_report(self):
-
-        data = self.execute()
-
-        report = []
-
-        report.append("=" * 60)
-
-        report.append("        GROVIO PROCUREMENT FORECAST")
-
-        report.append("=" * 60)
-
-        report.append("")
-
-        report.append(
-
-            f"Forecast Window : {data['forecast_window']}"
-
-        )
-
-        report.append(
-
-            f"Confidence      : {data['confidence']}%"
-
-        )
-
-        report.append("")
-
-        if not data["recommended_orders"]:
-
-            report.append(
-
-                "No purchase history available."
-
-            )
-
-        else:
-
-            for item in data["recommended_orders"]:
-
-                report.append(
-
-                    item["product"]
-
-                )
-
-                report.append(
-
-                    f"Purchase Probability : {item['purchase_probability']}%"
-
-                )
-
-                report.append(
-
-                    f"Suggested Quantity   : {item['recommended_quantity']}"
-
-                )
-
-                report.append(
-
-                    f"Reason               : {item['reason']}"
-
-                )
-
-                report.append("")
-
-        report.append("=" * 60)
-
-        return "\n".join(report)
-
 
 if __name__ == "__main__":
 
+    from pprint import pprint
+
     forecaster = ProcurementForecaster()
 
-    print(
+    pprint(
 
-        forecaster.format_report()
+        forecaster.execute()
 
     )

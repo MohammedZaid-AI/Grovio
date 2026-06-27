@@ -5,7 +5,7 @@ from ai.procurement.purchase_order import (
     PurchaseOrderItem
 )
 
-from ai.intelligence.inventory import InventoryIntelligence
+from ai.intelligence.inventory import Inventory
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.intelligence.supplier_memory import SupplierMemory
 from ai.intelligence.price_tracker import PriceTracker
@@ -23,7 +23,7 @@ class PurchaseOrderGenerator:
 
     def __init__(self):
 
-        self.inventory = InventoryIntelligence()
+        self.inventory = Inventory()
 
         self.forecast = ProcurementForecaster()
 
