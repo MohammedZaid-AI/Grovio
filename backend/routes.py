@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Form
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
-
-from ai.langgraph.graph import graph
+from backend.conversation_engine import engine
+from backend.chat import process_message
 from ai.invoice.pipeline import InvoicePipeline
 
 router = APIRouter()
@@ -10,9 +10,9 @@ router = APIRouter()
 pipeline = InvoicePipeline()
 
 
-# ----------------------------------------
-# Twilio Response Helper
-# ----------------------------------------
+# -------------------------------------------------------
+# Twilio WhatsApp Response
+# -------------------------------------------------------
 
 def whatsapp_reply(message: str):
 
@@ -29,9 +29,9 @@ def whatsapp_reply(message: str):
     )
 
 
-# ----------------------------------------
+# -------------------------------------------------------
 # WhatsApp Webhook
-# ----------------------------------------
+# -------------------------------------------------------
 
 @router.post("/webhook")
 async def webhook(
@@ -46,19 +46,21 @@ async def webhook(
 
 ):
 
-    print("=" * 70)
-    print("Incoming WhatsApp Message")
-    print("Body:", Body)
+    print("\n" + "=" * 70)
+    print("📩 Incoming WhatsApp Message")
+    print("Body :", Body)
     print("Media:", NumMedia)
     print("=" * 70)
 
-    # ----------------------------------------
+    # -------------------------------------------------------
     # Invoice Processing
-    # ----------------------------------------
+    # -------------------------------------------------------
 
     if NumMedia > 0:
 
         try:
+
+            print("Processing Invoice...")
 
             result = pipeline.process(
 
@@ -72,8 +74,8 @@ async def webhook(
 
                 reply = (
                     "✅ Invoice processed successfully.\n\n"
-                    "Inventory updated.\n"
-                    "Price history updated."
+                    "Inventory has been updated.\n"
+                    "Price history has been updated."
                 )
 
             else:
@@ -94,41 +96,28 @@ async def webhook(
 
         return whatsapp_reply(reply)
 
-    # ----------------------------------------
+    # -------------------------------------------------------
     # AI Conversation
-    # ----------------------------------------
+    # -------------------------------------------------------
 
     try:
 
-        result = graph.invoke(
+        reply = engine.process(
 
-            {
+            phone="restaurant",
 
-                "message": Body,
-
-                "selected_agents": [],
-
-                "results": {},
-
-                "response": ""
-
-            }
+            message=Body
 
         )
 
-        print("\nLangGraph Result")
-        print(result)
-        print()
+        if not reply:
 
-        reply = result.get(
+            reply = (
+                "Sorry, I couldn't understand your request."
+            )
 
-            "response",
+        # WhatsApp-friendly limit
 
-            "Sorry, I couldn't generate a response."
-
-        )
-
-        # WhatsApp messages shouldn't be huge
         MAX_LENGTH = 1400
 
         if len(reply) > MAX_LENGTH:
@@ -137,18 +126,22 @@ async def webhook(
 
                 reply[:MAX_LENGTH]
 
-                + "\n\n...Reply 'continue' to receive more."
+                + "\n\nReply *continue* for the remaining report."
 
             )
+
+        print("\nReply Sent\n")
+        print(reply)
 
         return whatsapp_reply(reply)
 
     except Exception as e:
 
-        print("Graph Error:", e)
+        print("\nConversation Error\n")
+        print(e)
 
         return whatsapp_reply(
 
-            "❌ Grovio encountered an unexpected error while processing your request."
+            "❌ Grovio encountered an unexpected error."
 
         )

@@ -1,107 +1,165 @@
+from ai.conversation.intent_router import IntentRouter
+from ai.conversation.formatter import WhatsAppFormatter
+
 from ai.reports.daily_brief import generate_daily_brief
+from ai.intelligence.inventory import InventoryIntelligence
 from ai.agents.procurement_forecaster import ProcurementForecaster
-from ai.intelligence.pattern_detector import PatternDetector
-from db import get_order_history, get_pending_orders
+from ai.agents.ai_coo import AICOO
+from ai.intelligence.decision_engine import DecisionEngine
+
+
+router = IntentRouter()
+
+formatter = WhatsAppFormatter()
 
 
 def process_message(message: str):
 
-    message = message.lower().strip()
+    intent = router.detect(message)
 
-    if message in ["hi", "hello", "hey"]:
+    print()
 
-        return (
-            "🤖 Welcome to Grovio\n\n"
-            "Commands:\n"
-            "• forecast\n"
-            "• patterns\n"
-            "• history\n"
-            "• pending\n"
-            "• daily brief"
+    print("=" * 60)
+
+    print("Intent :", intent)
+
+    print("=" * 60)
+
+    print()
+
+    # -----------------------------------
+    # Welcome
+    # -----------------------------------
+
+    if intent == "menu":
+
+        return formatter.welcome()
+
+    # -----------------------------------
+    # Help
+    # -----------------------------------
+
+    if intent == "help":
+
+        return formatter.help()
+
+    # -----------------------------------
+    # Daily Brief
+    # -----------------------------------
+
+    if intent == "daily_brief":
+
+        brief = generate_daily_brief()
+
+        reply = (
+            "📊 *Today's Restaurant Brief*\n\n"
+            f"Orders : {brief['completed_orders']}\n"
+            f"Pending : {brief['pending_orders']}\n"
+            f"Spend : ₹{brief['restaurant_spend']}\n"
+            f"Average Order : ₹{brief['average_order']}\n\n"
         )
 
-    elif "forecast" in message:
+        if brief["insights"]:
 
-        forecasts = ProcurementForecaster().forecast()
+            reply += "Insights\n"
 
-        if not forecasts:
-            return "No purchase history."
+            for item in brief["insights"]:
 
-        reply = "📦 Procurement Forecast\n\n"
+                reply += f"• {item}\n"
 
-        for item in forecasts:
+        return reply
+
+    # -----------------------------------
+    # Inventory
+    # -----------------------------------
+
+    if intent == "inventory":
+
+        inventory = InventoryIntelligence().execute()
+
+        reply = (
+            "📦 *Inventory Status*\n\n"
+            f"Health : {inventory['health_score']}%\n"
+            f"Status : {inventory['status']}\n\n"
+        )
+
+        if inventory["low_stock"]:
+
+            reply += "⚠️ Low Stock\n"
+
+            for item in inventory["low_stock"]:
+
+                reply += (
+                    f"• {item['product']} "
+                    f"({item['stock']} {item['unit']})\n"
+                )
+
+        else:
+
+            reply += "Everything looks healthy."
+
+        return reply
+
+    # -----------------------------------
+    # Forecast
+    # -----------------------------------
+
+    if intent == "forecast":
+
+        forecast = ProcurementForecaster().execute()
+
+        reply = (
+            "📈 *Procurement Forecast*\n\n"
+            f"Confidence : {forecast['confidence']}%\n\n"
+        )
+
+        for item in forecast["recommended_orders"]:
 
             reply += (
                 f"• {item['product']}\n"
-                f"Probability: {item['probability']}%\n"
-                f"Qty: {item['recommended_quantity']}\n\n"
+                f"Qty : {item['recommended_quantity']}\n"
+                f"Probability : {item['purchase_probability']}%\n\n"
             )
 
         return reply
 
-    elif "pattern" in message:
+    # -----------------------------------
+    # Decision Engine
+    # -----------------------------------
 
-        detector = PatternDetector()
+    if intent == "decision":
 
-        patterns = detector.detect_day_patterns()
+        decision = DecisionEngine().execute()
 
-        if not patterns:
-            return "No patterns found."
+        reply = (
+            "🧠 *Business Decision*\n\n"
+            f"Health : {decision['restaurant_health']['status']}\n\n"
+        )
 
-        reply = "🧠 Purchase Patterns\n\n"
+        if decision["risks"]:
 
-        for p in patterns:
+            reply += "Risks\n"
 
-            reply += (
-                f"{p['product']}\n"
-                f"Usually: {p['day']}\n"
-                f"Confidence: {p['confidence']}%\n\n"
-            )
+            for risk in decision["risks"]:
 
-        return reply
-
-    elif "history" in message:
-
-        history = get_order_history()
-
-        if not history:
-            return "No order history."
-
-        reply = "📜 Order History\n\n"
-
-        for h in history:
-
-            reply += (
-                f"{h[1]}\n"
-                f"₹{h[3]}\n"
-                f"{h[5]}\n\n"
-            )
+                reply += f"• {risk}\n"
 
         return reply
 
-    elif "pending" in message:
+    # -----------------------------------
+    # Full COO Report
+    # -----------------------------------
 
-        pending = [
-            p
-            for p in get_pending_orders()
-            if p[5] == "awaiting_confirmation"
-        ]
+    if intent == "report":
 
-        if not pending:
-            return "✅ No pending orders."
+        report = AICOO().analyze()
 
-        reply = "⏳ Pending Orders\n\n"
+        return report["analysis"]
 
-        for p in pending:
+    # -----------------------------------
+    # General Chat
+    # -----------------------------------
 
-            reply += (
-                f"{p[0]}. {p[1]} x{p[3]}\n"
-            )
+    report = AICOO().analyze()
 
-        return reply
-
-    elif "daily" in message:
-
-        return generate_daily_brief()
-
-    return "I didn't understand that."
+    return report["analysis"]

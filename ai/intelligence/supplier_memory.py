@@ -126,6 +126,40 @@ class SupplierMemory:
             )
 
         return report
+        
+        def best_supplier(self, product):
+            """
+            Returns the recommended supplier
+            for a given product.
+
+            Currently selects the supplier
+            offering the cheapest price.
+
+            Later this can include:
+            - delivery reliability
+            - supplier score
+            - quality rating
+            """
+
+            supplier = get_cheapest_supplier(product)
+
+            if supplier is None:
+
+                return {
+
+                    "name": "Unknown Supplier",
+
+                    "price": 0
+
+                }
+
+            return {
+
+                "name": supplier[0],
+
+                "price": supplier[1]
+
+            }    
 
 
 if __name__ == "__main__":

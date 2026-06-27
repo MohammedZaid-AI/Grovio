@@ -49,6 +49,21 @@ class PriceTracker:
 
         return f"{product} price unchanged."
 
+        def latest_price(self, product):
+            """
+            Returns the latest known price
+            for a product.
+
+            Used by the Purchase Order Generator.
+            """
+
+            history = get_price_history(product)
+
+            if not history:
+
+                return 0.0
+
+            return history[0][1]
 
 if __name__ == "__main__":
 
