@@ -2,7 +2,7 @@ from ai.conversation.intent_router import IntentRouter
 from ai.conversation.formatter import WhatsAppFormatter
 
 from ai.reports.daily_brief import generate_daily_brief
-from ai.intelligence.inventory import InventoryIntelligence
+from ai.intelligence.inventory import Inventory
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.agents.ai_coo import AICOO
 from ai.intelligence.decision_engine import DecisionEngine
@@ -75,7 +75,7 @@ def process_message(message: str):
 
     if intent == "inventory":
 
-        inventory = InventoryIntelligence().execute()
+        inventory = Inventory().execute()
 
         reply = (
             "📦 *Inventory Status*\n\n"

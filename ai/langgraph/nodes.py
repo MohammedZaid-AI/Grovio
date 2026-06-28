@@ -24,7 +24,17 @@ def execute_agents(state):
 
     for agent in state["selected_agents"]:
 
-        results[agent] = registry.execute(agent)
+        if agent == "purchase_editor":
+
+            results[agent] = registry.get(agent).execute(
+
+                state["message"]
+
+            )
+
+        else:
+
+            results[agent] = registry.execute(agent)
 
     state["results"] = results
 
@@ -33,7 +43,23 @@ def execute_agents(state):
 
 def response_node(state):
 
-    if "coo" in state["results"]:
+    if "procurement" in state["results"]:
+
+        state["response"] = state["results"]["procurement"]["message"]
+
+    elif "purchase_editor" in state["results"]:
+
+        state["response"] = state["results"]["purchase_editor"]["message"]
+
+    elif "purchase_approval" in state["results"]:
+
+        state["response"] = state["results"]["purchase_approval"]["message"]
+
+    elif "purchase_rejection" in state["results"]:
+
+        state["response"] = state["results"]["purchase_rejection"]["message"]
+
+    elif "coo" in state["results"]:
 
         state["response"] = state["results"]["coo"]["analysis"]
 

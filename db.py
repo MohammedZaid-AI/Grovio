@@ -1347,6 +1347,182 @@ def get_latest_purchase_order():
 
     return row
 
+def reject_latest_purchase_order():
+    """
+    Rejects the most recent DRAFT purchase order.
+
+    Returns:
+        {
+            "purchase_order_id": ...,
+            "supplier": ...
+        }
+
+    or None if no draft exists.
+    """
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT id, supplier
+        FROM purchase_orders
+        WHERE status = 'DRAFT'
+        ORDER BY id DESC
+        LIMIT 1
+        """
+    )
+
+    row = cursor.fetchone()
+
+    if row is None:
+
+        conn.close()
+
+        return None
+
+    purchase_order_id = row[0]
+    supplier = row[1]
+
+    cursor.execute(
+        """
+        UPDATE purchase_orders
+        SET status='REJECTED'
+        WHERE id=?
+        """,
+        (purchase_order_id,)
+    )
+
+    conn.commit()
+
+    conn.close()
+
+    return {
+
+        "purchase_order_id": purchase_order_id,
+
+        "supplier": supplier
+
+    }
+
+def get_latest_draft_purchase_order():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, supplier, total_amount
+        FROM purchase_orders
+        WHERE status='DRAFT'
+        ORDER BY id DESC
+        LIMIT 1
+    """)
+
+    row = cursor.fetchone()
+
+    conn.close()
+
+    return row
+
+
+def get_purchase_order_items(purchase_order_id):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            product,
+            quantity,
+            unit,
+            estimated_price,
+            subtotal
+        FROM purchase_order_items
+        WHERE purchase_order_id=?
+    """, (purchase_order_id,))
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def update_purchase_order_item(
+    purchase_order_id,
+    product,
+    quantity,
+    subtotal
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE purchase_order_items
+        SET quantity=?,
+            subtotal=?
+        WHERE purchase_order_id=?
+        AND LOWER(product)=LOWER(?)
+        """,
+        (
+            quantity,
+            subtotal,
+            purchase_order_id,
+            product
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def delete_purchase_order_item(
+    purchase_order_id,
+    product
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM purchase_order_items
+        WHERE purchase_order_id=?
+        AND LOWER(product)=LOWER(?)
+        """,
+        (
+            purchase_order_id,
+            product
+        )
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def update_purchase_order_total(
+    purchase_order_id,
+    total
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE purchase_orders
+        SET total_amount=?
+        WHERE id=?
+    """,
+    (
+        total,
+        purchase_order_id
+    ))
+
+    conn.commit()
+
+    conn.close()
 
 if __name__ == "__main__":
 

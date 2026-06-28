@@ -1,6 +1,6 @@
 from apscheduler.schedulers.blocking import BlockingScheduler
 
-from scheduler.scheduler import run_scheduler
+from ai.scheduler.scheduler import run_scheduler
 
 scheduler = BlockingScheduler()
 

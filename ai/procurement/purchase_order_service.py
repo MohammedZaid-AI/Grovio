@@ -1,3 +1,5 @@
+from pprint import pprint
+
 from db import (
     create_purchase_order,
     add_purchase_order_item
@@ -8,16 +10,17 @@ from ai.procurement.purchase_order_generator import PurchaseOrderGenerator
 
 class PurchaseOrderService:
     """
-    Generates and stores a Purchase Order.
+    Generates a smart purchase order and
+    stores it in the database.
     """
 
     def __init__(self):
 
         self.generator = PurchaseOrderGenerator()
 
-    # -----------------------------------------
-    # Generate + Save
-    # -----------------------------------------
+    # --------------------------------------------------
+    # Generate + Save Purchase Order
+    # --------------------------------------------------
 
     def create(self):
 
@@ -30,6 +33,10 @@ class PurchaseOrderService:
             total_amount=purchase_order.total_amount
 
         )
+
+        # --------------------------------------------
+        # Save Purchase Order Items
+        # --------------------------------------------
 
         for item in purchase_order.items:
 
@@ -49,20 +56,48 @@ class PurchaseOrderService:
 
             )
 
+        # --------------------------------------------
+        # Return Complete Purchase Order
+        # --------------------------------------------
+
         return {
 
             "purchase_order_id": purchase_order_id,
 
             "supplier": purchase_order.supplier,
 
-            "items": purchase_order.total_items,
+            "items": [
 
-            "quantity": purchase_order.total_quantity,
+                {
+
+                    "product": item.product,
+
+                    "quantity": item.quantity,
+
+                    "unit": item.unit,
+
+                    "price": item.estimated_price,
+
+                    "subtotal": item.subtotal
+
+                }
+
+                for item in purchase_order.items
+
+            ],
+
+            "total_items": purchase_order.total_items,
+
+            "total_quantity": purchase_order.total_quantity,
 
             "total": purchase_order.total_amount
 
         }
 
+
+# --------------------------------------------------
+# Testing
+# --------------------------------------------------
 
 if __name__ == "__main__":
 
@@ -70,6 +105,14 @@ if __name__ == "__main__":
 
     result = service.create()
 
-    from pprint import pprint
+    print()
+
+    print("=" * 60)
+
+    print("PURCHASE ORDER")
+
+    print("=" * 60)
 
     pprint(result)
+
+    print("=" * 60)

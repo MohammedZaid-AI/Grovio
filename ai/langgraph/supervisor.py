@@ -1,5 +1,5 @@
 import json
-
+import re
 from core.llm import llm
 from ai.langgraph.prompts import SUPERVISOR_PROMPT
 
@@ -33,6 +33,9 @@ class Supervisor:
 
         message = message.strip().lower()
 
+        # Remove accidental console prompt if pasted
+        if message.startswith("restaurant >"):
+            message = message.replace("restaurant >", "").strip()
         # -------------------------------
         # Fast deterministic routing
         # -------------------------------
@@ -40,6 +43,34 @@ class Supervisor:
         if message in self.simple_routes:
 
             return self.simple_routes[message]
+        
+
+        if message in {
+
+            "no",
+
+            "cancel",
+
+            "reject",
+
+            "decline"
+
+        }:
+
+            return ["purchase_rejection"]
+        
+
+        if message == "show":
+
+            return ["purchase_editor"]
+
+        if message.startswith("remove"):
+
+            return ["purchase_editor"]
+
+        if re.search(r"increase .+ to \d+", message):
+
+            return ["purchase_editor"]
 
         # -------------------------------
         # Ask the LLM
@@ -84,19 +115,27 @@ class Supervisor:
 
             # Only allow valid agents
 
-            valid_agents = []
+            VALID_AGENTS = {
 
-            for agent in agents:
+                "coo",
 
-                if agent in [
+                "decision",
 
-                    "coo",
+                "procurement",
 
-                    "decision"
+                "purchase_approval"
 
-                ]:
+            }
 
-                    valid_agents.append(agent)
+            valid_agents = [
+
+                agent
+
+                for agent in agents
+
+                if agent in VALID_AGENTS
+
+            ]
 
             if not valid_agents:
 

@@ -18,7 +18,7 @@ from db import (
     get_order_history
 )
 
-from scheduler.scheduler import run_scheduler
+from ai.scheduler.scheduler import run_scheduler
 
 
 async def order_now():

@@ -1,14 +1,14 @@
 from ai.agents.ai_coo import AICOO
 from ai.intelligence.decision_engine import DecisionEngine
-
+from ai.agents.procurement_agent import ProcurementAgent
+from ai.agents.purchase_approval_agent import PurchaseApprovalAgent
+from ai.agents.purchase_rejection_agent import PurchaseRejectionAgent
+from ai.agents.purchase_order_editor_agent import PurchaseOrderEditorAgent
 
 class AgentRegistry:
 
     """
     Central registry of all AI agents.
-
-    The supervisor uses this registry
-    to discover and execute agents.
     """
 
     def __init__(self):
@@ -19,12 +19,15 @@ class AgentRegistry:
 
             "decision": DecisionEngine(),
 
-            # Future agents
-            # "supplier": SupplierAgent(),
-            # "procurement": ProcurementAgent(),
-            # "analytics": AnalyticsAgent(),
-            # "inventory": InventoryAgent(),
-            # "invoice": InvoiceAgent(),
+            "procurement": ProcurementAgent(),
+
+            "purchase_approval": PurchaseApprovalAgent(),
+
+            "purchase_rejection": PurchaseRejectionAgent(),
+
+            "purchase_editor": PurchaseOrderEditorAgent(),
+
+            
 
         }
 
@@ -37,7 +40,7 @@ class AgentRegistry:
         return self.agents.get(name)
 
     # -----------------------------------
-    # List Available Agents
+    # Available Agents
     # -----------------------------------
 
     def available_agents(self):
@@ -55,7 +58,9 @@ class AgentRegistry:
         if agent is None:
 
             raise ValueError(
+
                 f"Unknown agent: {name}"
+
             )
 
         if hasattr(agent, "execute"):
@@ -67,7 +72,9 @@ class AgentRegistry:
             return agent.analyze()
 
         raise AttributeError(
+
             f"{name} has neither execute() nor analyze()."
+
         )
 
 
@@ -88,10 +95,16 @@ if __name__ == "__main__":
 
     print()
 
-    print("Testing Decision Engine")
+    print("Testing Procurement")
 
-    print("-----------------------")
+    print("-------------------")
 
-    result = registry.execute("decision")
+    print(
 
-    print(result)
+        registry.execute(
+
+            "procurement"
+
+        )
+
+    )

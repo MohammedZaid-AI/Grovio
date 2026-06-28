@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Form
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
-from backend.conversation_engine import engine
-from backend.chat import process_message
+
+from ai.langgraph.graph import graph
 from ai.invoice.pipeline import InvoicePipeline
 
 router = APIRouter()
@@ -87,7 +87,9 @@ async def webhook(
 
         except Exception as e:
 
-            print("Invoice Error:", e)
+            print("\nInvoice Error\n")
+
+            print(e)
 
             reply = (
                 "❌ Unable to process invoice.\n\n"
@@ -97,26 +99,41 @@ async def webhook(
         return whatsapp_reply(reply)
 
     # -------------------------------------------------------
-    # AI Conversation
+    # LangGraph AI
     # -------------------------------------------------------
 
     try:
 
-        reply = engine.process(
+        result = graph.invoke(
 
-            phone="restaurant",
+            {
 
-            message=Body
+                "message": Body,
+
+                "selected_agents": [],
+
+                "results": {},
+
+                "response": ""
+
+            }
 
         )
 
-        if not reply:
+        print("\n" + "=" * 70)
+        print("LangGraph Result")
+        print(result)
+        print("=" * 70)
 
-            reply = (
-                "Sorry, I couldn't understand your request."
-            )
+        reply = result.get(
 
-        # WhatsApp-friendly limit
+            "response",
+
+            "Sorry, I couldn't generate a response."
+
+        )
+
+        # WhatsApp safe limit
 
         MAX_LENGTH = 1400
 
@@ -126,18 +143,20 @@ async def webhook(
 
                 reply[:MAX_LENGTH]
 
-                + "\n\nReply *continue* for the remaining report."
+                + "\n\nReply *continue* to receive the remaining report."
 
             )
 
         print("\nReply Sent\n")
+
         print(reply)
 
         return whatsapp_reply(reply)
 
     except Exception as e:
 
-        print("\nConversation Error\n")
+        print("\nLangGraph Error\n")
+
         print(e)
 
         return whatsapp_reply(
