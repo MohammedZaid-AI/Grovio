@@ -1571,6 +1571,116 @@ def get_purchase_order_items_by_order(
 
     return rows
 
+def get_total_sales():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            IFNULL(SUM(total_amount), 0)
+        FROM orders
+        WHERE status='completed'
+    """)
+
+    total = cursor.fetchone()[0]
+
+    conn.close()
+
+    return float(total)
+
+
+def get_completed_orders():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM orders
+        WHERE status='completed'
+    """)
+
+    total = cursor.fetchone()[0]
+
+    conn.close()
+
+    return total
+
+
+def get_average_order_value():
+
+    orders = get_completed_orders()
+
+    if orders == 0:
+
+        return 0
+
+    return round(
+
+        get_total_sales() / orders,
+
+        2
+
+    )
+
+
+def get_top_selling_products(limit=10):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            product,
+            SUM(quantity) as qty
+        FROM order_history
+        GROUP BY product
+        ORDER BY qty DESC
+        LIMIT ?
+    """, (limit,))
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
+def get_all_purchase_invoices():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM purchase_invoices
+        ORDER BY id DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def get_invoice_items(invoice_id):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT *
+        FROM purchase_items
+        WHERE invoice_id=?
+    """, (invoice_id,))
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
 if __name__ == "__main__":
 
     init_db()

@@ -6,7 +6,7 @@ from ai.intelligence.memory import RestaurantMemory
 from ai.intelligence.pattern_detector import PatternDetector
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.reports.daily_brief import generate_daily_brief
-
+from ai.finance.finance_analyzer import FinanceAnalyzer
 
 class AICOO:
     """
@@ -29,6 +29,8 @@ class AICOO:
 
         self.forecaster = ProcurementForecaster()
 
+        self.finance = FinanceAnalyzer()
+
     # --------------------------------------------------
     # Build Context
     # --------------------------------------------------
@@ -48,6 +50,10 @@ class AICOO:
             "forecast":
 
                 self.forecaster.execute(),
+
+            "finance":
+
+                self.finance.execute(),
 
             "daily_brief":
 

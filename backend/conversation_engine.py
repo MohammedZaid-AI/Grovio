@@ -1,31 +1,30 @@
-from ai.conversation.intent_router import IntentRouter
 from ai.conversation.session import session
 from ai.conversation.chunker import chunker
+from ai.conversation.session_memory import memory
 
 from backend.chat import process_message
 
 
 class ConversationEngine:
-
     """
     Main conversation engine.
 
     Responsible for:
 
-    • Intent routing
-    • Conversation history
-    • Long response chunking
-    • Continue support
-    • Context management
+    • Session Memory
+    • Conversation History
+    • Response Chunking
+    • Continue Support
+    • Calling LangGraph
     """
 
     def __init__(self):
 
-        self.router = IntentRouter()
+        pass
 
-    # ---------------------------------------
+    # --------------------------------------------------
     # Process User Message
-    # ---------------------------------------
+    # --------------------------------------------------
 
     def process(
 
@@ -39,9 +38,15 @@ class ConversationEngine:
 
         message = message.strip()
 
-        # -----------------------------------
-        # Continue
-        # -----------------------------------
+        # ---------------------------------------
+        # Ensure Session Exists
+        # ---------------------------------------
+
+        memory.get(phone)
+
+        # ---------------------------------------
+        # Continue Support
+        # ---------------------------------------
 
         if message.lower() == "continue":
 
@@ -51,33 +56,23 @@ class ConversationEngine:
 
                 return next_chunk
 
-            return (
-                "✅ End of report."
-            )
+            return "✅ End of report."
 
-        # -----------------------------------
-        # Detect Intent
-        # -----------------------------------
+        # ---------------------------------------
+        # Generate AI Response
+        # ---------------------------------------
 
-        intent = self.router.detect(message)
+        response = process_message(
 
-        session.set_intent(
+            phone=phone,
 
-            phone,
-
-            intent
+            message=message
 
         )
 
-        # -----------------------------------
-        # Generate Response
-        # -----------------------------------
-
-        response = process_message(message)
-
-        # -----------------------------------
-        # Save History
-        # -----------------------------------
+        # ---------------------------------------
+        # Store Conversation History
+        # ---------------------------------------
 
         session.add_message(
 
@@ -89,9 +84,23 @@ class ConversationEngine:
 
         )
 
-        # -----------------------------------
-        # Chunk Response
-        # -----------------------------------
+        # ---------------------------------------
+        # Store Session Memory
+        # ---------------------------------------
+
+        memory.update(
+
+            phone,
+
+            last_message=message,
+
+            last_response=response
+
+        )
+
+        # ---------------------------------------
+        # Chunk Long Responses
+        # ---------------------------------------
 
         chunks = chunker.split(response)
 

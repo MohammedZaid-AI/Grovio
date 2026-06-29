@@ -43,6 +43,10 @@ def execute_agents(state):
                 state["message"]
 
             )
+        
+        elif agent == "dashboard":
+
+            results[agent] = registry.execute(agent)
 
         else:
 
@@ -86,6 +90,44 @@ def response_node(state):
     elif "purchase_history" in state["results"]:
 
         state["response"] = state["results"]["purchase_history"]["message"]
+    
+    elif "dashboard" in state["results"]:
+
+        data = state["results"]["dashboard"]
+
+        reply = []
+
+        reply.append("📊 Restaurant Dashboard")
+
+        reply.append("")
+
+        reply.append(f"✅ Completed Orders : {data['completed_orders']}")
+
+        reply.append(f"⏳ Pending Orders : {data['pending_orders']}")
+
+        reply.append("")
+
+        reply.append(f"📦 Inventory : {data['inventory_status']} ({data['inventory_health']}%)")
+
+        reply.append(f"💰 Procurement Spend : ₹{data['total_spend']}")
+
+        reply.append(f"🧾 Invoices : {data['invoice_count']}")
+
+        reply.append(f"📈 Forecast Confidence : {data['forecast_confidence']}%")
+
+        reply.append(f"🧠 Restaurant Health : {data['restaurant_health']}")
+
+        if data["risks"]:
+
+            reply.append("")
+
+            reply.append("⚠ Risks")
+
+            for risk in data["risks"]:
+
+                reply.append(f"• {risk}")
+
+        state["response"] = "\n".join(reply)
 
     else:
 

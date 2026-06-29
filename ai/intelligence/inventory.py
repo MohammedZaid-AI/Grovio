@@ -107,19 +107,33 @@ class Inventory:
 
     def execute(self):
 
+        inventory = self.inventory_summary()
+
+        low_stock = self.low_stock()
+
+        health = self.health_score()
+
+        if health >= 90:
+
+            status = "Excellent"
+
+        elif health >= 75:
+
+            status = "Good"
+
+        else:
+
+            status = "Needs Attention"
+
         return {
 
-            "health_score":
+            "health_score": health,
 
-                self.health_score(),
+            "status": status,
 
-            "inventory":
+            "inventory": inventory,
 
-                self.inventory_summary(),
-
-            "low_stock":
-
-                self.low_stock()
+            "low_stock": low_stock
 
         }
 

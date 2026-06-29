@@ -5,6 +5,7 @@ from ai.agents.purchase_approval_agent import PurchaseApprovalAgent
 from ai.agents.purchase_rejection_agent import PurchaseRejectionAgent
 from ai.agents.purchase_history_agent import PurchaseHistoryAgent
 from ai.agents.purchase_order_editor_agent import PurchaseOrderEditorAgent
+from ai.agents.dashboard_agent import DashboardAgent
 
 class AgentRegistry:
 
@@ -29,6 +30,8 @@ class AgentRegistry:
             "purchase_editor": PurchaseOrderEditorAgent(),
 
             "purchase_history": PurchaseHistoryAgent(),
+
+            "dashboard": DashboardAgent(),
 
             
 

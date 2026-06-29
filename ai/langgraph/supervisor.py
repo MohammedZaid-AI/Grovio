@@ -9,8 +9,8 @@ class Supervisor:
     """
     Grovio Supervisor.
 
-    Decides which internal agent(s)
-    should handle the user's request.
+    Responsible for routing the user's message
+    to the correct LangGraph agent.
     """
 
     def __init__(self):
@@ -26,85 +26,96 @@ class Supervisor:
 
         }
 
-    # ---------------------------------------
-    # Route Message
-    # ---------------------------------------
+        self.dashboard_routes = {
 
-    def route(self, message):
+            "dashboard",
+            "overview",
+            "restaurant overview",
+            "status"
 
-        message = message.strip().lower()
+        }
 
-        # Remove accidental terminal prompt
-        if message.startswith("restaurant >"):
-
-            message = message.replace(
-                "restaurant >",
-                ""
-            ).strip()
-
-        # ---------------------------------------
-        # Greetings
-        # ---------------------------------------
-
-        if message in self.simple_routes:
-
-            return self.simple_routes[message]
-
-        # ---------------------------------------
-        # Purchase Approval
-        # ---------------------------------------
-
-        if message in {
-
-            "yes",
-
-            "approve",
-
-            "approved",
-
-            "confirm"
-
-        }:
-
-            return ["purchase_approval"]
-
-        # ---------------------------------------
-        # Purchase Rejection
-        # ---------------------------------------
-
-        if message in {
-
-            "no",
-
-            "cancel",
-
-            "reject",
-
-            "decline"
-
-        }:
-
-            return ["purchase_rejection"]
-
-        # ---------------------------------------
-        # Purchase Order Editor
-        # ---------------------------------------
-
-        if message in {
-
-            "purchase history",
-
-            "show purchase history",
+        self.history_routes = {
 
             "history",
-
+            "purchase history",
+            "show purchase history",
             "last order",
-
             "latest order"
 
-        }:
+        }
 
-            return ["purchase_history"]
+    # --------------------------------------------------
+    # Purchase Approval
+    # --------------------------------------------------
+
+    def is_purchase_approval(self, message):
+
+        approvals = {
+
+            "yes",
+            "approve",
+            "approve it",
+            "go ahead",
+            "looks good",
+            "confirm",
+            "confirm it",
+            "place order",
+            "place the order",
+            "do it",
+            "proceed"
+
+        }
+
+        return message in approvals
+
+    # --------------------------------------------------
+    # Purchase Rejection
+    # --------------------------------------------------
+
+    def is_purchase_rejection(self, message):
+
+        rejections = {
+
+            "no",
+            "cancel",
+            "cancel it",
+            "reject",
+            "reject it",
+            "decline",
+            "don't order",
+            "forget it",
+            "stop",
+            "never mind"
+
+        }
+
+        return message in rejections
+
+    # --------------------------------------------------
+    # Purchase Editor
+    # --------------------------------------------------
+
+    def is_purchase_editor(self, message):
+
+        if any(
+
+            phrase in message
+
+            for phrase in [
+
+                "show purchase order",
+                "show order",
+                "show my order",
+                "current order",
+                "preview order",
+                "show"
+
+            ]
+
+        ):
+
+            return True
 
         if re.search(
 
@@ -114,21 +125,92 @@ class Supervisor:
 
         ):
 
-            return ["purchase_editor"]
+            return True
 
-        if re.search(
+        quantity_patterns = [
 
             r"(increase|update|set|change)\s+.+\s+to\s+\d+",
+            r".+\s+should\s+be\s+\d+"
 
-            message
+        ]
 
-        ):
+        return any(
+
+            re.search(pattern, message)
+
+            for pattern in quantity_patterns
+
+        )
+
+    # --------------------------------------------------
+    # Route Message
+    # --------------------------------------------------
+
+    def route(self, message):
+
+        message = message.strip().lower()
+
+        if message.startswith("restaurant >"):
+
+            message = message.replace(
+
+                "restaurant >",
+
+                ""
+
+            ).strip()
+
+        # ------------------------
+        # Greetings
+        # ------------------------
+
+        if message in self.simple_routes:
+
+            return self.simple_routes[message]
+
+        # ------------------------
+        # Dashboard
+        # ------------------------
+
+        if message in self.dashboard_routes:
+
+            return ["dashboard"]
+
+        # ------------------------
+        # Purchase History
+        # ------------------------
+
+        if message in self.history_routes:
+
+            return ["purchase_history"]
+
+        # ------------------------
+        # Purchase Approval
+        # ------------------------
+
+        if self.is_purchase_approval(message):
+
+            return ["purchase_approval"]
+
+        # ------------------------
+        # Purchase Rejection
+        # ------------------------
+
+        if self.is_purchase_rejection(message):
+
+            return ["purchase_rejection"]
+
+        # ------------------------
+        # Purchase Editor
+        # ------------------------
+
+        if self.is_purchase_editor(message):
 
             return ["purchase_editor"]
 
-        # ---------------------------------------
+        # ------------------------
         # Ask the LLM
-        # ---------------------------------------
+        # ------------------------
 
         response = llm.chat(
 
@@ -149,21 +231,9 @@ class Supervisor:
 
             data = json.loads(response)
 
-            agents = data.get(
+            agents = data.get("agents", [])
 
-                "agents",
-
-                []
-
-            )
-
-            if not isinstance(
-
-                agents,
-
-                list
-
-            ):
+            if not isinstance(agents, list):
 
                 return ["coo"]
 
@@ -171,30 +241,17 @@ class Supervisor:
 
                 return ["coo"]
 
-            agents = list(
-
-                dict.fromkeys(
-
-                    agents
-
-                )
-
-            )
+            agents = list(dict.fromkeys(agents))
 
             VALID_AGENTS = {
 
                 "coo",
-
                 "decision",
-
+                "dashboard",
                 "procurement",
-
                 "purchase_editor",
-
                 "purchase_approval",
-
                 "purchase_rejection",
-
                 "purchase_history"
 
             }
@@ -217,13 +274,7 @@ class Supervisor:
 
         except Exception as e:
 
-            print(
-
-                "Supervisor Error:",
-
-                e
-
-            )
+            print("Supervisor Error:", e)
 
             return ["coo"]
 
@@ -234,11 +285,7 @@ if __name__ == "__main__":
 
     while True:
 
-        message = input(
-
-            "Restaurant > "
-
-        )
+        message = input("Restaurant > ")
 
         if message.lower() == "exit":
 
@@ -248,11 +295,7 @@ if __name__ == "__main__":
 
         print(
 
-            supervisor.route(
-
-                message
-
-            )
+            supervisor.route(message)
 
         )
 

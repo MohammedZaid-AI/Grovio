@@ -1,11 +1,17 @@
 import asyncio
 from mcp_use import MCPClient
-
+from pathlib import Path
 
 class SwiggyInstamart:
 
     def __init__(self):
-        self.client = MCPClient.from_config_file("mcp.json")
+
+        config_path = Path(__file__).parent / "mcp.json"
+
+        self.client = MCPClient.from_config_file(
+            str(config_path)
+        )
+
         self.session = None
 
     async def initialize(self):
