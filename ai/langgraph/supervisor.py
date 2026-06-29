@@ -1,5 +1,6 @@
 import json
 import re
+
 from core.llm import llm
 from ai.langgraph.prompts import SUPERVISOR_PROMPT
 
@@ -33,17 +34,43 @@ class Supervisor:
 
         message = message.strip().lower()
 
-        # Remove accidental console prompt if pasted
+        # Remove accidental terminal prompt
         if message.startswith("restaurant >"):
-            message = message.replace("restaurant >", "").strip()
-        # -------------------------------
-        # Fast deterministic routing
-        # -------------------------------
+
+            message = message.replace(
+                "restaurant >",
+                ""
+            ).strip()
+
+        # ---------------------------------------
+        # Greetings
+        # ---------------------------------------
 
         if message in self.simple_routes:
 
             return self.simple_routes[message]
-        
+
+        # ---------------------------------------
+        # Purchase Approval
+        # ---------------------------------------
+
+        if message in {
+
+            "yes",
+
+            "approve",
+
+            "approved",
+
+            "confirm"
+
+        }:
+
+            return ["purchase_approval"]
+
+        # ---------------------------------------
+        # Purchase Rejection
+        # ---------------------------------------
 
         if message in {
 
@@ -58,23 +85,50 @@ class Supervisor:
         }:
 
             return ["purchase_rejection"]
-        
 
-        if message == "show":
+        # ---------------------------------------
+        # Purchase Order Editor
+        # ---------------------------------------
+
+        if message in {
+
+            "purchase history",
+
+            "show purchase history",
+
+            "history",
+
+            "last order",
+
+            "latest order"
+
+        }:
+
+            return ["purchase_history"]
+
+        if re.search(
+
+            r"(remove|delete)\s+.+",
+
+            message
+
+        ):
 
             return ["purchase_editor"]
 
-        if message.startswith("remove"):
+        if re.search(
+
+            r"(increase|update|set|change)\s+.+\s+to\s+\d+",
+
+            message
+
+        ):
 
             return ["purchase_editor"]
 
-        if re.search(r"increase .+ to \d+", message):
-
-            return ["purchase_editor"]
-
-        # -------------------------------
+        # ---------------------------------------
         # Ask the LLM
-        # -------------------------------
+        # ---------------------------------------
 
         response = llm.chat(
 
@@ -95,25 +149,37 @@ class Supervisor:
 
             data = json.loads(response)
 
-            agents = data.get("agents", [])
+            agents = data.get(
 
-            # Ensure list
+                "agents",
 
-            if not isinstance(agents, list):
+                []
+
+            )
+
+            if not isinstance(
+
+                agents,
+
+                list
+
+            ):
 
                 return ["coo"]
 
-            # Never allow empty routing
-
-            if len(agents) == 0:
+            if not agents:
 
                 return ["coo"]
 
-            # Remove duplicates
+            agents = list(
 
-            agents = list(dict.fromkeys(agents))
+                dict.fromkeys(
 
-            # Only allow valid agents
+                    agents
+
+                )
+
+            )
 
             VALID_AGENTS = {
 
@@ -123,7 +189,13 @@ class Supervisor:
 
                 "procurement",
 
-                "purchase_approval"
+                "purchase_editor",
+
+                "purchase_approval",
+
+                "purchase_rejection",
+
+                "purchase_history"
 
             }
 
@@ -145,7 +217,13 @@ class Supervisor:
 
         except Exception as e:
 
-            print("Supervisor Error:", e)
+            print(
+
+                "Supervisor Error:",
+
+                e
+
+            )
 
             return ["coo"]
 
@@ -156,7 +234,11 @@ if __name__ == "__main__":
 
     while True:
 
-        message = input("Restaurant > ")
+        message = input(
+
+            "Restaurant > "
+
+        )
 
         if message.lower() == "exit":
 
@@ -166,7 +248,11 @@ if __name__ == "__main__":
 
         print(
 
-            supervisor.route(message)
+            supervisor.route(
+
+                message
+
+            )
 
         )
 

@@ -77,24 +77,32 @@ graph = builder.compile()
 
 if __name__ == "__main__":
 
-    result = graph.invoke(
+    while True:
 
-        {
+        message = input("Restaurant > ")
 
-            "message":
+        if message.lower() == "exit":
 
-                "Give me today's report",
+            break
 
-            "selected_agents": [],
+        result = graph.invoke(
 
-            "results": {},
+            {
 
-            "response": ""
+                "message": message,
 
-        }
+                "selected_agents": [],
 
-    )
+                "results": {},
 
-    print()
+                "response": ""
 
-    print(result["response"])
+            }
+
+        )
+
+        print()
+
+        print(result["response"])
+
+        print()

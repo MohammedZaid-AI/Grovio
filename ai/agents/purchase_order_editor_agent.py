@@ -13,15 +13,23 @@ class PurchaseOrderEditorAgent:
 
     def execute(self, message):
 
-        print("Received:", message)
-
         message = message.lower().strip()
 
         # -------------------------------
         # Show Order
         # -------------------------------
 
-        if "show" in message:
+        if message in [
+
+            "show",
+
+            "show order",
+
+            "current order",
+
+            "purchase order"
+
+        ]:
 
             order = self.editor.show()
 
@@ -45,7 +53,7 @@ class PurchaseOrderEditorAgent:
 
             lines.append(
 
-                f"Supplier : {order['supplier']}"
+                f"🏪 Supplier : {order['supplier']}"
 
             )
 
@@ -55,7 +63,7 @@ class PurchaseOrderEditorAgent:
 
                 lines.append(
 
-                    f"• {item[0]} ×{item[1]}"
+                    f"• {item[0]} ×{int(item[1])}"
 
                 )
 
@@ -63,7 +71,7 @@ class PurchaseOrderEditorAgent:
 
             lines.append(
 
-                f"Total : ₹{order['total']}"
+                f"💰 Total : ₹{order['total']:.2f}"
 
             )
 
@@ -77,15 +85,17 @@ class PurchaseOrderEditorAgent:
         # Remove Product
         # -------------------------------
 
-        if message.startswith("remove"):
+        match = re.search(
 
-            product = message.replace(
+            r"(remove|delete)\s+(.+)",
 
-                "remove",
+            message
 
-                ""
+        )
 
-            ).strip()
+        if match:
+
+            product = match.group(2).strip()
 
             self.editor.remove_product(
 
@@ -97,47 +107,61 @@ class PurchaseOrderEditorAgent:
 
                 "message":
 
-                    f"✅ {product} removed."
+                    f"✅ Removed {product.title()}."
 
             }
 
         # -------------------------------
-        # Increase Quantity
+        # Update Quantity
         # -------------------------------
 
-        match = re.search(
+        patterns = [
 
             r"increase (.+?) to (\d+)",
 
-            message
+            r"update (.+?) to (\d+)",
 
-        )
+            r"set (.+?) to (\d+)",
 
-        if match:
+            r"change (.+?) to (\d+)"
 
-            product = match.group(1)
+        ]
 
-            quantity = int(
+        for pattern in patterns:
 
-                match.group(2)
+            match = re.search(
 
-            )
+                pattern,
 
-            self.editor.update_quantity(
-
-                product,
-
-                quantity
+                message
 
             )
 
-            return {
+            if match:
 
-                "message":
+                product = match.group(1).strip()
 
-                    f"✅ Updated {product} to {quantity}."
+                quantity = int(
 
-            }
+                    match.group(2)
+
+                )
+
+                self.editor.update_quantity(
+
+                    product,
+
+                    quantity
+
+                )
+
+                return {
+
+                    "message":
+
+                        f"✅ Updated {product.title()} to {quantity}."
+
+                }
 
         return {
 

@@ -1524,6 +1524,53 @@ def update_purchase_order_total(
 
     conn.close()
 
+def get_purchase_orders():
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            id,
+            supplier,
+            status,
+            total_amount,
+            created_at
+        FROM purchase_orders
+        ORDER BY id DESC
+    """)
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
+
+def get_purchase_order_items_by_order(
+    purchase_order_id
+):
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            product,
+            quantity,
+            unit,
+            estimated_price,
+            subtotal
+        FROM purchase_order_items
+        WHERE purchase_order_id=?
+    """, (purchase_order_id,))
+
+    rows = cursor.fetchall()
+
+    conn.close()
+
+    return rows
+
 if __name__ == "__main__":
 
     init_db()

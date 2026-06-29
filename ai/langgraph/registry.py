@@ -3,6 +3,7 @@ from ai.intelligence.decision_engine import DecisionEngine
 from ai.agents.procurement_agent import ProcurementAgent
 from ai.agents.purchase_approval_agent import PurchaseApprovalAgent
 from ai.agents.purchase_rejection_agent import PurchaseRejectionAgent
+from ai.agents.purchase_history_agent import PurchaseHistoryAgent
 from ai.agents.purchase_order_editor_agent import PurchaseOrderEditorAgent
 
 class AgentRegistry:
@@ -26,6 +27,8 @@ class AgentRegistry:
             "purchase_rejection": PurchaseRejectionAgent(),
 
             "purchase_editor": PurchaseOrderEditorAgent(),
+
+            "purchase_history": PurchaseHistoryAgent(),
 
             
 

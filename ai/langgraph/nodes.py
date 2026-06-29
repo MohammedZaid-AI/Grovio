@@ -32,6 +32,18 @@ def execute_agents(state):
 
             )
 
+        elif agent == "purchase_history":
+
+            results[agent] = registry.get(
+
+                agent
+
+            ).execute(
+
+                state["message"]
+
+            )
+
         else:
 
             results[agent] = registry.execute(agent)
@@ -70,6 +82,10 @@ def response_node(state):
             state["results"]["decision"]
 
         )
+    
+    elif "purchase_history" in state["results"]:
+
+        state["response"] = state["results"]["purchase_history"]["message"]
 
     else:
 
