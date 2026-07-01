@@ -13,18 +13,18 @@ async def process_message(
     Main backend chat router.
 
     Responsibilities
-
+    ----------------
     • Auto procurement
-    • Shopping continuation
+    • Shopping workflow
     • LangGraph routing
     • Session memory
     """
 
     message = message.strip()
 
-    # --------------------------------------------------
-    # Auto Procurement
-    # --------------------------------------------------
+    # ==================================================
+    # AUTO PROCUREMENT
+    # ==================================================
 
     if message.lower() in {
 
@@ -56,119 +56,140 @@ async def process_message(
 
         return result["message"]
 
-    # --------------------------------------------------
-    # Continue Shopping Session
-    # --------------------------------------------------
+    # ==================================================
+    # SHOPPING SESSION
+    # ==================================================
 
     if shopping_session.has_session(phone):
 
-        # Start selecting products
+        stage = shopping_session.get_stage(phone)
 
-        if message.lower() == "yes":
+        # ----------------------------------------------
+        # PLANNING
+        # ----------------------------------------------
 
-            orchestrator = ShoppingOrchestrator()
+        if stage == "planning":
 
-            response = await orchestrator.start(
+            if message.lower() == "yes":
 
-                phone=phone,
-
-                source="session"
-
-            )
-
-            return response["message"]
-        
-    # ------------------------------------------
-    # Product Selection (1-5)
-    # ------------------------------------------
-
-        if message.isdigit():
-
-            choice = int(message)
-
-            if 1 <= choice <= 5:
-
-                shopping_session.select(
+                shopping_session.set_stage(
 
                     phone,
 
-                    choice - 1
+                    "selecting"
 
                 )
 
                 orchestrator = ShoppingOrchestrator()
 
-                # More products remaining
-                if not shopping_session.finished(phone):
+                response = await orchestrator.resume_session(
 
-                    response = await orchestrator.resume_session(
-
-                        phone
-
-                    )
-
-                    return response["message"]
-
-                # Shopping finished
-                session = shopping_session.get(phone)
-
-                selected = session["selected"]
-
-                total = 0
-
-                reply = []
-
-                reply.append("🛒 Swiggy Cart Ready")
-
-                reply.append("")
-
-                for item in selected:
-
-                    cost = item["price"] * item["quantity"]
-
-                    total += cost
-
-                    reply.append(
-
-                        f"• {item['displayName']}"
-
-                    )
-
-                    reply.append(
-
-                        f"Qty : {item['quantity']}"
-
-                    )
-
-                    reply.append(
-
-                        f"₹{cost}"
-
-                    )
-
-                    reply.append("")
-
-                reply.append(
-
-                    f"Estimated Total : ₹{total}"
+                    phone
 
                 )
 
-                reply.append("")
+                return response["message"]
 
-                reply.append(
+            return "Reply YES to begin shopping."
 
-                    "Reply YES to place the order."
+        # ----------------------------------------------
+        # SELECTING PRODUCTS
+        # ----------------------------------------------
+
+        elif stage == "selecting":
+
+            if not message.isdigit():
+
+                return "Reply with a number between 1 and 5."
+
+            choice = int(message)
+
+            if choice < 1 or choice > 5:
+
+                return "Reply with a number between 1 and 5."
+
+            shopping_session.select(
+
+                phone,
+
+                choice - 1
+
+            )
+
+            orchestrator = ShoppingOrchestrator()
+
+            if not shopping_session.finished(phone):
+
+                response = await orchestrator.resume_session(
+
+                    phone
 
                 )
 
-                return "\n".join(reply)
+                return response["message"]
 
-            return "Please reply with a number between 1 and 5."
+            shopping_session.set_stage(
 
-    # --------------------------------------------------
-    # LangGraph
-    # --------------------------------------------------
+                phone,
+
+                "checkout"
+
+            )
+
+            selected = shopping_session.selected(phone)
+
+            total = 0
+
+            reply = []
+
+            reply.append("🛒 Swiggy Cart Ready")
+
+            reply.append("")
+
+            for item in selected:
+
+                cost = item["price"] * item["quantity"]
+
+                total += cost
+
+                reply.append(f"• {item['displayName']}")
+                reply.append(f"Qty : {item['quantity']}")
+                reply.append(f"₹{cost}")
+                reply.append("")
+
+            reply.append(f"Estimated Total : ₹{total}")
+            reply.append("")
+            reply.append("Reply YES to place the order.")
+
+            return "\n".join(reply)
+
+        # ----------------------------------------------
+        # CHECKOUT
+        # ----------------------------------------------
+
+        elif stage == "checkout":
+
+            if message.lower() != "yes":
+
+                return "Reply YES to place the order."
+
+            service = ShoppingOrchestrator().service
+
+            await service.build_cart(
+
+                shopping_session.selected(phone)
+
+            )
+
+            result = await service.checkout()
+
+            shopping_session.end(phone)
+
+            return result["message"]
+
+    # ==================================================
+    # LANGGRAPH
+    # ==================================================
 
     result = graph.invoke(
 
@@ -186,9 +207,9 @@ async def process_message(
 
     )
 
-    # --------------------------------------------------
-    # Session Memory
-    # --------------------------------------------------
+    # ==================================================
+    # SESSION MEMORY
+    # ==================================================
 
     if "procurement" in result["results"]:
 
