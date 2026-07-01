@@ -1,5 +1,4 @@
 class ShoppingSession:
-
     """
     Stores the shopping conversation state.
     """
@@ -7,6 +6,10 @@ class ShoppingSession:
     def __init__(self):
 
         self.sessions = {}
+
+    # -----------------------------------
+    # Start Session
+    # -----------------------------------
 
     def start(self, phone, items):
 
@@ -18,13 +21,43 @@ class ShoppingSession:
 
             "selected": [],
 
-            "options": []
+            "options": [],
+
+            "stage": "planning"
 
         }
+
+    # -----------------------------------
+    # Session
+    # -----------------------------------
 
     def get(self, phone):
 
         return self.sessions.get(phone)
+
+    def has_session(self, phone):
+
+        return phone in self.sessions
+
+    def end(self, phone):
+
+        return self.sessions.pop(phone, None)
+
+    # -----------------------------------
+    # Stage
+    # -----------------------------------
+
+    def get_stage(self, phone):
+
+        return self.sessions[phone]["stage"]
+
+    def set_stage(self, phone, stage):
+
+        self.sessions[phone]["stage"] = stage
+
+    # -----------------------------------
+    # Current Item
+    # -----------------------------------
 
     def current_item(self, phone):
 
@@ -36,27 +69,19 @@ class ShoppingSession:
 
         return session["items"][session["current"]]
 
-    def set_options(
+    # -----------------------------------
+    # Options
+    # -----------------------------------
 
-        self,
-
-        phone,
-
-        options
-
-    ):
+    def set_options(self, phone, options):
 
         self.sessions[phone]["options"] = options
 
-    def select(
+    # -----------------------------------
+    # Product Selection
+    # -----------------------------------
 
-        self,
-
-        phone,
-
-        index
-
-    ):
+    def select(self, phone, index):
 
         session = self.sessions[phone]
 
@@ -74,21 +99,13 @@ class ShoppingSession:
 
             {
 
-                "displayName":
+                "displayName": product["displayName"],
 
-                    product["displayName"],
+                "spinId": variant["spinId"],
 
-                "spinId":
+                "quantity": quantity,
 
-                    variant["spinId"],
-
-                "quantity":
-
-                    quantity,
-
-                "price":
-
-                    variant["price"]["offerPrice"]
+                "price": variant["price"]["offerPrice"]
 
             }
 
@@ -98,25 +115,23 @@ class ShoppingSession:
 
         session["options"] = []
 
+    # -----------------------------------
+    # Finished?
+    # -----------------------------------
+
     def finished(self, phone):
 
         session = self.sessions[phone]
 
-        return session["current"] >= len(
+        return session["current"] >= len(session["items"])
 
-            session["items"]
+    # -----------------------------------
+    # Selected Products
+    # -----------------------------------
 
-        )
+    def selected(self, phone):
 
-    def end(self, phone):
-
-        return self.sessions.pop(
-
-            phone,
-
-            None
-
-        )
+        return self.sessions[phone]["selected"]
 
 
 shopping_session = ShoppingSession()

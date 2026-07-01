@@ -2,7 +2,7 @@ from fastapi import APIRouter, Form
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
 
-from ai.langgraph.graph import graph
+from backend.conversation_engine import engine
 from ai.invoice.pipeline import InvoicePipeline
 
 router = APIRouter()
@@ -42,12 +42,15 @@ async def webhook(
 
     MediaUrl0: str = Form(None),
 
-    MediaContentType0: str = Form(None)
+    MediaContentType0: str = Form(None),
+
+    From: str = Form("")
 
 ):
 
     print("\n" + "=" * 70)
     print("📩 Incoming WhatsApp Message")
+    print("From :", From)
     print("Body :", Body)
     print("Media:", NumMedia)
     print("=" * 70)
@@ -99,41 +102,22 @@ async def webhook(
         return whatsapp_reply(reply)
 
     # -------------------------------------------------------
-    # LangGraph AI
+    # Conversation Engine
     # -------------------------------------------------------
 
     try:
 
-        result = graph.invoke(
+        reply = await engine.process(
 
-            {
+            phone=From,
 
-                "message": Body,
-
-                "selected_agents": [],
-
-                "results": {},
-
-                "response": ""
-
-            }
+            message=Body
 
         )
 
-        print("\n" + "=" * 70)
-        print("LangGraph Result")
-        print(result)
-        print("=" * 70)
+        if not reply:
 
-        reply = result.get(
-
-            "response",
-
-            "Sorry, I couldn't generate a response."
-
-        )
-
-        # WhatsApp safe limit
+            reply = "Sorry, I couldn't generate a response."
 
         MAX_LENGTH = 1400
 
@@ -147,15 +131,16 @@ async def webhook(
 
             )
 
-        print("\nReply Sent\n")
-
+        print("\n" + "=" * 70)
+        print("Reply Sent")
         print(reply)
+        print("=" * 70)
 
         return whatsapp_reply(reply)
 
     except Exception as e:
 
-        print("\nLangGraph Error\n")
+        print("\nConversation Error\n")
 
         print(e)
 

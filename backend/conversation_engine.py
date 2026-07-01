@@ -7,15 +7,16 @@ from backend.chat import process_message
 
 class ConversationEngine:
     """
-    Main conversation engine.
+    Main Conversation Engine.
 
-    Responsible for:
+    Responsibilities
 
-    • Session Memory
-    • Conversation History
-    • Response Chunking
-    • Continue Support
-    • Calling LangGraph
+    • Conversation history
+    • Session memory
+    • Response chunking
+    • Continue support
+
+    Business logic is handled by backend.chat
     """
 
     def __init__(self):
@@ -23,10 +24,10 @@ class ConversationEngine:
         pass
 
     # --------------------------------------------------
-    # Process User Message
+    # Process Message
     # --------------------------------------------------
 
-    def process(
+    async def process(
 
         self,
 
@@ -39,13 +40,13 @@ class ConversationEngine:
         message = message.strip()
 
         # ---------------------------------------
-        # Ensure Session Exists
+        # Ensure Memory Exists
         # ---------------------------------------
 
         memory.get(phone)
 
         # ---------------------------------------
-        # Continue Support
+        # Continue Long Response
         # ---------------------------------------
 
         if message.lower() == "continue":
@@ -56,13 +57,13 @@ class ConversationEngine:
 
                 return next_chunk
 
-            return "✅ End of report."
+            return "✅ End of response."
 
         # ---------------------------------------
-        # Generate AI Response
+        # Process Business Logic
         # ---------------------------------------
 
-        response = process_message(
+        response = await process_message(
 
             phone=phone,
 
@@ -71,7 +72,7 @@ class ConversationEngine:
         )
 
         # ---------------------------------------
-        # Store Conversation History
+        # Save Conversation
         # ---------------------------------------
 
         session.add_message(
@@ -85,7 +86,7 @@ class ConversationEngine:
         )
 
         # ---------------------------------------
-        # Store Session Memory
+        # Update Memory
         # ---------------------------------------
 
         memory.update(
@@ -99,10 +100,14 @@ class ConversationEngine:
         )
 
         # ---------------------------------------
-        # Chunk Long Responses
+        # Chunk Long Response
         # ---------------------------------------
 
-        chunks = chunker.split(response)
+        chunks = chunker.split(
+
+            response
+
+        )
 
         session.save_chunks(
 

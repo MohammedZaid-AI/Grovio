@@ -2,19 +2,22 @@ import re
 
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.intelligence.inventory import Inventory
+from ai.intelligence.procurement_planner import ProcurementPlanner
 from ai.shopping.shopping_session import shopping_session
 from ai.services.swiggy_service import SwiggyService
-from ai.intelligence.procurement_planner import ProcurementPlanner
+
 
 class ShoppingOrchestrator:
     """
     Shopping Orchestrator.
 
-    Responsible only for deciding
-    WHAT should be ordered.
+    Responsible for:
 
-    It never talks to Swiggy.
-    It never performs checkout.
+    - Building shopping lists
+    - Starting shopping sessions
+    - Resuming shopping sessions
+    - Product search
+    - Auto procurement
     """
 
     def __init__(self):
@@ -23,13 +26,13 @@ class ShoppingOrchestrator:
 
         self.inventory = Inventory()
 
-        self.service = SwiggyService()
-
         self.planner = ProcurementPlanner()
 
-    # ------------------------------------
+        self.service = SwiggyService()
+
+    # ---------------------------------------------------
     # Manual Order
-    # ------------------------------------
+    # ---------------------------------------------------
 
     async def manual_order(self, message):
 
@@ -59,9 +62,9 @@ class ShoppingOrchestrator:
 
         return items
 
-    # ------------------------------------
+    # ---------------------------------------------------
     # Forecast Order
-    # ------------------------------------
+    # ---------------------------------------------------
 
     async def forecast_order(self):
 
@@ -70,8 +73,11 @@ class ShoppingOrchestrator:
         items = []
 
         for product in forecast.get(
+
             "recommended_orders",
+
             []
+
         ):
 
             items.append(
@@ -88,9 +94,9 @@ class ShoppingOrchestrator:
 
         return items
 
-    # ------------------------------------
+    # ---------------------------------------------------
     # Inventory Order
-    # ------------------------------------
+    # ---------------------------------------------------
 
     async def inventory_order(self):
 
@@ -99,8 +105,11 @@ class ShoppingOrchestrator:
         items = []
 
         for product in inventory.get(
+
             "low_stock",
+
             []
+
         ):
 
             qty = max(
@@ -109,7 +118,9 @@ class ShoppingOrchestrator:
 
                 int(
 
-                    product["minimum"] -
+                    product["minimum"]
+
+                    -
 
                     product["stock"]
 
@@ -131,9 +142,79 @@ class ShoppingOrchestrator:
 
         return items
 
-    # ------------------------------------
+    # ---------------------------------------------------
+    # Recurring Order
+    # ---------------------------------------------------
+
+    async def recurring_order(self):
+
+        # Sprint 3
+
+        return []
+
+    # ---------------------------------------------------
+    # Auto Order
+    # ---------------------------------------------------
+
+    async def auto_order(self):
+
+        plan = await self.planner.execute()
+
+        return plan["items"]
+
+    # ---------------------------------------------------
+    # Execute
+    # ---------------------------------------------------
+
+    async def execute(
+
+        self,
+
+        source,
+
+        phone=None,
+
+        message=None
+
+    ):
+
+        if source == "manual":
+
+            return await self.manual_order(
+
+                message
+
+            )
+
+        if source == "forecast":
+
+            return await self.forecast_order()
+
+        if source == "inventory":
+
+            return await self.inventory_order()
+
+        if source == "recurring":
+
+            return await self.recurring_order()
+
+        if source == "auto":
+
+            return await self.auto_order()
+
+        if source == "session":
+
+            return await self.resume_session(
+
+                phone
+
+            )
+
+        return []
+
+    # ---------------------------------------------------
     # Start Shopping
-    # ------------------------------------
+    # ---------------------------------------------------
 
     async def start(
 
@@ -149,11 +230,19 @@ class ShoppingOrchestrator:
 
         items = await self.execute(
 
-            source,
+            source=source,
 
-            message
+            phone=phone,
+
+            message=message
 
         )
+
+        # session source already returns reply
+
+        if source == "session":
+
+            return items
 
         if not items:
 
@@ -173,11 +262,39 @@ class ShoppingOrchestrator:
 
         )
 
+        return await self.resume_session(
+
+            phone
+
+        )
+
+    # ---------------------------------------------------
+    # Resume Shopping Session
+    # ---------------------------------------------------
+
+    async def resume_session(
+
+        self,
+
+        phone
+
+    ):
+
         first_item = shopping_session.current_item(
 
             phone
 
         )
+
+        if not first_item:
+
+            return {
+
+                "message":
+
+                    "No active shopping session."
+
+            }
 
         products = await self.service.search_products(
 
@@ -251,57 +368,17 @@ class ShoppingOrchestrator:
 
         }
 
-    # ------------------------------------
-    # Recurring Order
-    # ------------------------------------
+    # ---------------------------------------------------
+    # Merge Items
+    # ---------------------------------------------------
 
-    async def recurring_order(self):
-
-        return []
-
-    # ------------------------------------
-    # Execute
-    # ------------------------------------
-
-    async def execute(
+    def merge_items(
 
         self,
 
-        source,
-
-        message=None
+        *lists
 
     ):
-
-        if source == "manual":
-
-            return await self.manual_order(
-                message
-            )
-
-        if source == "forecast":
-
-            return await self.forecast_order()
-
-        if source == "inventory":
-
-            return await self.inventory_order()
-
-        if source == "recurring":
-
-            return await self.recurring_order()
-        
-        if source == "auto":
-
-            return await self.auto_order()
-
-        return []
-    
-    # ------------------------------------
-    # Merge Items
-    # ------------------------------------
-
-    def merge_items(self, *lists):
 
         merged = {}
 
@@ -319,14 +396,23 @@ class ShoppingOrchestrator:
 
                     merged[name]["quantity"] += item["quantity"]
 
-        return list(merged.values())
+        return list(
 
+            merged.values()
 
-    # ------------------------------------
+        )
+
+    # ---------------------------------------------------
     # Optimize Items
-    # ------------------------------------
+    # ---------------------------------------------------
 
-    def optimize_items(self, items):
+    def optimize_items(
+
+        self,
+
+        items
+
+    ):
 
         for item in items:
 
@@ -335,14 +421,3 @@ class ShoppingOrchestrator:
                 item["quantity"] = 10
 
         return items
-
-
-    # ------------------------------------
-    # Auto Order
-    # ------------------------------------
-
-    async def auto_order(self):
-
-        plan = await self.planner.execute()
-
-        return plan["items"]

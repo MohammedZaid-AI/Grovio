@@ -4,8 +4,16 @@ from ai.intelligence.inventory import Inventory
 
 class ProcurementPlanner:
     """
-    Decides WHAT should be procured.
-    Does not talk to Swiggy.
+    AI Procurement Planner.
+
+    Responsible for deciding WHAT should be purchased.
+
+    Does NOT:
+    - Talk to Swiggy
+    - Create carts
+    - Checkout
+
+    It only returns a procurement plan.
     """
 
     def __init__(self):
@@ -14,60 +22,10 @@ class ProcurementPlanner:
 
         self.inventory = Inventory()
 
-    async def execute(self):
+    # --------------------------------------------------
+    # Merge Shopping Lists
+    # --------------------------------------------------
 
-        forecast = await self.orchestrator.forecast_order()
-
-        inventory = await self.orchestrator.inventory_order()
-
-        recurring = await self.orchestrator.recurring_order()
-
-        forecast = self.forecaster.execute()
-
-        inventory = self.inventory.execute()
-        
-
-        items = self.orchestrator.merge_items(
-
-            forecast,
-
-            inventory,
-
-            recurring
-
-        )
-
-        items = self.orchestrator.optimize_items(items)
-
-        confidence = 90
-
-        reasoning = []
-
-        if forecast:
-            reasoning.append(
-                "Forecast recommends replenishment."
-            )
-
-        if inventory:
-            reasoning.append(
-                "Some products are below minimum stock."
-            )
-
-        if recurring:
-            reasoning.append(
-                "Recurring purchases included."
-            )
-
-        return {
-
-            "items": items,
-
-            "confidence": confidence,
-
-            "reasoning": reasoning
-
-        }
-    
     def merge_items(self, *lists):
 
         merged = {}
@@ -88,13 +46,169 @@ class ProcurementPlanner:
 
         return list(merged.values())
 
+    # --------------------------------------------------
+    # Quantity Optimizer
+    # --------------------------------------------------
 
     def optimize_items(self, items):
 
         for item in items:
 
+            # Temporary safety limit
             if item["quantity"] > 10:
 
                 item["quantity"] = 10
 
         return items
+
+    # --------------------------------------------------
+    # Build Procurement Plan
+    # --------------------------------------------------
+
+    async def execute(self):
+
+        # -----------------------------
+        # Forecast
+        # -----------------------------
+
+        forecast_result = self.forecaster.execute()
+
+        forecast_items = []
+
+        for item in forecast_result.get(
+
+            "recommended_orders",
+
+            []
+
+        ):
+
+            forecast_items.append(
+
+                {
+
+                    "name": item["product"],
+
+                    "quantity": item["recommended_quantity"]
+
+                }
+
+            )
+
+        # -----------------------------
+        # Inventory
+        # -----------------------------
+
+        inventory_result = self.inventory.execute()
+
+        inventory_items = []
+
+        for item in inventory_result.get(
+
+            "low_stock",
+
+            []
+
+        ):
+
+            qty = max(
+
+                1,
+
+                int(
+
+                    item["minimum"]
+
+                    -
+
+                    item["stock"]
+
+                )
+
+            )
+
+            inventory_items.append(
+
+                {
+
+                    "name": item["product"],
+
+                    "quantity": qty
+
+                }
+
+            )
+
+        # -----------------------------
+        # Recurring Orders
+        # -----------------------------
+
+        recurring_items = []
+
+        # Sprint 3
+        # Later we'll fetch recurring
+        # supplier orders here.
+
+        # -----------------------------
+        # Merge
+        # -----------------------------
+
+        items = self.merge_items(
+
+            forecast_items,
+
+            inventory_items,
+
+            recurring_items
+
+        )
+
+        # -----------------------------
+        # Optimize
+        # -----------------------------
+
+        items = self.optimize_items(
+
+            items
+
+        )
+
+        # -----------------------------
+        # Build Reasoning
+        # -----------------------------
+
+        reasoning = []
+
+        if forecast_items:
+
+            reasoning.append(
+
+                "Forecast predicts increased demand."
+
+            )
+
+        if inventory_items:
+
+            reasoning.append(
+
+                "Low inventory items require replenishment."
+
+            )
+
+        if recurring_items:
+
+            reasoning.append(
+
+                "Recurring purchases included."
+
+            )
+
+        return {
+
+            "items": items,
+
+            "confidence": 90,
+
+            "reasoning": reasoning
+
+        }

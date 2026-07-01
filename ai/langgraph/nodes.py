@@ -1,5 +1,6 @@
 from ai.langgraph.registry import registry
 from ai.langgraph.supervisor import Supervisor
+import asyncio
 
 
 supervisor = Supervisor()
@@ -24,33 +25,46 @@ def execute_agents(state):
 
     for agent in state["selected_agents"]:
 
+        instance = registry.get(agent)
+
+        # Purchase Editor
         if agent == "purchase_editor":
 
-            results[agent] = registry.get(agent).execute(
+            results[agent] = instance.execute(
 
                 state["message"]
 
             )
 
+        # Purchase History
         elif agent == "purchase_history":
 
-            results[agent] = registry.get(
+            results[agent] = instance.execute(
+
+                state["message"]
+
+            )
+
+        # Async Agents
+        elif agent == "auto_order":
+
+            raise Exception(
+                "AutoOrderAgent cannot be executed from synchronous LangGraph."
+            )
+
+        # Dashboard
+        elif agent == "dashboard":
+
+            results[agent] = instance.execute()
+
+        # Default
+        else:
+
+            results[agent] = registry.execute(
 
                 agent
 
-            ).execute(
-
-                state["message"]
-
             )
-        
-        elif agent == "dashboard":
-
-            results[agent] = registry.execute(agent)
-
-        else:
-
-            results[agent] = registry.execute(agent)
 
     state["results"] = results
 
@@ -128,6 +142,10 @@ def response_node(state):
                 reply.append(f"• {risk}")
 
         state["response"] = "\n".join(reply)
+    
+    elif "auto_order" in state["results"]:
+
+        state["response"] = state["results"]["auto_order"]["message"]
 
     else:
 
