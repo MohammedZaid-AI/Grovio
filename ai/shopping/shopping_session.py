@@ -1,19 +1,14 @@
 class ShoppingSession:
 
     """
-    Keeps track of a user's
-    current shopping flow.
+    Stores the shopping conversation state.
     """
 
     def __init__(self):
 
         self.sessions = {}
 
-    def start(
-        self,
-        phone,
-        items
-    ):
+    def start(self, phone, items):
 
         self.sessions[phone] = {
 
@@ -21,7 +16,9 @@ class ShoppingSession:
 
             "current": 0,
 
-            "selected": []
+            "selected": [],
+
+            "options": []
 
         }
 
@@ -29,23 +26,7 @@ class ShoppingSession:
 
         return self.sessions.get(phone)
 
-    def save_selection(
-
-        self,
-
-        phone,
-
-        product
-
-    ):
-
-        session = self.sessions[phone]
-
-        session["selected"].append(product)
-
-        session["current"] += 1
-
-    def next_item(self, phone):
+    def current_item(self, phone):
 
         session = self.sessions[phone]
 
@@ -53,13 +34,81 @@ class ShoppingSession:
 
             return None
 
-        return session["items"][
+        return session["items"][session["current"]]
+
+    def set_options(
+
+        self,
+
+        phone,
+
+        options
+
+    ):
+
+        self.sessions[phone]["options"] = options
+
+    def select(
+
+        self,
+
+        phone,
+
+        index
+
+    ):
+
+        session = self.sessions[phone]
+
+        product = session["options"][index]
+
+        quantity = session["items"][
 
             session["current"]
 
-        ]
+        ]["quantity"]
 
-    def finish(self, phone):
+        variant = product["variations"][0]
+
+        session["selected"].append(
+
+            {
+
+                "displayName":
+
+                    product["displayName"],
+
+                "spinId":
+
+                    variant["spinId"],
+
+                "quantity":
+
+                    quantity,
+
+                "price":
+
+                    variant["price"]["offerPrice"]
+
+            }
+
+        )
+
+        session["current"] += 1
+
+        session["options"] = []
+
+    def finished(self, phone):
+
+        session = self.sessions[phone]
+
+        return session["current"] >= len(
+
+            session["items"]
+
+        )
+
+    def end(self, phone):
 
         return self.sessions.pop(
 
