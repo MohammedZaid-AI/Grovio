@@ -142,6 +142,33 @@ class Supervisor:
 
         )
 
+
+    def is_auto_order(self, message):
+
+        patterns = [
+
+            r"order.*grocer",
+
+            r"buy.*grocer",
+
+            r"order.*everything",
+
+            r"everything.*today",
+
+            r"today.*shopping",
+
+            r"procure.*stock"
+
+        ]
+
+        return any(
+
+            re.search(pattern, message)
+
+            for pattern in patterns
+
+        )
+
     # --------------------------------------------------
     # Route Message
     # --------------------------------------------------
@@ -207,6 +234,10 @@ class Supervisor:
         if self.is_purchase_editor(message):
 
             return ["purchase_editor"]
+        
+        if self.is_auto_order(message):
+
+            return ["auto_order"]
 
         # ------------------------
         # Ask the LLM

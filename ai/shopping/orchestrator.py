@@ -4,6 +4,7 @@ from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.intelligence.inventory import Inventory
 from ai.shopping.shopping_session import shopping_session
 from ai.services.swiggy_service import SwiggyService
+from ai.intelligence.procurement_planner import ProcurementPlanner
 
 class ShoppingOrchestrator:
     """
@@ -23,6 +24,8 @@ class ShoppingOrchestrator:
         self.inventory = Inventory()
 
         self.service = SwiggyService()
+
+        self.planner = ProcurementPlanner()
 
     # ------------------------------------
     # Manual Order
@@ -287,5 +290,59 @@ class ShoppingOrchestrator:
         if source == "recurring":
 
             return await self.recurring_order()
+        
+        if source == "auto":
+
+            return await self.auto_order()
 
         return []
+    
+    # ------------------------------------
+    # Merge Items
+    # ------------------------------------
+
+    def merge_items(self, *lists):
+
+        merged = {}
+
+        for shopping_list in lists:
+
+            for item in shopping_list:
+
+                name = item["name"]
+
+                if name not in merged:
+
+                    merged[name] = item.copy()
+
+                else:
+
+                    merged[name]["quantity"] += item["quantity"]
+
+        return list(merged.values())
+
+
+    # ------------------------------------
+    # Optimize Items
+    # ------------------------------------
+
+    def optimize_items(self, items):
+
+        for item in items:
+
+            if item["quantity"] > 10:
+
+                item["quantity"] = 10
+
+        return items
+
+
+    # ------------------------------------
+    # Auto Order
+    # ------------------------------------
+
+    async def auto_order(self):
+
+        plan = await self.planner.execute()
+
+        return plan["items"]
