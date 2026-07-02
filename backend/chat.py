@@ -189,9 +189,83 @@ async def process_message(
 
             result = await service.checkout()
 
+        if result["success"]:
+
+    # pyrefly: ignore [missing-import]
+            from ai.memory.memory_trainer import memory_trainer
+
+            memory_trainer.train(
+
+                shopping_session.selected(phone)
+
+            )
+
             shopping_session.end(phone)
 
-            return result["message"]
+            return (
+                "✅ Order placed successfully!\n\n"
+                f"Order ID: {result.get('order_id')}\n"
+                f"Status: {result.get('status')}\n"
+                f"Total: ₹{result.get('total')}"
+            )
+
+        decision = result.get("decision", {})
+
+        action = decision.get("action")
+
+        # ----------------------------------
+        # Reduce Quantity
+        # ----------------------------------
+
+        if action == "reduce_quantity":
+
+            return (
+                "⚠ Some items are available only in a lower quantity.\n\n"
+                "Would you like me to:\n\n"
+                "1. Reduce the quantity\n"
+                "2. Choose another product\n"
+                "3. Remove the item"
+            )
+
+        # ----------------------------------
+        # Alternative Product
+        # ----------------------------------
+
+        if action == "choose_alternative":
+
+            return (
+                "⚠ One or more products are unavailable.\n\n"
+                "I can search for the closest alternative.\n\n"
+                "Reply YES to continue."
+            )
+
+        # ----------------------------------
+        # Retry
+        # ----------------------------------
+
+        if action == "retry":
+
+            return (
+                "⚠ Swiggy seems temporarily unavailable.\n\n"
+                "Please try again in a few minutes."
+            )
+
+        # ----------------------------------
+        # Store Closed
+        # ----------------------------------
+
+        if action == "change_store":
+
+            return (
+                "⚠ The selected store is unavailable.\n\n"
+                "I can try another nearby store."
+            )
+
+        # ----------------------------------
+        # Default
+        # ----------------------------------
+
+        return result["message"]
 
     # ==================================================
     # LANGGRAPH

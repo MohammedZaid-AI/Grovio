@@ -1,163 +1,88 @@
-from langchain_core.tools import tool
-
-# Intelligence
-from ai.intelligence.memory import RestaurantMemory
-from ai.intelligence.supplier_memory import SupplierMemory
-from ai.intelligence.pattern_detector import PatternDetector
-from ai.intelligence.price_tracker import PriceTracker
-
-# Procurement
-from ai.agents.procurement_forecaster import ProcurementForecaster
-
-# Reports
-from ai.reports.daily_brief import generate_daily_brief
-
-# Agents
-from ai.agents.ai_coo import RestaurantCOO
+from ai.tools.search_products_tool import SearchProductsTool
 
 
-# -----------------------------
-# Memory Tool
-# -----------------------------
-
-@tool
-def restaurant_memory():
-
+class ToolRegistry:
     """
-    Returns restaurant statistics and memory.
+    Central registry for all executable tools.
     """
 
-    memory = RestaurantMemory()
+    def __init__(self):
 
-    return {
+        self.tools = {}
 
-        "completed_orders":
+        self.register(
+            SearchProductsTool()
+        )
 
-            memory.total_completed_orders(),
+    # ----------------------------------
+    # Register Tool
+    # ----------------------------------
 
-        "pending_orders":
+    def register(
 
-            memory.total_pending_orders(),
+        self,
 
-        "restaurant_spend":
+        tool
 
-            memory.total_spend(),
+    ):
 
-        "average_order":
+        self.tools[tool.name] = tool
 
-            memory.average_order_value()
+    # ----------------------------------
+    # Get Tool
+    # ----------------------------------
 
-    }
+    def get(
 
+        self,
 
-# -----------------------------
-# Supplier Tool
-# -----------------------------
+        name
 
-@tool
-def supplier_memory():
+    ):
 
-    """
-    Returns supplier report.
-    """
+        return self.tools.get(name)
 
-    memory = SupplierMemory()
+    # ----------------------------------
+    # Execute Tool
+    # ----------------------------------
 
-    return memory.supplier_report()
+    async def execute(
 
+        self,
 
-# -----------------------------
-# Pattern Tool
-# -----------------------------
+        name,
 
-@tool
-def buying_patterns():
+        **kwargs
 
-    """
-    Returns purchasing patterns.
-    """
+    ):
 
-    detector = PatternDetector()
+        tool = self.get(name)
 
-    return detector.detect_patterns()
+        if tool is None:
 
+            raise ValueError(
 
-# -----------------------------
-# Forecast Tool
-# -----------------------------
+                f"Unknown tool: {name}"
 
-@tool
-def procurement_forecast():
+            )
 
-    """
-    Returns procurement forecast.
-    """
+        return await tool.execute(
 
-    forecast = ProcurementForecaster()
+            **kwargs
 
-    return forecast.forecast()
+        )
 
+    # ----------------------------------
+    # Available Tools
+    # ----------------------------------
 
-# -----------------------------
-# Daily Brief
-# -----------------------------
+    def available(self):
 
-@tool
-def daily_brief():
+        return list(
 
-    """
-    Returns today's restaurant brief.
-    """
+            self.tools.keys()
 
-    return generate_daily_brief()
+        )
 
 
-# -----------------------------
-# AI COO
-# -----------------------------
-
-@tool
-def restaurant_coo():
-
-    """
-    Complete restaurant analysis.
-    """
-
-    coo = RestaurantCOO()
-
-    return coo.analyze()
-
-
-# -----------------------------
-# Price Tracker
-# -----------------------------
-
-@tool
-def product_price(product: str):
-
-    """
-    Returns price trend of a product.
-    """
-
-    tracker = PriceTracker()
-
-    return tracker.analyze(product)
-
-
-TOOLS = [
-
-    restaurant_memory,
-
-    supplier_memory,
-
-    buying_patterns,
-
-    procurement_forecast,
-
-    daily_brief,
-
-    restaurant_coo,
-
-    product_price
-
-]
+tool_registry = ToolRegistry()

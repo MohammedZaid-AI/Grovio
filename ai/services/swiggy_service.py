@@ -1,14 +1,15 @@
 import json
 
 from integrations.swiggy.swiggy_mcp import SwiggyInstamart
+from ai.agents.checkout_recovery_agent import checkout_recovery
 
 
 class SwiggyService:
     """
     High-level wrapper around Swiggy MCP.
 
-    All agents should communicate only
-    through this service.
+    All agents communicate with Swiggy
+    only through this service.
     """
 
     def __init__(self):
@@ -31,11 +32,21 @@ class SwiggyService:
     # Search Products
     # ------------------------------------
 
-    async def search_products(self, product_name):
+    async def search_products(
+
+        self,
+
+        product_name
+
+    ):
 
         client = await self.initialize()
 
-        return await client.get_product_options(product_name)
+        return await client.get_product_options(
+
+            product_name
+
+        )
 
     # ------------------------------------
     # Cart
@@ -53,7 +64,13 @@ class SwiggyService:
 
         return await client.get_cart()
 
-    async def build_cart(self, items):
+    async def build_cart(
+
+        self,
+
+        items
+
+    ):
 
         client = await self.initialize()
 
@@ -64,17 +81,25 @@ class SwiggyService:
         for item in items:
 
             payload.append(
+
                 {
+
                     "spinId": item["spinId"],
+
                     "quantity": item["quantity"]
+
                 }
+
             )
 
         await client.clear_cart()
 
         await client.update_cart(
+
             address_id,
+
             payload
+
         )
 
         return await client.get_cart()
@@ -89,37 +114,89 @@ class SwiggyService:
 
         address_id = await client.get_address_id()
 
-        result = await client.checkout(address_id)
+        result = await client.checkout(
 
-        if getattr(result, "isError", False):
+            address_id
 
-            return self._parse_error(result)
+        )
 
-        return self._parse_success(result)
+        if getattr(
+
+            result,
+
+            "isError",
+
+            False
+
+        ):
+
+            return await self._parse_error(
+
+                result
+
+            )
+
+        return self._parse_success(
+
+            result
+
+        )
 
     # ------------------------------------
-    # Parse Success
+    # Success
     # ------------------------------------
 
-    def _parse_success(self, result):
+    def _parse_success(
+
+        self,
+
+        result
+
+    ):
 
         try:
 
-            data = json.loads(result.content[0].text)
+            data = json.loads(
+
+                result.content[0].text
+
+            )
 
             return {
 
                 "success": True,
 
-                "order_id": data["data"]["orderId"],
+                "order_id": data["data"].get(
 
-                "status": data["data"]["status"],
+                    "orderId"
 
-                "payment": data["data"]["paymentMethod"],
+                ),
 
-                "total": data["data"]["cartTotal"],
+                "status": data["data"].get(
 
-                "message": data["message"]
+                    "status"
+
+                ),
+
+                "payment": data["data"].get(
+
+                    "paymentMethod"
+
+                ),
+
+                "total": data["data"].get(
+
+                    "cartTotal"
+
+                ),
+
+                "message": data.get(
+
+                    "message",
+
+                    "Order placed successfully."
+
+                )
 
             }
 
@@ -131,54 +208,60 @@ class SwiggyService:
 
                 "code": "INVALID_RESPONSE",
 
-                "message": "Unable to parse Swiggy response."
+                "message": "Unable to parse Swiggy checkout response."
 
             }
 
     # ------------------------------------
-    # Parse Error
+    # Error
     # ------------------------------------
 
-    def _parse_error(self, result):
+    async def _parse_error(
 
-        text = ""
+        self,
+
+        result
+
+    ):
+
+        error = ""
 
         if result.content:
 
-            text = result.content[0].text
+            error = result.content[0].text
 
-        if "Max Per Item Quantity Limit" in text:
+        decision = await checkout_recovery.execute(
 
-            return {
+            error
 
-                "success": False,
+        )
 
-                "code": "LIMIT_EXCEEDED",
+        code = "UNKNOWN"
 
-                "message":
-                    "The selected quantity exceeds Swiggy's allowed limit."
+        if "Max Per Item Quantity Limit" in error:
 
-            }
+            code = "LIMIT_EXCEEDED"
 
-        if "Out of Stock" in text:
+        elif "Out of Stock" in error:
 
-            return {
+            code = "OUT_OF_STOCK"
 
-                "success": False,
+        elif "partially available" in error.lower():
 
-                "code": "OUT_OF_STOCK",
+            code = "PARTIAL_AVAILABILITY"
 
-                "message":
-                    "One or more selected products are out of stock."
+        elif "store is currently unavailable" in error.lower():
 
-            }
+            code = "STORE_UNAVAILABLE"
 
         return {
 
             "success": False,
 
-            "code": "UNKNOWN",
+            "code": code,
 
-            "message": text
+            "message": error,
+
+            "decision": decision
 
         }

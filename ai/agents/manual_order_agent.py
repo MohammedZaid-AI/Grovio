@@ -1,5 +1,3 @@
-from ai.shopping.shopping_session import shopping_session
-from ai.services.swiggy_service import SwiggyService
 from ai.shopping.orchestrator import ShoppingOrchestrator
 
 
@@ -9,13 +7,14 @@ class ManualOrderAgent:
 
     Example:
 
-    5 milk
-    2 butter
+    Order groceries
+
+    2 Milk
+    1 Butter
+    5 Coke
     """
 
     def __init__(self):
-
-        self.service = SwiggyService()
 
         self.orchestrator = ShoppingOrchestrator()
 
@@ -35,7 +34,7 @@ class ManualOrderAgent:
 
         return await self.orchestrator.start(
 
-            phone,
+            phone=phone,
 
             source="manual",
 

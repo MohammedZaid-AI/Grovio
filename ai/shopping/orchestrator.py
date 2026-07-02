@@ -1,11 +1,10 @@
-import re
-
+from ai.agents.order_parser_agent import order_parser
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.intelligence.inventory import Inventory
 from ai.intelligence.procurement_planner import ProcurementPlanner
 from ai.shopping.shopping_session import shopping_session
 from ai.services.swiggy_service import SwiggyService
-from ai.intelligence.product_matcher import matcher
+from ai.agents.product_selection_agent import product_selector
 
 class ShoppingOrchestrator:
     """
@@ -34,31 +33,19 @@ class ShoppingOrchestrator:
     # Manual Order
     # ---------------------------------------------------
 
-    async def manual_order(self, message):
+    async def manual_order(
 
-        items = []
+        self,
 
-        pattern = r"(\d+)\s+(.+)"
+        message
 
-        for line in message.splitlines():
+    ):
 
-            line = line.strip()
+        items = await order_parser.execute(
 
-            match = re.match(pattern, line)
+            message
 
-            if match:
-
-                items.append(
-
-                    {
-
-                        "name": match.group(2),
-
-                        "quantity": int(match.group(1))
-
-                    }
-
-                )
+        )
 
         return items
 
@@ -303,10 +290,10 @@ class ShoppingOrchestrator:
         )
 
         # ------------------------------------
-        # Auto Product Selection
+        # AI Product Selection
         # ------------------------------------
 
-        auto_select, product = matcher.should_auto_select(
+        decision = await product_selector.execute(
 
             first_item["name"],
 
@@ -314,9 +301,9 @@ class ShoppingOrchestrator:
 
         )
 
-        if auto_select:
+        if decision.get("action") == "auto_select":
 
-            index = products.index(product)
+            index = decision["index"]
 
             shopping_session.select(
 
@@ -325,6 +312,18 @@ class ShoppingOrchestrator:
                 index
 
             )
+
+            print()
+
+            print("=" * 60)
+
+            print("AI Product Selection")
+
+            print(decision)
+
+            print("=" * 60)
+
+            print()
 
             if shopping_session.finished(phone):
 
@@ -337,7 +336,6 @@ class ShoppingOrchestrator:
             return await self.resume_session(
 
                 phone
-
             )
 
         if not products:

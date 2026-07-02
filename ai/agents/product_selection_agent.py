@@ -1,197 +1,141 @@
-import asyncio
+import json
+from ai.memory.restaurant_memory import restaurant_memory
+from core.llm import llm
 
-from ai.shopping.shopping_session import shopping_session
-from ai.services.swiggy_service import SwiggyService
+
+PRODUCT_SELECTION_PROMPT = """
+You are Grovio's Product Selection AI.
+
+The user requested one grocery item.
+
+You will receive:
+
+1. Restaurant memory
+2. User's requested item
+3. Swiggy search results
+
+Restaurant memory contains:
+
+- Preferred brands
+- Frequently purchased products
+- Purchase frequency
+- Supplier preferences
+
+Use the restaurant memory whenever possible.
+
+If the preferred brand exists in the product list,
+prefer that product.
+
+Only ask the user when multiple equally good choices exist.
+
+Your job is to determine whether one product is clearly the best match.
+
+If one product is clearly the intended product,
+auto select it.
+
+If multiple products look equally suitable,
+ask the user.
+
+Return ONLY JSON.
+
+Output format:
+
+{
+    "action":"auto_select",
+    "index":0,
+    "confidence":98,
+    "reason":"..."
+}
+
+or
+
+{
+    "action":"ask_user",
+    "confidence":65,
+    "reason":"Multiple good matches."
+}
+
+Never explain.
+
+Never use markdown.
+
+Return JSON only.
+"""
 
 
 class ProductSelectionAgent:
-    """
-    Handles product selection during
-    the shopping conversation.
-    """
 
-    def __init__(self):
+    async def execute(
 
-        self.service = SwiggyService()
+        self,
 
-    async def execute(self, phone, message):
+        query,
 
-        session = shopping_session.get(phone)
+        products
 
-        if not session:
+    ):
 
-            return {
+        formatted = []
 
-                "message":
-
-                    "No shopping session found."
-
-            }
-
-        # ----------------------------
-        # Validate Choice
-        # ----------------------------
-
-        try:
-
-            choice = int(message.strip()) - 1
-
-        except ValueError:
-
-            return {
-
-                "message":
-
-                    "Reply with a number."
-
-            }
-
-        options = session["options"]
-
-        if choice < 0 or choice >= len(options):
-
-            return {
-
-                "message":
-
-                    "Invalid choice."
-
-            }
-
-        # ----------------------------
-        # Save Selected Product
-        # ----------------------------
-
-        shopping_session.select(
-
-            phone,
-
-            choice
-
-        )
-
-        # ----------------------------
-        # Finished?
-        # ----------------------------
-
-        if shopping_session.finished(phone):
-
-            session = shopping_session.end(phone)
-
-            cart = await self.service.build_cart(
-                session["selected"]
-            )
-
-            total = 0
-
-            reply = []
-
-            reply.append("🛒 Swiggy Cart Ready")
-            reply.append("")
-
-            for item in session["selected"]:
-
-                subtotal = (
-                    item["price"] *
-                    item["quantity"]
-                )
-
-                total += subtotal
-
-                reply.append(
-                    f"• {item['displayName']}"
-                )
-
-                reply.append(
-                    f"Qty : {item['quantity']}"
-                )
-
-                reply.append(
-                    f"₹{subtotal}"
-                )
-
-                reply.append("")
-
-            reply.append(
-                f"Estimated Total : ₹{total}"
-            )
-
-            reply.append("")
-            reply.append(
-                "Reply YES to place the order."
-            )
-
-            return {
-
-                "message": "\n".join(reply),
-
-                "cart": cart
-            }
-
-        # ----------------------------
-        # Search Next Item
-        # ----------------------------
-
-        item = shopping_session.current_item(phone)
-
-        products = await self.service.search_products(
-
-            item["name"]
-
-        )
-
-        shopping_session.set_options(
-
-            phone,
-
-            products
-
-        )
-
-        reply = []
-
-        reply.append(
-
-            f"Choose {item['name']}"
-
-        )
-
-        reply.append("")
-
-        for i, product in enumerate(
-
-            products[:5],
-
-            start=1
-
-        ):
+        for i, product in enumerate(products):
 
             variant = product["variations"][0]
 
-            reply.append(
+            formatted.append(
 
-                f"{i}. "
+                {
 
-                f"{product['displayName']} "
+                    "index": i,
 
-                f"({variant['quantityDescription']}) "
+                    "name": product["displayName"],
 
-                f"₹{variant['price']['offerPrice']}"
+                    "quantity": variant["quantityDescription"],
+
+                    "price": variant["price"]["offerPrice"]
+
+                }
 
             )
 
-        reply.append("")
+        memory = restaurant_memory.get()
 
-        reply.append(
+        response = llm.chat(
 
-            "Reply with 1-5."
+            system=PRODUCT_SELECTION_PROMPT,
 
-        )
+            user=json.dumps(
 
-        return {
+        {
 
-            "message":
+            "restaurant_memory": memory,
 
-                "\n".join(reply)
+            "requested_item": query,
 
-        }
+            "products": formatted
+
+        },
+
+        indent=2
+
+    ),
+
+    temperature=0
+
+)
+
+        try:
+
+            return json.loads(response)
+
+        except Exception:
+
+            return {
+
+                "action": "ask_user",
+
+                "confidence": 0
+
+            }
+
+
+product_selector = ProductSelectionAgent()
