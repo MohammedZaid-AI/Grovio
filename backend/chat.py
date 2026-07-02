@@ -26,25 +26,31 @@ async def process_message(
     # AUTO PROCUREMENT
     # ==================================================
 
-    if message.lower() in {
+    lower_message = message.lower()
 
-        "order groceries",
+    if (
 
-        "order everything",
+        lower_message.startswith("order groceries")
 
-        "buy groceries",
+        or lower_message.startswith("order everything")
 
-        "today's shopping",
+        or lower_message.startswith("buy groceries")
 
-        "procure today's stock"
+        or lower_message.startswith("today's shopping")
 
-    }:
+        or lower_message.startswith("procure today's stock")
+
+    ):
 
         from ai.agents.auto_order_agent import AutoOrderAgent
 
         agent = AutoOrderAgent()
 
-        result = await agent.execute()
+        result = await agent.execute(
+
+            message=message
+
+        )
 
         shopping_session.start(
 

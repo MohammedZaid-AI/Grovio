@@ -5,7 +5,7 @@ from ai.intelligence.inventory import Inventory
 from ai.intelligence.procurement_planner import ProcurementPlanner
 from ai.shopping.shopping_session import shopping_session
 from ai.services.swiggy_service import SwiggyService
-
+from ai.intelligence.product_matcher import matcher
 
 class ShoppingOrchestrator:
     """
@@ -301,6 +301,44 @@ class ShoppingOrchestrator:
             first_item["name"]
 
         )
+
+        # ------------------------------------
+        # Auto Product Selection
+        # ------------------------------------
+
+        auto_select, product = matcher.should_auto_select(
+
+            first_item["name"],
+
+            products
+
+        )
+
+        if auto_select:
+
+            index = products.index(product)
+
+            shopping_session.select(
+
+                phone,
+
+                index
+
+            )
+
+            if shopping_session.finished(phone):
+
+                return {
+
+                    "message": "AUTO_FINISHED"
+
+                }
+
+            return await self.resume_session(
+
+                phone
+
+            )
 
         if not products:
 

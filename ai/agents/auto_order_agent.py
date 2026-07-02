@@ -13,9 +13,79 @@ class AutoOrderAgent:
 
         self.planner = ProcurementPlanner()
 
-    async def execute(self):
+    async def execute(self,message=None):
 
         plan = await self.planner.execute()
+
+        manual_items = []
+
+        if message:
+
+            import re
+
+            pattern = r"(\d+)\s+(.+)"
+
+            for line in message.splitlines():
+
+                line = line.strip()
+
+                match = re.match(pattern, line)
+
+                if match:
+
+                    manual_items.append(
+
+                        {
+
+                            "name": match.group(2),
+
+                            "quantity": int(match.group(1))
+
+                        }
+
+                    )
+
+        # ------------------------------------
+        # Merge AI + Manual Items
+        # ------------------------------------
+
+        merged = {}
+
+        for item in plan["items"]:
+
+            name = item["name"].lower()
+
+            merged[name] = {
+
+                "name": item["name"],
+
+                "quantity": item["quantity"]
+
+            }
+
+        for item in manual_items:
+
+            name = item["name"].lower()
+
+            if name in merged:
+
+                merged[name]["quantity"] += item["quantity"]
+
+            else:
+
+                merged[name] = {
+
+                    "name": item["name"],
+
+                    "quantity": item["quantity"]
+
+                }
+
+        plan["items"] = list(
+
+            merged.values()
+
+        )
 
         reply = []
 
