@@ -48,9 +48,19 @@ def execute_agents(state):
         # Async Agents
         elif agent == "auto_order":
 
-            raise Exception(
-                "AutoOrderAgent cannot be executed from synchronous LangGraph."
-            )
+            import concurrent.futures
+
+            def run_in_new_loop(coro):
+                loop = asyncio.new_event_loop()
+                try:
+                    asyncio.set_event_loop(loop)
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_new_loop, instance.execute(state["message"]))
+                results[agent] = future.result()
 
         # Dashboard
         elif agent == "dashboard":

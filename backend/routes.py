@@ -1,6 +1,8 @@
-from fastapi import APIRouter, Form
+from fastapi import APIRouter, Form, Request, HTTPException
 from fastapi.responses import Response
 from twilio.twiml.messaging_response import MessagingResponse
+from twilio.request_validator import RequestValidator
+import os
 
 from backend.conversation_engine import engine
 from ai.invoice.pipeline import InvoicePipeline
@@ -36,6 +38,8 @@ def whatsapp_reply(message: str):
 @router.post("/webhook")
 async def webhook(
 
+    request: Request,
+
     Body: str = Form(""),
 
     NumMedia: int = Form(0),
@@ -47,6 +51,24 @@ async def webhook(
     From: str = Form("")
 
 ):
+
+    # -------------------------------------------------------
+    # Twilio Signature Verification
+    # -------------------------------------------------------
+    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
+    if auth_token:
+        validator = RequestValidator(auth_token)
+        signature = request.headers.get("x-twilio-signature", "")
+        proto = request.headers.get("x-forwarded-proto", "http")
+        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+        url = f"{proto}://{host}{request.url.path}"
+        
+        form_data = await request.form()
+        params = dict(form_data)
+        
+        if not validator.validate(url, params, signature):
+            print("🚫 Webhook Signature Verification Failed!")
+            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     print("\n" + "=" * 70)
     print("📩 Incoming WhatsApp Message")

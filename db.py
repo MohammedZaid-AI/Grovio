@@ -1,1351 +1,285 @@
 import sqlite3
-
-DB_PATH = "database/orders.db"
-from database import *
-
+DB_PATH = 'database/orders.db'
 
 def get_connection():
-
     return sqlite3.connect(DB_PATH)
 
-
 def init_db():
-
     conn = get_connection()
-
-    cursor = conn.cursor()
-
-    # --------------------------------------------------
-    # Orders
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS orders(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        product_name TEXT,
-
-        spin_id TEXT,
-
-        quantity INTEGER,
-
-        order_type TEXT,
-
-        schedule_time TEXT,
-
-        recurrence TEXT,
-
-        status TEXT DEFAULT 'active'
-
-    )
-    """)
-
-    # --------------------------------------------------
-    # Pending Orders
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS pending_orders(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        product_name TEXT,
-
-        spin_id TEXT,
-
-        quantity INTEGER,
-
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP,
-
-        status TEXT DEFAULT
-        'awaiting_confirmation'
-
-    )
-    """)
-
-    # --------------------------------------------------
-    # Order History
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS order_history(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        product_name TEXT,
-
-        quantity INTEGER,
-
-        amount REAL,
-
-        order_id TEXT,
-
-        ordered_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-
-    )
-    """)
-
-    # --------------------------------------------------
-    # Purchase Invoices
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS purchase_invoices(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        supplier TEXT,
-
-        invoice_number TEXT,
-
-        invoice_date TEXT,
-
-        total_amount REAL,
-
-        created_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-
-    )
-    """)
-
-    # --------------------------------------------------
-    # Purchase Items
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS purchase_items(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        invoice_id INTEGER,
-
-        product TEXT,
-
-        quantity REAL,
-
-        unit TEXT,
-
-        unit_price REAL,
-
-        total REAL,
-
-        FOREIGN KEY(invoice_id)
-        REFERENCES purchase_invoices(id)
-
-    )
-    """)
-
-    # --------------------------------------------------
-# Product Price History
-# --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS product_price_history(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        product TEXT,
-
-        supplier TEXT,
-
-        price REAL,
-
-        purchase_date TEXT
-
-    )
-    """)
-
-    # --------------------------------------------------
-    # Inventory
-    # --------------------------------------------------
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS inventory(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        product_name TEXT UNIQUE,
-
-        current_stock REAL,
-
-        minimum_stock REAL,
-
-        unit TEXT,
-
-        updated_at TIMESTAMP
-        DEFAULT CURRENT_TIMESTAMP
-
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS purchase_orders(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        supplier TEXT NOT NULL,
-
-        status TEXT DEFAULT 'DRAFT',
-
-        total_amount REAL DEFAULT 0,
-
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
-    )
-    """)
-
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS purchase_order_items(
-
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-
-        purchase_order_id INTEGER,
-
-        product TEXT,
-
-        quantity REAL,
-
-        unit TEXT,
-
-        estimated_price REAL,
-
-        subtotal REAL,
-
-        FOREIGN KEY(purchase_order_id)
-            REFERENCES purchase_orders(id)
-
-    )
-    """)
-
-    # Close connection ONLY AFTER all tables are created
-
-    conn.commit()
-    conn.close()
-
-# ======================================================
-# ORDERS
-# ======================================================
-
-def save_order(
-
-    product_name,
-
-    spin_id,
-
-    quantity,
-
-    order_type,
-
-    schedule_time=None,
-
-    recurrence=None
-
-):
-
+    try:
+        cursor = conn.cursor()
+        cursor.execute("\n    CREATE TABLE IF NOT EXISTS orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        spin_id TEXT,\n\n        quantity INTEGER,\n\n        order_type TEXT,\n\n        schedule_time TEXT,\n\n        recurrence TEXT,\n\n        status TEXT DEFAULT 'active'\n\n    )\n    ")
+        cursor.execute("\n    CREATE TABLE IF NOT EXISTS pending_orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        spin_id TEXT,\n\n        quantity INTEGER,\n\n        created_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP,\n\n        status TEXT DEFAULT\n        'awaiting_confirmation'\n\n    )\n    ")
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS order_history(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        quantity INTEGER,\n\n        amount REAL,\n\n        order_id TEXT,\n\n        ordered_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_invoices(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT,\n\n        invoice_number TEXT,\n\n        invoice_date TEXT,\n\n        total_amount REAL,\n\n        created_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_items(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        invoice_id INTEGER,\n\n        product TEXT,\n\n        quantity REAL,\n\n        unit TEXT,\n\n        unit_price REAL,\n\n        total REAL,\n\n        FOREIGN KEY(invoice_id)\n        REFERENCES purchase_invoices(id)\n\n    )\n    ')
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS product_price_history(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product TEXT,\n\n        supplier TEXT,\n\n        price REAL,\n\n        purchase_date TEXT\n\n    )\n    ')
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS inventory(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT UNIQUE,\n\n        current_stock REAL,\n\n        minimum_stock REAL,\n\n        unit TEXT,\n\n        updated_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
+        cursor.execute("\n    CREATE TABLE IF NOT EXISTS purchase_orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT NOT NULL,\n\n        status TEXT DEFAULT 'DRAFT',\n\n        total_amount REAL DEFAULT 0,\n\n        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ")
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_order_items(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        purchase_order_id INTEGER,\n\n        product TEXT,\n\n        quantity REAL,\n\n        unit TEXT,\n\n        estimated_price REAL,\n\n        subtotal REAL,\n\n        FOREIGN KEY(purchase_order_id)\n            REFERENCES purchase_orders(id)\n\n    )\n    ')
+        conn.commit()
+    finally:
+        conn.close()
+
+def save_order(product_name, spin_id, quantity, order_type, schedule_time=None, recurrence=None):
     conn = get_connection()
+    try:
+        conn.execute('\n        INSERT INTO orders(\n\n            product_name,\n\n            spin_id,\n\n            quantity,\n\n            order_type,\n\n            schedule_time,\n\n            recurrence\n\n        )\n\n        VALUES (?, ?, ?, ?, ?, ?)\n\n        ', (product_name, spin_id, quantity, order_type, schedule_time, recurrence))
+        conn.commit()
+    finally:
+        conn.close()
 
-    conn.execute(
-
-        """
-        INSERT INTO orders(
-
-            product_name,
-
-            spin_id,
-
-            quantity,
-
-            order_type,
-
-            schedule_time,
-
-            recurrence
-
-        )
-
-        VALUES (?, ?, ?, ?, ?, ?)
-
-        """,
-
-        (
-
-            product_name,
-
-            spin_id,
-
-            quantity,
-
-            order_type,
-
-            schedule_time,
-
-            recurrence
-
-        )
-
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def get_orders():
-
+def get_orders() -> list:
     conn = get_connection()
+    try:
+        rows = conn.execute('\n        SELECT *\n        FROM orders\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    rows = conn.execute(
-
-        """
-        SELECT *
-        FROM orders
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-# ======================================================
-# PENDING ORDERS
-# ======================================================
-
-def save_pending_order(
-
-    product_name,
-
-    spin_id,
-
-    quantity
-
-):
-
+def save_pending_order(product_name, spin_id, quantity):
     conn = get_connection()
-
-    conn.execute(
-
-        """
-
-        INSERT INTO pending_orders(
-
-            product_name,
-
-            spin_id,
-
-            quantity
-
-        )
-
-        VALUES (?, ?, ?)
-
-        """,
-
-        (
-
-            product_name,
-
-            spin_id,
-
-            quantity
-
-        )
-
-    )
-
-    conn.commit()
-
-    conn.close()
-
+    try:
+        conn.execute('\n\n        INSERT INTO pending_orders(\n\n            product_name,\n\n            spin_id,\n\n            quantity\n\n        )\n\n        VALUES (?, ?, ?)\n\n        ', (product_name, spin_id, quantity))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_pending_orders():
-
     conn = get_connection()
+    try:
+        rows = conn.execute("\n\n        SELECT *\n\n        FROM pending_orders\n\n        WHERE status='awaiting_confirmation'\n\n        ").fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    rows = conn.execute(
-
-        """
-
-        SELECT *
-
-        FROM pending_orders
-
-        WHERE status='awaiting_confirmation'
-
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-
-def pending_exists(
-
-    product_name,
-
-    spin_id
-
-):
-
+def pending_exists(product_name, spin_id):
     conn = get_connection()
+    try:
+        row = conn.execute("\n\n        SELECT id\n\n        FROM pending_orders\n\n        WHERE product_name=?\n\n        AND spin_id=?\n\n        AND status='awaiting_confirmation'\n\n        ", (product_name, spin_id)).fetchone()
+        return row is not None
+    finally:
+        conn.close()
 
-    row = conn.execute(
-
-        """
-
-        SELECT id
-
-        FROM pending_orders
-
-        WHERE product_name=?
-
-        AND spin_id=?
-
-        AND status='awaiting_confirmation'
-
-        """,
-
-        (
-
-            product_name,
-
-            spin_id
-
-        )
-
-    ).fetchone()
-
-    conn.close()
-
-    return row is not None
-
-
-def mark_pending_completed(
-
-    pending_id
-
-):
-
+def mark_pending_completed(pending_id):
     conn = get_connection()
+    try:
+        conn.execute("\n\n        UPDATE pending_orders\n\n        SET status='completed'\n\n        WHERE id=?\n\n        ", (pending_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
-    conn.execute(
-
-        """
-
-        UPDATE pending_orders
-
-        SET status='completed'
-
-        WHERE id=?
-
-        """,
-
-        (pending_id,)
-
-    )
-
-    conn.commit()
-
-    conn.close()
-
-
-# ======================================================
-# ORDER HISTORY
-# ======================================================
-
-def save_order_history(
-
-    product_name,
-
-    quantity,
-
-    amount,
-
-    order_id
-
-):
-
+def save_order_history(product_name, quantity, amount, order_id):
     conn = get_connection()
-
-    conn.execute(
-
-        """
-
-        INSERT INTO order_history(
-
-            product_name,
-
-            quantity,
-
-            amount,
-
-            order_id
-
-        )
-
-        VALUES (?, ?, ?, ?)
-
-        """,
-
-        (
-
-            product_name,
-
-            quantity,
-
-            amount,
-
-            order_id
-
-        )
-
-    )
-
-    conn.commit()
-
-    conn.close()
-
+    try:
+        conn.execute('\n\n        INSERT INTO order_history(\n\n            product_name,\n\n            quantity,\n\n            amount,\n\n            order_id\n\n        )\n\n        VALUES (?, ?, ?, ?)\n\n        ', (product_name, quantity, amount, order_id))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_order_history():
-
     conn = get_connection()
+    try:
+        rows = conn.execute('\n\n        SELECT *\n\n        FROM order_history\n\n        ORDER BY id DESC\n\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    rows = conn.execute(
-
-        """
-
-        SELECT *
-
-        FROM order_history
-
-        ORDER BY id DESC
-
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-def create_purchase_order(
-    supplier,
-    total_amount
-):
-
+def create_purchase_order(supplier, total_amount):
     conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        INSERT INTO purchase_orders(\n            supplier,\n            total_amount\n        )\n        VALUES(?,?)\n        ', (supplier, total_amount))
+        purchase_order_id = cursor.lastrowid
+        conn.commit()
+        return purchase_order_id
+    finally:
+        conn.close()
 
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO purchase_orders(
-            supplier,
-            total_amount
-        )
-        VALUES(?,?)
-        """,
-        (
-            supplier,
-            total_amount
-        )
-    )
-
-    purchase_order_id = cursor.lastrowid
-
-    conn.commit()
-
-    conn.close()
-
-    return purchase_order_id
-
-def add_purchase_order_item(
-    purchase_order_id,
-    product,
-    quantity,
-    unit,
-    estimated_price,
-    subtotal
-):
-
+def add_purchase_order_item(purchase_order_id, product, quantity, unit, estimated_price, subtotal):
     conn = get_connection()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        INSERT INTO purchase_order_items(
-
-            purchase_order_id,
-            product,
-            quantity,
-            unit,
-            estimated_price,
-            subtotal
-
-        )
-        VALUES(?,?,?,?,?,?)
-        """,
-        (
-            purchase_order_id,
-            product,
-            quantity,
-            unit,
-            estimated_price,
-            subtotal
-        )
-    )
-
-    conn.commit()
-
-    conn.close()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        INSERT INTO purchase_order_items(\n\n            purchase_order_id,\n            product,\n            quantity,\n            unit,\n            estimated_price,\n            subtotal\n\n        )\n        VALUES(?,?,?,?,?,?)\n        ', (purchase_order_id, product, quantity, unit, estimated_price, subtotal))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_purchase_orders():
-
     conn = get_connection()
-
-    cursor = conn.cursor()
-
-    cursor.execute("""
-
-        SELECT
-            id,
-            supplier,
-            status,
-            total_amount,
-            created_at
-
-        FROM purchase_orders
-
-        ORDER BY created_at DESC
-
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-# ======================================================
-# PURCHASE INVOICES
-# ======================================================
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n\n        SELECT\n            id,\n            supplier,\n            status,\n            total_amount,\n            created_at\n\n        FROM purchase_orders\n\n        ORDER BY created_at DESC\n\n    ')
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def save_invoice(invoice):
-
     conn = get_connection()
-
-    cursor = conn.cursor()
-
-    cursor.execute(
-
-        """
-
-        INSERT INTO purchase_invoices(
-
-            supplier,
-
-            invoice_number,
-
-            invoice_date,
-
-            total_amount
-
-        )
-
-        VALUES (?, ?, ?, ?)
-
-        """,
-
-        (
-
-            invoice["supplier"],
-
-            invoice["invoice_number"],
-
-            invoice["date"],
-
-            invoice["total_amount"]
-
-        )
-
-    )
-
-    invoice_id = cursor.lastrowid
-
-    for item in invoice["items"]:
-
-        cursor.execute(
-
-            """
-
-            INSERT INTO purchase_items(
-
-                invoice_id,
-
-                product,
-
-                quantity,
-
-                unit,
-
-                unit_price,
-
-                total
-
-            )
-
-            VALUES (?, ?, ?, ?, ?, ?)
-
-            """,
-
-            (
-
-                invoice_id,
-
-                item["product"],
-
-                item["quantity"],
-
-                item["unit"],
-
-                item["unit_price"],
-
-                item["total"]
-
-            )
-
-        )
-
-        cursor.execute(
-
-            """
-
-            INSERT INTO product_price_history(
-
-                product,
-
-                supplier,
-
-                price,
-
-                purchase_date
-
-            )
-
-            VALUES (?, ?, ?, ?)
-
-            """,
-
-            (
-
-                item["product"],
-
-                invoice["supplier"],
-
-                item["unit_price"],
-
-                invoice["date"]
-
-            )
-
-        )
-
-    conn.commit()
-
-    conn.close()
-
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n\n        INSERT INTO purchase_invoices(\n\n            supplier,\n\n            invoice_number,\n\n            invoice_date,\n\n            total_amount\n\n        )\n\n        VALUES (?, ?, ?, ?)\n\n        ', (invoice['supplier'], invoice['invoice_number'], invoice['date'], invoice['total_amount']))
+        invoice_id = cursor.lastrowid
+        for item in invoice['items']:
+            cursor.execute('\n\n            INSERT INTO purchase_items(\n\n                invoice_id,\n\n                product,\n\n                quantity,\n\n                unit,\n\n                unit_price,\n\n                total\n\n            )\n\n            VALUES (?, ?, ?, ?, ?, ?)\n\n            ', (invoice_id, item['product'], item['quantity'], item['unit'], item['unit_price'], item['total']))
+            cursor.execute('\n\n            INSERT INTO product_price_history(\n\n                product,\n\n                supplier,\n\n                price,\n\n                purchase_date\n\n            )\n\n            VALUES (?, ?, ?, ?)\n\n            ', (item['product'], invoice['supplier'], item['unit_price'], invoice['date']))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_invoices():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-
-        SELECT *
-
-        FROM purchase_invoices
-
-        ORDER BY id DESC
-
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n\n        SELECT *\n\n        FROM purchase_invoices\n\n        ORDER BY id DESC\n\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_invoice_items(invoice_id):
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-
-        SELECT *
-
-        FROM purchase_items
-
-        WHERE invoice_id=?
-
-        """,
-
-        (invoice_id,)
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-# ======================================================
-# PRICE HISTORY
-# ======================================================
+    try:
+        rows = conn.execute('\n\n        SELECT *\n\n        FROM purchase_items\n\n        WHERE invoice_id=?\n\n        ', (invoice_id,)).fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_price_history(product):
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            supplier,
-
-            price,
-
-            purchase_date
-
-        FROM product_price_history
-
-        WHERE product=?
-
-        ORDER BY purchase_date DESC
-        """,
-
-        (product,)
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            supplier,\n\n            price,\n\n            purchase_date\n\n        FROM product_price_history\n\n        WHERE product=?\n\n        ORDER BY purchase_date DESC\n        ', (product,)).fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_latest_price(product):
-
     conn = get_connection()
-
-    row = conn.execute(
-
-        """
-        SELECT
-
-            supplier,
-
-            price,
-
-            purchase_date
-
-        FROM product_price_history
-
-        WHERE product=?
-
-        ORDER BY purchase_date DESC
-
-        LIMIT 1
-        """,
-
-        (product,)
-
-    ).fetchone()
-
-    conn.close()
-
-    return row
-
-
-# ======================================================
-# SUPPLIER ANALYTICS
-# ======================================================
+    try:
+        row = conn.execute('\n        SELECT\n\n            supplier,\n\n            price,\n\n            purchase_date\n\n        FROM product_price_history\n\n        WHERE product=?\n\n        ORDER BY purchase_date DESC\n\n        LIMIT 1\n        ', (product,)).fetchone()
+        return row
+    finally:
+        conn.close()
 
 def get_supplier_prices(product):
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            supplier,
-
-            AVG(price)
-
-        FROM product_price_history
-
-        WHERE product=?
-
-        GROUP BY supplier
-        """,
-
-        (product,)
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            supplier,\n\n            AVG(price)\n\n        FROM product_price_history\n\n        WHERE product=?\n\n        GROUP BY supplier\n        ', (product,)).fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_cheapest_supplier(product):
-
     suppliers = get_supplier_prices(product)
-
     if not suppliers:
-
         return None
-
-    return min(
-
-        suppliers,
-
-        key=lambda x: x[1]
-
-    )
-
+    return min(suppliers, key=lambda x: x[1])
 
 def get_top_suppliers():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            supplier,
-
-            COUNT(*)
-
-        FROM purchase_invoices
-
-        GROUP BY supplier
-
-        ORDER BY COUNT(*) DESC
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            supplier,\n\n            COUNT(*)\n\n        FROM purchase_invoices\n\n        GROUP BY supplier\n\n        ORDER BY COUNT(*) DESC\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_supplier_statistics():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            supplier,
-
-            COUNT(*) AS invoices,
-
-            SUM(total_amount)
-
-        FROM purchase_invoices
-
-        GROUP BY supplier
-
-        ORDER BY SUM(total_amount) DESC
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            supplier,\n\n            COUNT(*) AS invoices,\n\n            SUM(total_amount)\n\n        FROM purchase_invoices\n\n        GROUP BY supplier\n\n        ORDER BY SUM(total_amount) DESC\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_total_spend_by_supplier(supplier):
-
     conn = get_connection()
-
-    row = conn.execute(
-
-        """
-        SELECT
-
-            SUM(total_amount)
-
-        FROM purchase_invoices
-
-        WHERE supplier=?
-        """,
-
-        (supplier,)
-
-    ).fetchone()
-
-    conn.close()
-
-    return row[0] if row and row[0] else 0
-
-
-# ======================================================
-# PROCUREMENT ANALYTICS
-# ======================================================
+    try:
+        row = conn.execute('\n        SELECT\n\n            SUM(total_amount)\n\n        FROM purchase_invoices\n\n        WHERE supplier=?\n        ', (supplier,)).fetchone()
+        return row[0] if row and row[0] else 0
+    finally:
+        conn.close()
 
 def get_monthly_spend():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            substr(invoice_date,1,7),
-
-            SUM(total_amount)
-
-        FROM purchase_invoices
-
-        GROUP BY substr(invoice_date,1,7)
-
-        ORDER BY substr(invoice_date,1,7)
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            substr(invoice_date,1,7),\n\n            SUM(total_amount)\n\n        FROM purchase_invoices\n\n        GROUP BY substr(invoice_date,1,7)\n\n        ORDER BY substr(invoice_date,1,7)\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_product_purchase_history(product):
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT
-
-            purchase_date,
-
-            supplier,
-
-            price
-
-        FROM product_price_history
-
-        WHERE product=?
-
-        ORDER BY purchase_date
-        """,
-
-        (product,)
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
+    try:
+        rows = conn.execute('\n        SELECT\n\n            purchase_date,\n\n            supplier,\n\n            price\n\n        FROM product_price_history\n\n        WHERE product=?\n\n        ORDER BY purchase_date\n        ', (product,)).fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_all_products():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT DISTINCT product
-
-        FROM purchase_items
-
-        ORDER BY product
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return [
-
-        row[0]
-
-        for row in rows
-
-    ]
-
-
-# ======================================================
-# DASHBOARD ANALYTICS
-# ======================================================
+    try:
+        rows = conn.execute('\n        SELECT DISTINCT product\n\n        FROM purchase_items\n\n        ORDER BY product\n        ').fetchall()
+        return [row[0] for row in rows]
+    finally:
+        conn.close()
 
 def get_dashboard_stats():
+    return {'orders': len(get_orders()), 'pending': len(get_pending_orders()), 'history': len(get_order_history()), 'invoices': len(get_invoices()), 'suppliers': len(get_top_suppliers()), 'products': len(get_all_products())}
 
-    return {
-
-        "orders":
-
-            len(get_orders()),
-
-        "pending":
-
-            len(get_pending_orders()),
-
-        "history":
-
-            len(get_order_history()),
-
-        "invoices":
-
-            len(get_invoices()),
-
-        "suppliers":
-
-            len(get_top_suppliers()),
-
-        "products":
-
-            len(get_all_products())
-
-    }
-
-# ======================================================
-# INVENTORY
-# ======================================================
-
-def save_inventory(
-
-    product_name,
-
-    current_stock,
-
-    minimum_stock,
-
-    unit
-
-):
-
+def save_inventory(product_name, current_stock, minimum_stock, unit):
     conn = get_connection()
+    try:
+        conn.execute('\n        INSERT OR REPLACE INTO inventory(\n\n            product_name,\n\n            current_stock,\n\n            minimum_stock,\n\n            unit\n\n        )\n\n        VALUES (?, ?, ?, ?)\n        ', (product_name, current_stock, minimum_stock, unit))
+        conn.commit()
+    finally:
+        conn.close()
 
-    conn.execute(
-
-        """
-        INSERT OR REPLACE INTO inventory(
-
-            product_name,
-
-            current_stock,
-
-            minimum_stock,
-
-            unit
-
-        )
-
-        VALUES (?, ?, ?, ?)
-        """,
-
-        (
-
-            product_name,
-
-            current_stock,
-
-            minimum_stock,
-
-            unit
-
-        )
-
-    )
-
-    conn.commit()
-
-    conn.close()
-
-
-def update_inventory(
-
-    product_name,
-
-    quantity_change
-
-):
-
+def update_inventory(product_name, quantity_change):
     conn = get_connection()
-
-    conn.execute(
-
-        """
-        UPDATE inventory
-
-        SET
-
-            current_stock = current_stock + ?,
-
-            updated_at = CURRENT_TIMESTAMP
-
-        WHERE product_name=?
-        """,
-
-        (
-
-            quantity_change,
-
-            product_name
-
-        )
-
-    )
-
-    conn.commit()
-
-    conn.close()
-
+    try:
+        conn.execute('\n        UPDATE inventory\n\n        SET\n\n            current_stock = current_stock + ?,\n\n            updated_at = CURRENT_TIMESTAMP\n\n        WHERE product_name=?\n        ', (quantity_change, product_name))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_inventory():
-
     conn = get_connection()
+    try:
+        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        ORDER BY product_name\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    rows = conn.execute(
-
-        """
-        SELECT *
-
-        FROM inventory
-
-        ORDER BY product_name
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-
-def get_product_inventory(
-
-    product_name
-
-):
-
+def get_product_inventory(product_name):
     conn = get_connection()
-
-    row = conn.execute(
-
-        """
-        SELECT *
-
-        FROM inventory
-
-        WHERE product_name=?
-        """,
-
-        (
-
-            product_name,
-
-        )
-
-    ).fetchone()
-
-    conn.close()
-
-    return row
-
+    try:
+        row = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE product_name=?\n        ', (product_name,)).fetchone()
+        return row
+    finally:
+        conn.close()
 
 def get_low_stock_items():
-
     conn = get_connection()
-
-    rows = conn.execute(
-
-        """
-        SELECT *
-
-        FROM inventory
-
-        WHERE current_stock <= minimum_stock
-        """
-
-    ).fetchall()
-
-    conn.close()
-
-    return rows
-
-# ======================================================
-# PURCHASE ORDER APPROVAL
-# ======================================================
+    try:
+        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE current_stock <= minimum_stock\n        ').fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def approve_purchase_order(purchase_order_id):
-
     conn = get_connection()
-
-    conn.execute(
-        """
-        UPDATE purchase_orders
-
-        SET status='APPROVED'
-
-        WHERE id=?
-        """,
-
-        (purchase_order_id,)
-    )
-
-    conn.commit()
-
-    conn.close()
-
+    try:
+        conn.execute("\n        UPDATE purchase_orders\n\n        SET status='APPROVED'\n\n        WHERE id=?\n        ", (purchase_order_id,))
+        conn.commit()
+    finally:
+        conn.close()
 
 def get_latest_purchase_order():
-
     conn = get_connection()
-
-    row = conn.execute(
-        """
-        SELECT
-
-            id,
-            supplier,
-            status,
-            total_amount,
-            created_at
-
-        FROM purchase_orders
-
-        ORDER BY id DESC
-
-        LIMIT 1
-        """
-    ).fetchone()
-
-    conn.close()
-
-    return row
+    try:
+        row = conn.execute('\n        SELECT\n\n            id,\n            supplier,\n            status,\n            total_amount,\n            created_at\n\n        FROM purchase_orders\n\n        ORDER BY id DESC\n\n        LIMIT 1\n        ').fetchone()
+        return row
+    finally:
+        conn.close()
 
 def reject_latest_purchase_order():
     """
@@ -1359,330 +293,100 @@ def reject_latest_purchase_order():
 
     or None if no draft exists.
     """
-
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT id, supplier
-        FROM purchase_orders
-        WHERE status = 'DRAFT'
-        ORDER BY id DESC
-        LIMIT 1
-        """
-    )
-
-    row = cursor.fetchone()
-
-    if row is None:
-
+    try:
+        cursor = conn.cursor()
+        cursor.execute("\n        SELECT id, supplier\n        FROM purchase_orders\n        WHERE status = 'DRAFT'\n        ORDER BY id DESC\n        LIMIT 1\n        ")
+        row = cursor.fetchone()
+        if row is None:
+            conn.close()
+            return None
+        purchase_order_id = row[0]
+        supplier = row[1]
+        cursor.execute("\n        UPDATE purchase_orders\n        SET status='REJECTED'\n        WHERE id=?\n        ", (purchase_order_id,))
+        conn.commit()
+        return {'purchase_order_id': purchase_order_id, 'supplier': supplier}
+    finally:
         conn.close()
 
-        return None
-
-    purchase_order_id = row[0]
-    supplier = row[1]
-
-    cursor.execute(
-        """
-        UPDATE purchase_orders
-        SET status='REJECTED'
-        WHERE id=?
-        """,
-        (purchase_order_id,)
-    )
-
-    conn.commit()
-
-    conn.close()
-
-    return {
-
-        "purchase_order_id": purchase_order_id,
-
-        "supplier": supplier
-
-    }
-
 def get_latest_draft_purchase_order():
-
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT id, supplier, total_amount
-        FROM purchase_orders
-        WHERE status='DRAFT'
-        ORDER BY id DESC
-        LIMIT 1
-    """)
-
-    row = cursor.fetchone()
-
-    conn.close()
-
-    return row
-
+    try:
+        cursor = conn.cursor()
+        cursor.execute("\n        SELECT id, supplier, total_amount\n        FROM purchase_orders\n        WHERE status='DRAFT'\n        ORDER BY id DESC\n        LIMIT 1\n    ")
+        row = cursor.fetchone()
+        return row
+    finally:
+        conn.close()
 
 def get_purchase_order_items(purchase_order_id):
-
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        SELECT\n            product,\n            quantity,\n            unit,\n            estimated_price,\n            subtotal\n        FROM purchase_order_items\n        WHERE purchase_order_id=?\n    ', (purchase_order_id,))
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    cursor.execute("""
-        SELECT
-            product,
-            quantity,
-            unit,
-            estimated_price,
-            subtotal
-        FROM purchase_order_items
-        WHERE purchase_order_id=?
-    """, (purchase_order_id,))
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-def update_purchase_order_item(
-    purchase_order_id,
-    product,
-    quantity,
-    subtotal
-):
-
+def update_purchase_order_item(purchase_order_id, product, quantity, subtotal):
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        UPDATE purchase_order_items\n        SET quantity=?,\n            subtotal=?\n        WHERE purchase_order_id=?\n        AND LOWER(product)=LOWER(?)\n        ', (quantity, subtotal, purchase_order_id, product))
+        conn.commit()
+    finally:
+        conn.close()
 
-    cursor.execute(
-        """
-        UPDATE purchase_order_items
-        SET quantity=?,
-            subtotal=?
-        WHERE purchase_order_id=?
-        AND LOWER(product)=LOWER(?)
-        """,
-        (
-            quantity,
-            subtotal,
-            purchase_order_id,
-            product
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def delete_purchase_order_item(
-    purchase_order_id,
-    product
-):
-
+def delete_purchase_order_item(purchase_order_id, product):
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        DELETE FROM purchase_order_items\n        WHERE purchase_order_id=?\n        AND LOWER(product)=LOWER(?)\n        ', (purchase_order_id, product))
+        conn.commit()
+    finally:
+        conn.close()
 
-    cursor.execute(
-        """
-        DELETE FROM purchase_order_items
-        WHERE purchase_order_id=?
-        AND LOWER(product)=LOWER(?)
-        """,
-        (
-            purchase_order_id,
-            product
-        )
-    )
-
-    conn.commit()
-    conn.close()
-
-
-def update_purchase_order_total(
-    purchase_order_id,
-    total
-):
-
+def update_purchase_order_total(purchase_order_id, total):
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        UPDATE purchase_orders\n        SET total_amount=?\n        WHERE id=?\n    ', (total, purchase_order_id))
+        conn.commit()
+    finally:
+        conn.close()
 
-    cursor.execute("""
-        UPDATE purchase_orders
-        SET total_amount=?
-        WHERE id=?
-    """,
-    (
-        total,
-        purchase_order_id
-    ))
-
-    conn.commit()
-
-    conn.close()
-
-def get_purchase_orders():
-
+def get_purchase_order_items_by_order(purchase_order_id):
     conn = get_connection()
-    cursor = conn.cursor()
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        SELECT\n            product,\n            quantity,\n            unit,\n            estimated_price,\n            subtotal\n        FROM purchase_order_items\n        WHERE purchase_order_id=?\n    ', (purchase_order_id,))
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        conn.close()
 
-    cursor.execute("""
-        SELECT
-            id,
-            supplier,
-            status,
-            total_amount,
-            created_at
-        FROM purchase_orders
-        ORDER BY id DESC
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-def get_purchase_order_items_by_order(
-    purchase_order_id
-):
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            product,
-            quantity,
-            unit,
-            estimated_price,
-            subtotal
-        FROM purchase_order_items
-        WHERE purchase_order_id=?
-    """, (purchase_order_id,))
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-def get_total_sales():
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            IFNULL(SUM(total_amount), 0)
-        FROM orders
-        WHERE status='completed'
-    """)
-
-    total = cursor.fetchone()[0]
-
-    conn.close()
-
-    return float(total)
-
-
-def get_completed_orders():
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT COUNT(*)
-        FROM orders
-        WHERE status='completed'
-    """)
-
-    total = cursor.fetchone()[0]
-
-    conn.close()
-
-    return total
-
-
-def get_average_order_value():
-
-    orders = get_completed_orders()
-
-    if orders == 0:
-
-        return 0
-
-    return round(
-
-        get_total_sales() / orders,
-
-        2
-
-    )
 
 
 def get_top_selling_products(limit=10):
-
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT
-            product,
-            SUM(quantity) as qty
-        FROM order_history
-        GROUP BY product
-        ORDER BY qty DESC
-        LIMIT ?
-    """, (limit,))
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        SELECT\n            product,\n            SUM(quantity) as qty\n        FROM order_history\n        GROUP BY product\n        ORDER BY qty DESC\n        LIMIT ?\n    ', (limit,))
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        conn.close()
 
 def get_all_purchase_invoices():
-
     conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT *
-        FROM purchase_invoices
-        ORDER BY id DESC
-    """)
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-def get_invoice_items(invoice_id):
-
-    conn = get_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT *
-        FROM purchase_items
-        WHERE invoice_id=?
-    """, (invoice_id,))
-
-    rows = cursor.fetchall()
-
-    conn.close()
-
-    return rows
-
-if __name__ == "__main__":
-
+    try:
+        cursor = conn.cursor()
+        cursor.execute('\n        SELECT *\n        FROM purchase_invoices\n        ORDER BY id DESC\n    ')
+        rows = cursor.fetchall()
+        return rows
+    finally:
+        conn.close()
+if __name__ == '__main__':
     init_db()
-
-    print("Database initialized successfully.")
+    print('Database initialized successfully.')

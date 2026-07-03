@@ -5,6 +5,39 @@ from ai.shopping.shopping_session import shopping_session
 from ai.shopping.orchestrator import ShoppingOrchestrator
 
 
+def get_cart_summary(phone):
+    shopping_session.set_stage(phone, "checkout")
+    selected = shopping_session.selected(phone)
+    total = 0
+    reply = []
+    reply.append("🛒 Swiggy Cart Ready")
+    reply.append("")
+    for item in selected:
+        subtotal = (
+            item["price"] *
+            item["quantity"]
+        )
+        total += subtotal
+        reply.append(
+            f"• {item['displayName']}"
+        )
+        reply.append(
+            f"  Qty : {item['quantity']}"
+        )
+        reply.append(
+            f"  ₹{subtotal}"
+        )
+        reply.append("")
+    reply.append(
+        f"Estimated Total : ₹{total}"
+    )
+    reply.append("")
+    reply.append(
+        "Reply YES to place the order."
+    )
+    return "\n".join(reply)
+
+
 async def process_message(
     phone,
     message
@@ -21,6 +54,7 @@ async def process_message(
     """
 
     message = message.strip()
+    result = None
 
     # ==================================================
     # AUTO PROCUREMENT
@@ -94,6 +128,10 @@ async def process_message(
 
                 )
 
+                if response.get("message") == "AUTO_FINISHED":
+
+                    return get_cart_summary(phone)
+
                 return response["message"]
 
             return "Reply YES to begin shopping."
@@ -132,42 +170,13 @@ async def process_message(
 
                 )
 
+                if response.get("message") == "AUTO_FINISHED":
+
+                    return get_cart_summary(phone)
+
                 return response["message"]
 
-            shopping_session.set_stage(
-
-                phone,
-
-                "checkout"
-
-            )
-
-            selected = shopping_session.selected(phone)
-
-            total = 0
-
-            reply = []
-
-            reply.append("🛒 Swiggy Cart Ready")
-
-            reply.append("")
-
-            for item in selected:
-
-                cost = item["price"] * item["quantity"]
-
-                total += cost
-
-                reply.append(f"• {item['displayName']}")
-                reply.append(f"Qty : {item['quantity']}")
-                reply.append(f"₹{cost}")
-                reply.append("")
-
-            reply.append(f"Estimated Total : ₹{total}")
-            reply.append("")
-            reply.append("Reply YES to place the order.")
-
-            return "\n".join(reply)
+            return get_cart_summary(phone)
 
         # ----------------------------------------------
         # CHECKOUT
@@ -189,9 +198,105 @@ async def process_message(
 
             result = await service.checkout()
 
-        if result["success"]:
+        # ----------------------------------------------
+        # CHECKOUT RECOVERY
+        # ----------------------------------------------
 
-    # pyrefly: ignore [missing-import]
+        elif stage == "checkout_recovery":
+
+            session = shopping_session.get(phone)
+
+            selected = session["selected"] if session else []
+
+            recovery_type = session.get("recovery_type") if session else None
+
+            service = ShoppingOrchestrator().service
+
+            orchestrator = ShoppingOrchestrator()
+
+            if recovery_type == "reduce_quantity":
+
+                if message == "1":
+
+                    if selected:
+
+                        selected[-1]["quantity"] = max(1, selected[-1]["quantity"] - 1)
+
+                    await service.build_cart(selected)
+
+                    shopping_session.set_stage(phone, "checkout")
+
+                    return f"Quantity reduced. Updated Cart:\n\n{get_cart_summary(phone)}"
+
+                elif message == "2":
+
+                    if selected:
+
+                        selected.pop()
+
+                        session["current"] = max(0, session["current"] - 1)
+
+                    shopping_session.set_stage(phone, "selecting")
+
+                    response = await orchestrator.resume_session(phone)
+
+                    if response.get("message") == "AUTO_FINISHED":
+
+                        return get_cart_summary(phone)
+
+                    return f"Searching for alternatives:\n\n{response['message']}"
+
+                elif message == "3":
+
+                    if selected:
+
+                        selected.pop()
+
+                    if not selected:
+
+                        shopping_session.end(phone)
+
+                        return "The cart is empty. Shopping session ended."
+
+                    await service.build_cart(selected)
+
+                    shopping_session.set_stage(phone, "checkout")
+
+                    return f"Item removed. Updated Cart:\n\n{get_cart_summary(phone)}"
+
+                else:
+
+                    return "Reply 1 to reduce quantity, 2 to choose another product, or 3 to remove the item."
+
+            elif recovery_type == "choose_alternative":
+
+                if message.lower() == "yes":
+
+                    if selected:
+
+                        selected.pop()
+
+                        session["current"] = max(0, session["current"] - 1)
+
+                    shopping_session.set_stage(phone, "selecting")
+
+                    response = await orchestrator.resume_session(phone)
+
+                    if response.get("message") == "AUTO_FINISHED":
+
+                        return get_cart_summary(phone)
+
+                    return f"Searching for alternatives:\n\n{response['message']}"
+
+                else:
+
+                    shopping_session.end(phone)
+
+                    return "Order cancelled. Shopping session ended."
+
+        if result and (result.get("order_placed") or result.get("success")):
+
+            # pyrefly: ignore [missing-import]
             from ai.memory.memory_trainer import memory_trainer
 
             memory_trainer.train(
@@ -202,14 +307,31 @@ async def process_message(
 
             shopping_session.end(phone)
 
-            return (
-                "✅ Order placed successfully!\n\n"
-                f"Order ID: {result.get('order_id')}\n"
-                f"Status: {result.get('status')}\n"
-                f"Total: ₹{result.get('total')}"
-            )
+            if result.get("success"):
 
-        decision = result.get("decision", {})
+                return (
+
+                    "✅ Order placed successfully!\n\n"
+
+                    f"Order ID: {result.get('order_id')}\n"
+
+                    f"Status: {result.get('status')}\n"
+
+                    f"Total: ₹{result.get('total')}"
+
+                )
+
+            else:
+
+                return (
+
+                    "✅ Order was submitted successfully, but we encountered an issue parsing the receipt details.\n"
+
+                    f"Detail: {result.get('message')}"
+
+                )
+
+        decision = result.get("decision", {}) if result else {}
 
         action = decision.get("action")
 
@@ -218,6 +340,14 @@ async def process_message(
         # ----------------------------------
 
         if action == "reduce_quantity":
+
+            session = shopping_session.get(phone)
+
+            if session:
+
+                session["stage"] = "checkout_recovery"
+
+                session["recovery_type"] = "reduce_quantity"
 
             return (
                 "⚠ Some items are available only in a lower quantity.\n\n"
@@ -232,6 +362,14 @@ async def process_message(
         # ----------------------------------
 
         if action == "choose_alternative":
+
+            session = shopping_session.get(phone)
+
+            if session:
+
+                session["stage"] = "checkout_recovery"
+
+                session["recovery_type"] = "choose_alternative"
 
             return (
                 "⚠ One or more products are unavailable.\n\n"
@@ -265,7 +403,7 @@ async def process_message(
         # Default
         # ----------------------------------
 
-        return result["message"]
+        return result["message"] if result else "No message."
 
     # ==================================================
     # LANGGRAPH
@@ -291,7 +429,17 @@ async def process_message(
     # SESSION MEMORY
     # ==================================================
 
-    if "procurement" in result["results"]:
+    if "auto_order" in result["results"]:
+
+        shopping_session.start(
+
+            phone,
+
+            result["results"]["auto_order"]["items"]
+
+        )
+
+    elif "procurement" in result["results"]:
 
         purchase_order = result["results"]["procurement"]["purchase_order"]
 

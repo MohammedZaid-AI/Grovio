@@ -209,16 +209,46 @@ class SwiggyInstamart:
 
         await self.clear_cart()
 
+        address_id = await self.get_address_id()
+
+        payload = []
+
         for item in items:
 
-            await self.place_item(
-                item["name"],
-                item["quantity"]
-            )
+            options = await self.get_product_options(item["name"])
+
+            if not options:
+
+                print(f"Product not found: {item['name']}")
+
+                continue
+
+            product = options[0]
+
+            variant = product["variations"][0]
+
+            spin_id = variant["spinId"]
+
+            payload.append({
+
+                "spinId": spin_id,
+
+                "quantity": item["quantity"]
+
+            })
+
+        if payload:
+
+            result = await self.update_cart(address_id, payload)
+
+            print("\nUPDATE CART RESULT:")
+
+            print(result)
 
         cart = await self.get_cart()
 
         print("\nCURRENT CART:")
+
         print(cart)
 
         return cart
@@ -268,22 +298,24 @@ class SwiggyInstamart:
 
 async def main():
 
-    from agent import parse_order
+    from ai.agents.order_parser_agent import order_parser
 
     swiggy = await SwiggyInstamart().initialize()
 
     user_text = input(
+
         "\nWhat would you like to order?\n\n"
+
     )
 
-    parsed = parse_order(user_text)
+    parsed = await order_parser.execute(user_text)
 
     print("\nParsed:")
     print(parsed)
 
     final_items = []
 
-    for item in parsed["items"]:
+    for item in parsed:
 
         products = await swiggy.get_product_options(
             item["name"]

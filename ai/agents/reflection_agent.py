@@ -83,7 +83,10 @@ class ReflectionAgent:
 
         try:
 
-            return json.loads(response)
+            import re
+            json_match = re.search(r"({.*})|(\[.*\])", response, re.DOTALL)
+            clean_response = json_match.group(0) if json_match else response
+            return json.loads(clean_response)
 
         except Exception:
 

@@ -1,4 +1,6 @@
+import os
 from groq import Groq
+from openai import OpenAI
 
 from core.config import Config
 
@@ -7,11 +9,27 @@ class LLM:
 
     def __init__(self):
 
-        self.client = Groq(
+        if Config.OPENAI_API_KEY:
 
-            api_key=Config.GROQ_API_KEY
+            self.client = OpenAI(
 
-        )
+                api_key=Config.OPENAI_API_KEY,
+
+                base_url=Config.OPENAI_BASE_URL
+
+            )
+
+            self.is_openai = True
+
+        else:
+
+            self.client = Groq(
+
+                api_key=Config.GROQ_API_KEY
+
+            )
+
+            self.is_openai = False
 
     def chat(
 

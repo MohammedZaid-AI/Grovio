@@ -82,17 +82,16 @@ class InvoiceParser:
 
         )
 
+        from urllib.parse import urlparse
+        parsed = urlparse(media_url)
+        is_trusted = parsed.netloc in ["api.twilio.com", "mms.twilio.com"] or parsed.netloc.endswith(".twilio.com")
+        auth = HTTPBasicAuth(self.account_sid, self.auth_token) if is_trusted else None
+
         response = requests.get(
 
             media_url,
 
-            auth=HTTPBasicAuth(
-
-                self.account_sid,
-
-                self.auth_token
-
-            )
+            auth=auth
 
         )
 

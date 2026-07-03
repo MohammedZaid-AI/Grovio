@@ -303,6 +303,14 @@ class ShoppingOrchestrator:
 
         if decision.get("action") == "auto_select":
 
+            shopping_session.set_options(
+
+                phone,
+
+                products
+
+            )
+
             index = decision["index"]
 
             shopping_session.select(

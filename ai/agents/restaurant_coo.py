@@ -1,28 +1,21 @@
 import json
-import os
 
-from dotenv import load_dotenv
-from groq import Groq
+from core.llm import LLM
+from core.config import Config
 
 from ai.tool_registry import (
     TOOLS,
     TOOL_DESCRIPTIONS
 )
 
-load_dotenv()
-
 
 class RestaurantCOO:
 
     def __init__(self):
 
-        self.client = Groq(
+        self.llm = LLM()
 
-            api_key=os.getenv(
-                "GROQ_API_KEY"
-            )
-
-        )
+        self.client = self.llm.client
 
     def choose_tool(self, message):
 
@@ -48,7 +41,7 @@ User:
 
         response = self.client.chat.completions.create(
 
-            model="openai/gpt-oss-20b",
+            model=Config.MODEL,
 
             temperature=0,
 

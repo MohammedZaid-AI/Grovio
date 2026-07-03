@@ -68,7 +68,10 @@ class Supervisor:
 
         try:
 
-            data = json.loads(response)
+            import re
+            json_match = re.search(r"({.*})|(\[.*\])", response, re.DOTALL)
+            clean_response = json_match.group(0) if json_match else response
+            data = json.loads(clean_response)
 
             agents = data.get("agents", [])
 

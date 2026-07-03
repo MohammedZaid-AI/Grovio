@@ -1,23 +1,17 @@
 import json
 import os
 
-from groq import Groq
-from dotenv import load_dotenv
-
-load_dotenv()
+from core.llm import LLM
+from core.config import Config
 
 
 class QuoteParser:
 
     def __init__(self):
 
-        self.client = Groq(
+        self.llm = LLM()
 
-            api_key=os.getenv(
-                "GROQ_API_KEY"
-            )
-
-        )
+        self.client = self.llm.client
 
     def parse(self, text):
 
@@ -45,7 +39,7 @@ Quotation
 
         response = self.client.chat.completions.create(
 
-            model="openai/gpt-oss-20b",
+            model=Config.MODEL,
 
             temperature=0,
 

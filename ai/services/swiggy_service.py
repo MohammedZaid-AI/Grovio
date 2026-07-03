@@ -155,16 +155,51 @@ class SwiggyService:
     ):
 
         try:
+            # Safety guards for empty or malformed result
+            if result is None:
+                print("❌ Swiggy MCP checkout result is None.")
+                return {
+                    "success": False,
+                    "order_placed": False,
+                    "code": "EMPTY_RESPONSE",
+                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                }
+            
+            content = getattr(result, "content", None)
+            if not content:
+                print(f"❌ Swiggy MCP checkout result has no content. Result: {result}")
+                if hasattr(result, "structuredContent") and result.structuredContent:
+                    print(f"Structured content: {result.structuredContent}")
+                return {
+                    "success": False,
+                    "order_placed": False,
+                    "code": "EMPTY_RESPONSE",
+                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                }
+            
+            raw_text = content[0].text if hasattr(content[0], "text") else getattr(content[0], "text", None)
+            
+            print(f"🔍 Swiggy MCP raw text response: {raw_text}")
+            
+            if raw_text is None or (isinstance(raw_text, str) and not raw_text.strip()):
+                print("❌ Swiggy MCP checkout response text is empty or whitespace-only!")
+                print(f"Raw Result: {result}")
+                if hasattr(result, "structuredContent") and result.structuredContent:
+                    print(f"Structured content: {result.structuredContent}")
+                return {
+                    "success": False,
+                    "order_placed": False,
+                    "code": "EMPTY_RESPONSE",
+                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                }
 
-            data = json.loads(
-
-                result.content[0].text
-
-            )
+            data = json.loads(raw_text)
 
             return {
 
                 "success": True,
+
+                "order_placed": True,
 
                 "order_id": data["data"].get(
 
@@ -200,15 +235,21 @@ class SwiggyService:
 
             }
 
-        except Exception:
+        except Exception as e:
+            print(f"❌ Exception in _parse_success parsing Swiggy checkout response: {e}")
+            print(f"Raw Result: {result}")
+            if result and hasattr(result, "content") and result.content:
+                print(f"Raw Content[0].text: {result.content[0].text if hasattr(result.content[0], 'text') else getattr(result.content[0], 'text', None)}")
 
             return {
 
                 "success": False,
 
+                "order_placed": False,  # Set to False so the session is NOT marked as checked out / ended
+
                 "code": "INVALID_RESPONSE",
 
-                "message": "Unable to parse Swiggy checkout response."
+                "message": f"Unable to parse Swiggy checkout response: {str(e)}. Couldn't reach the store, please retry."
 
             }
 

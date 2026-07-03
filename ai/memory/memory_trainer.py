@@ -25,7 +25,22 @@ class MemoryTrainer:
 
             )
 
-            brand = product.split()[0]
+            import re
+            tokens = product.split()
+            brand = "Unknown"
+            if tokens:
+                for token in tokens:
+                    if re.search(r"\d", token):
+                        continue
+                    if token.lower() in [
+                        "kg", "g", "ml", "l", "ltr", "ltrs", "litre", "litres", 
+                        "pc", "pcs", "pack", "packs", "no", "no.", "size", "wt", "vol"
+                    ]:
+                        continue
+                    brand = token
+                    break
+                if brand == "Unknown" and tokens:
+                    brand = tokens[0]
 
             restaurant_memory.set_preferred_brand(
 

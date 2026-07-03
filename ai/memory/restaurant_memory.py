@@ -49,17 +49,65 @@ class RestaurantMemory:
 
     def load(self):
 
-        with open(
+        try:
 
-            self.file,
+            with open(
 
-            "r",
+                self.file,
 
-            encoding="utf-8"
+                "r",
 
-        ) as f:
+                encoding="utf-8"
 
-            return json.load(f)
+            ) as f:
+
+                content = f.read().strip()
+
+                if not content:
+
+                    default_data = {
+
+                        "preferred_brands": {},
+
+                        "purchase_frequency": {},
+
+                        "favorite_products": {},
+
+                        "supplier_preferences": {},
+
+                        "seasonal_patterns": {},
+
+                        "notes": {}
+
+                    }
+
+                    self.save(default_data)
+
+                    return default_data
+
+                return json.loads(content)
+
+        except Exception:
+
+            default_data = {
+
+                "preferred_brands": {},
+
+                "purchase_frequency": {},
+
+                "favorite_products": {},
+
+                "supplier_preferences": {},
+
+                "seasonal_patterns": {},
+
+                "notes": {}
+
+            }
+
+            self.save(default_data)
+
+            return default_data
 
     # ----------------------------------
     # Save
