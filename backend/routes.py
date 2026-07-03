@@ -12,15 +12,66 @@ router = APIRouter()
 pipeline = InvoicePipeline()
 
 
+def split_message(text: str, max_length: int = 1500) -> list:
+    if len(text) <= max_length:
+        return [text]
+    
+    parts = []
+    paragraphs = text.split("\n")
+    current_part = []
+    current_length = 0
+    
+    for paragraph in paragraphs:
+        para_len = len(paragraph) + (1 if current_part else 0)
+        
+        if current_length + para_len > max_length:
+            if current_part:
+                parts.append("\n".join(current_part))
+                current_part = []
+                current_length = 0
+            
+            if len(paragraph) > max_length:
+                words = paragraph.split(" ")
+                current_word_part = []
+                word_part_len = 0
+                for word in words:
+                    added_len = len(word) + (1 if current_word_part else 0)
+                    if word_part_len + added_len > max_length:
+                        if current_word_part:
+                            parts.append(" ".join(current_word_part))
+                        current_word_part = [word]
+                        word_part_len = len(word)
+                    else:
+                        current_word_part.append(word)
+                        word_part_len += added_len
+                if current_word_part:
+                    current_part.append(" ".join(current_word_part))
+                    current_length += len(current_part[-1])
+            else:
+                current_part.append(paragraph)
+                current_length = len(paragraph)
+        else:
+            current_part.append(paragraph)
+            current_length += para_len
+            
+    if current_part:
+        parts.append("\n".join(current_part))
+        
+    return parts
+
 # -------------------------------------------------------
 # Twilio WhatsApp Response
 # -------------------------------------------------------
 
-def whatsapp_reply(message: str):
+def whatsapp_reply(message: str or list):
 
     twiml = MessagingResponse()
 
-    twiml.message(message)
+    if isinstance(message, list):
+        for msg in message:
+            twiml.message(msg)
+    else:
+        twiml.message(message)
 
     return Response(
 
@@ -141,24 +192,16 @@ async def webhook(
 
             reply = "Sorry, I couldn't generate a response."
 
-        MAX_LENGTH = 1400
-
-        if len(reply) > MAX_LENGTH:
-
-            reply = (
-
-                reply[:MAX_LENGTH]
-
-                + "\n\nReply *continue* to receive the remaining report."
-
-            )
+        parts = split_message(reply, max_length=1500)
 
         print("\n" + "=" * 70)
         print("Reply Sent")
-        print(reply)
+        for i, part in enumerate(parts):
+            print(f"--- Part {i+1} ---")
+            print(part)
         print("=" * 70)
 
-        return whatsapp_reply(reply)
+        return whatsapp_reply(parts)
 
     except Exception as e:
 

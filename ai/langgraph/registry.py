@@ -60,7 +60,7 @@ class AgentRegistry:
     # Execute Agent
     # -----------------------------------
 
-    def execute(self, name):
+    def execute(self, name, message=None):
 
         agent = self.get(name)
 
@@ -73,7 +73,10 @@ class AgentRegistry:
             )
 
         if hasattr(agent, "execute"):
-
+            import inspect
+            sig = inspect.signature(agent.execute)
+            if 'message' in sig.parameters:
+                return agent.execute(message)
             return agent.execute()
 
         if hasattr(agent, "analyze"):

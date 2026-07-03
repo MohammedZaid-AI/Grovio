@@ -15,9 +15,25 @@ class ProcurementAgent:
     # Generate Purchase Order
     # --------------------------------------------------
 
-    def execute(self):
+    def execute(self, message=None):
 
-        result = self.service.create()
+        # Determine if it's an explicit create intent
+        is_create_intent = False
+        if message:
+            msg_lower = message.lower().strip()
+            create_phrases = [
+                "create order", "create this order", "place this po", "place order",
+                "create draft", "draft this", "order this"
+            ]
+            if any(phrase in msg_lower for phrase in create_phrases):
+                is_create_intent = True
+
+        if is_create_intent:
+            result = self.service.create()
+            is_preview = False
+        else:
+            result = self.service.generate_preview()
+            is_preview = True
 
         lines = []
 
@@ -25,11 +41,12 @@ class ProcurementAgent:
         # Header
         # ------------------------------------------
 
-        lines.append(
-
-            f"🛒 Purchase Order #{result['purchase_order_id']}"
-
-        )
+        if is_preview:
+            lines.append("📋 Procurement Forecast (not yet ordered)")
+        else:
+            lines.append(
+                f"🛒 Purchase Order #{result['purchase_order_id']}"
+            )
 
         lines.append("")
 
@@ -103,9 +120,11 @@ class ProcurementAgent:
 
         lines.append("")
 
-        lines.append("Reply YES to approve.")
-
-        lines.append("Reply NO to cancel.")
+        if is_preview:
+            lines.append("Reply 'create order' if you'd like me to draft this as a purchase order.")
+        else:
+            lines.append("Reply YES to approve.")
+            lines.append("Reply NO to cancel.")
 
         return {
 

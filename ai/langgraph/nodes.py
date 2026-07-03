@@ -72,7 +72,9 @@ def execute_agents(state):
 
             results[agent] = registry.execute(
 
-                agent
+                agent,
+
+                state["message"]
 
             )
 
@@ -104,12 +106,77 @@ def response_node(state):
         state["response"] = state["results"]["coo"]["analysis"]
 
     elif "decision" in state["results"]:
-
-        state["response"] = str(
-
-            state["results"]["decision"]
-
-        )
+        data = state["results"]["decision"]
+        
+        reply = []
+        reply.append("🧠 *Grovio Restaurant Intelligence Report*")
+        reply.append("")
+        
+        # 1. Restaurant Health
+        health = data.get("restaurant_health", {})
+        reply.append(f"🏥 *Restaurant Health*: {health.get('status', 'Unknown')} (Score: {health.get('score', 0)}/100)")
+        if health.get("reasons"):
+            for reason in health["reasons"]:
+                reply.append(f"  • {reason}")
+        reply.append("")
+        
+        # 2. Inventory Health
+        inv = data.get("inventory", {})
+        reply.append(f"📦 *Inventory Health*: {inv.get('status', 'Unknown')} (Score: {inv.get('health_score', 0)}/100)")
+        if inv.get("low_stock"):
+            reply.append("  ⚠️ *Low Stock Items*:")
+            for item in inv["low_stock"]:
+                if isinstance(item, dict):
+                    p_name = item.get('product', 'Unknown')
+                    p_stock = item.get('stock', 0)
+                    p_unit = item.get('unit', '')
+                    p_min = item.get('minimum', 0)
+                    reply.append(f"    • {p_name}: {p_stock} {p_unit} (min: {p_min})")
+                elif isinstance(item, (list, tuple)) and len(item) >= 5:
+                    reply.append(f"    • {item[1]}: {item[2]} {item[4]} (min: {item[3]})")
+                else:
+                    reply.append(f"    • {item}")
+        reply.append("")
+        
+        # 3. Procurement Forecast
+        proc = data.get("procurement", {})
+        reply.append(f"📈 *Procurement Forecast*: {proc.get('action', 'WAIT_FOR_MORE_DATA')} (Confidence: {proc.get('confidence', 0)}%)")
+        forecast = proc.get("forecast", {})
+        if forecast.get("recommendations"):
+            reply.append("  📋 *Recommended Purchases*:")
+            for rec in forecast["recommendations"]:
+                reply.append(f"    • {rec.get('product', 'Unknown')}: {rec.get('quantity', 0)} {rec.get('unit', '')} from {rec.get('supplier', 'Unknown')}")
+        reply.append("")
+        
+        # 4. Risks & Opportunities
+        risks = data.get("risks", [])
+        if risks:
+            reply.append("⚠️ *Business Risks*:")
+            for risk in risks:
+                reply.append(f"  • {risk}")
+            reply.append("")
+            
+        opps = data.get("opportunities", [])
+        if opps:
+            reply.append("💡 *Opportunities*:")
+            for opp in opps:
+                reply.append(f"  • {opp}")
+            reply.append("")
+            
+        # 5. Daily Brief Summary
+        brief = data.get("daily_brief", {})
+        if brief:
+            reply.append("📜 *Daily Brief Summary*:")
+            reply.append(f"  • Date: {brief.get('date', 'N/A')}")
+            reply.append(f"  • Spend today: ₹{brief.get('restaurant_spend', 0.0)}")
+            reply.append(f"  • Pending orders: {brief.get('pending_orders', 0)}")
+            reply.append(f"  • Completed orders: {brief.get('completed_orders', 0)}")
+            if brief.get("insights"):
+                reply.append("  *Insights*:")
+                for insight in brief["insights"]:
+                    reply.append(f"    ✓ {insight}")
+                    
+        state["response"] = "\n".join(reply).strip()
     
     elif "purchase_history" in state["results"]:
 

@@ -3,10 +3,9 @@ import json
 from core.llm import LLM
 from core.config import Config
 
-from ai.tool_registry import (
-    TOOLS,
-    TOOL_DESCRIPTIONS
-)
+# Legacy/unused imports mocked locally
+TOOLS = {}
+TOOL_DESCRIPTIONS = "Available tools: "
 
 
 class RestaurantCOO:

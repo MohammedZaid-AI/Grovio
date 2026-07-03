@@ -2,17 +2,20 @@
     "preferred_brands": {
         "City Bakery Citi Sliced White Bread": "City",
         "Coca-Cola Soft Drink Bottle": "Coca-Cola",
-        "Amul Falooda Ice Cream Sundae Tub": "Amul"
+        "Amul Falooda Ice Cream Sundae Tub": "Amul",
+        "Amul Gold Mango Duetz Ice Cream Stick": "Amul"
     },
     "purchase_frequency": {
-        "City Bakery Citi Sliced White Bread": 2,
+        "City Bakery Citi Sliced White Bread": 3,
         "Coca-Cola Soft Drink Bottle": 1,
-        "Amul Falooda Ice Cream Sundae Tub": 1
+        "Amul Falooda Ice Cream Sundae Tub": 1,
+        "Amul Gold Mango Duetz Ice Cream Stick": 1
     },
     "favorite_products": {
-        "City Bakery Citi Sliced White Bread": 2,
+        "City Bakery Citi Sliced White Bread": 3,
         "Coca-Cola Soft Drink Bottle": 1,
-        "Amul Falooda Ice Cream Sundae Tub": 1
+        "Amul Falooda Ice Cream Sundae Tub": 1,
+        "Amul Gold Mango Duetz Ice Cream Stick": 1
     },
     "supplier_preferences": {},
     "seasonal_patterns": {},

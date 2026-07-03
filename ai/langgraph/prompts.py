@@ -28,14 +28,17 @@ Procurement planning
 Supplier recommendations
 Restocking analysis
 Purchase planning
+Create new purchase order
+Create draft purchase order
+Draft a PO
+"create order" or "place this PO" or "order this from..."
 
 purchase_editor
-Modify purchase order
-Remove products
-Add products
-Change quantities
-Preview order
-Current order
+Modify an EXISTING draft purchase order only
+Remove products from existing draft
+Add products to existing draft
+Change quantities on existing draft
+Do NOT use for creating or drafting a new PO
 
 purchase_history
 Previous purchases
@@ -217,11 +220,31 @@ Response:
 ----------------------------
 
 User:
-Cancel it
+Create a draft purchase order
 
 Response:
 {
-    "agents":["purchase_rejection"]
+    "agents":["procurement"]
+}
+
+----------------------------
+
+User:
+create order
+
+Response:
+{
+    "agents":["procurement"]
+}
+
+----------------------------
+
+User:
+order this from ABC Dairy
+
+Response:
+{
+    "agents":["procurement"]
 }
 
 ------------------------------------------------

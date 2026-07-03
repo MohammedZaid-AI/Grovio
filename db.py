@@ -1,4 +1,5 @@
 import sqlite3
+import json
 DB_PATH = 'database/orders.db'
 
 def get_connection():
@@ -9,6 +10,21 @@ def init_db():
     try:
         cursor = conn.cursor()
         cursor.execute("\n    CREATE TABLE IF NOT EXISTS orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        spin_id TEXT,\n\n        quantity INTEGER,\n\n        order_type TEXT,\n\n        schedule_time TEXT,\n\n        recurrence TEXT,\n\n        status TEXT DEFAULT 'active'\n\n    )\n    ")
+        
+        # Safe schema migration for orders table
+        cursor.execute("PRAGMA table_info(orders)")
+        columns = [row[1] for row in cursor.fetchall()]
+        if 'order_id' not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN order_id TEXT")
+        if 'items' not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN items TEXT")
+        if 'total' not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN total REAL")
+        if 'phone' not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN phone TEXT")
+        if 'created_at' not in columns:
+            cursor.execute("ALTER TABLE orders ADD COLUMN created_at TIMESTAMP")
+
         cursor.execute("\n    CREATE TABLE IF NOT EXISTS pending_orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        spin_id TEXT,\n\n        quantity INTEGER,\n\n        created_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP,\n\n        status TEXT DEFAULT\n        'awaiting_confirmation'\n\n    )\n    ")
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS order_history(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT,\n\n        quantity INTEGER,\n\n        amount REAL,\n\n        order_id TEXT,\n\n        ordered_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_invoices(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT,\n\n        invoice_number TEXT,\n\n        invoice_date TEXT,\n\n        total_amount REAL,\n\n        created_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
@@ -25,6 +41,28 @@ def save_order(product_name, spin_id, quantity, order_type, schedule_time=None, 
     conn = get_connection()
     try:
         conn.execute('\n        INSERT INTO orders(\n\n            product_name,\n\n            spin_id,\n\n            quantity,\n\n            order_type,\n\n            schedule_time,\n\n            recurrence\n\n        )\n\n        VALUES (?, ?, ?, ?, ?, ?)\n\n        ', (product_name, spin_id, quantity, order_type, schedule_time, recurrence))
+        conn.commit()
+    finally:
+        conn.close()
+
+def save_swiggy_order(order_id, items, total, status, phone):
+    conn = get_connection()
+    try:
+        from datetime import datetime
+        created_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        items_json = json.dumps(items)
+        conn.execute('''
+        INSERT INTO orders(
+            order_id,
+            items,
+            total,
+            status,
+            phone,
+            order_type,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, 'swiggy', ?)
+        ''', (order_id, items_json, total, status, phone, created_at))
         conn.commit()
     finally:
         conn.close()

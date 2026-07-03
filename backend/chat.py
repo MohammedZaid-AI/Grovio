@@ -296,6 +296,33 @@ async def process_message(
 
         if result and (result.get("order_placed") or result.get("success")):
 
+            try:
+                from db import save_swiggy_order
+                import time
+
+                order_id = result.get("order_id")
+                if not order_id:
+                    order_id = f"SWG-{int(time.time())}"
+
+                items_selected = shopping_session.selected(phone)
+                items_list = [[item.get("displayName", "Unknown"), item.get("quantity", 1)] for item in items_selected]
+
+                total_amount = result.get("total")
+                if not total_amount:
+                    total_amount = sum(item.get("price", 0) * item.get("quantity", 0) for item in items_selected)
+
+                status_str = result.get("status", "CONFIRMED")
+
+                save_swiggy_order(
+                    order_id=order_id,
+                    items=items_list,
+                    total=total_amount,
+                    status=status_str,
+                    phone=phone
+                )
+            except Exception as db_err:
+                print(f"❌ Error persisting Swiggy order: {db_err}")
+
             # pyrefly: ignore [missing-import]
             from ai.memory.memory_trainer import memory_trainer
 

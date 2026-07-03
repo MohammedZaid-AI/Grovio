@@ -1,6 +1,7 @@
 import re
 
 from ai.procurement.purchase_order_editor import PurchaseOrderEditor
+from db import get_purchase_order_items
 
 
 class PurchaseOrderEditorAgent:
@@ -14,6 +15,13 @@ class PurchaseOrderEditorAgent:
     def execute(self, message):
 
         message = message.lower().strip()
+
+        # Check if a draft purchase order exists first
+        order = self.editor.latest_order()
+        if order is None:
+            return {
+                "message": "❌ I couldn't edit because no active draft purchase order was found. Please ask me to plan procurement first."
+            }
 
         # -------------------------------
         # Show Order
@@ -31,9 +39,9 @@ class PurchaseOrderEditorAgent:
 
         ]:
 
-            order = self.editor.show()
+            order_data = self.editor.show()
 
-            if order is None:
+            if order_data is None:
 
                 return {
 
@@ -45,7 +53,7 @@ class PurchaseOrderEditorAgent:
 
             lines.append(
 
-                f"🛒 Purchase Order #{order['purchase_order_id']}"
+                f"🛒 Purchase Order #{order_data['purchase_order_id']}"
 
             )
 
@@ -53,13 +61,13 @@ class PurchaseOrderEditorAgent:
 
             lines.append(
 
-                f"🏪 Supplier : {order['supplier']}"
+                f"🏪 Supplier : {order_data['supplier']}"
 
             )
 
             lines.append("")
 
-            for item in order["items"]:
+            for item in order_data["items"]:
 
                 lines.append(
 
@@ -71,7 +79,7 @@ class PurchaseOrderEditorAgent:
 
             lines.append(
 
-                f"💰 Total : ₹{order['total']:.2f}"
+                f"💰 Total : ₹{order_data['total']:.2f}"
 
             )
 
@@ -97,10 +105,16 @@ class PurchaseOrderEditorAgent:
 
             product = match.group(2).strip()
 
+            # Validate product exists in draft items
+            items = get_purchase_order_items(order[0])
+            product_found = any(item[0].lower() == product.lower() for item in items)
+            if not product_found:
+                return {
+                    "message": f"❌ Couldn't remove: Product '{product.title()}' is not in the current draft purchase order items list."
+                }
+
             self.editor.remove_product(
-
                 product
-
             )
 
             return {
@@ -147,6 +161,14 @@ class PurchaseOrderEditorAgent:
 
                 )
 
+                # Validate product exists in draft items
+                items = get_purchase_order_items(order[0])
+                product_found = any(item[0].lower() == product.lower() for item in items)
+                if not product_found:
+                    return {
+                        "message": f"❌ Couldn't update: Product '{product.title()}' is not in the current draft purchase order items list."
+                    }
+
                 self.editor.update_quantity(
 
                     product,
@@ -165,9 +187,12 @@ class PurchaseOrderEditorAgent:
 
         return {
 
-            "message":
-
-                "I couldn't edit the purchase order."
+            "message": (
+                "I couldn't edit the purchase order. Please specify your edit using one of the following formats:\n"
+                "• To remove a product: 'Remove [product]'\n"
+                "• To change quantity: 'Change [product] to [quantity]'\n"
+                "• To view the draft order: 'Show order'"
+            )
 
         }
 
