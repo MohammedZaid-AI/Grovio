@@ -332,13 +332,28 @@ def get_low_stock_items():
     finally:
         conn.close()
 
-def approve_purchase_order(purchase_order_id):
+def update_purchase_order_status(purchase_order_id, target_status):
     conn = get_connection()
     try:
-        conn.execute("\n        UPDATE purchase_orders\n\n        SET status='APPROVED'\n\n        WHERE id=?\n        ", (purchase_order_id,))
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM purchase_orders WHERE id=?", (purchase_order_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Purchase order with ID {purchase_order_id} does not exist.")
+        
+        current_status = row[0]
+        
+        # Validate transition using the state machine
+        from ai.procurement.state_machine import PurchaseOrderStateMachine
+        PurchaseOrderStateMachine.validate_transition(current_status, target_status)
+        
+        cursor.execute("UPDATE purchase_orders SET status=? WHERE id=?", (target_status, purchase_order_id))
         conn.commit()
     finally:
         conn.close()
+
+def approve_purchase_order(purchase_order_id):
+    update_purchase_order_status(purchase_order_id, 'APPROVED')
 
 def get_latest_purchase_order():
     conn = get_connection()
@@ -366,15 +381,14 @@ def reject_latest_purchase_order():
         cursor.execute("\n        SELECT id, supplier\n        FROM purchase_orders\n        WHERE status = 'DRAFT'\n        ORDER BY id DESC\n        LIMIT 1\n        ")
         row = cursor.fetchone()
         if row is None:
-            conn.close()
             return None
         purchase_order_id = row[0]
         supplier = row[1]
-        cursor.execute("\n        UPDATE purchase_orders\n        SET status='REJECTED'\n        WHERE id=?\n        ", (purchase_order_id,))
-        conn.commit()
-        return {'purchase_order_id': purchase_order_id, 'supplier': supplier}
     finally:
         conn.close()
+
+    update_purchase_order_status(purchase_order_id, 'REJECTED')
+    return {'purchase_order_id': purchase_order_id, 'supplier': supplier}
 
 def get_latest_draft_purchase_order():
     conn = get_connection()
