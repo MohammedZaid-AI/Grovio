@@ -20,6 +20,8 @@ class PurchaseOrderService:
 
     def generate_preview(self):
         purchase_order = self.generator.generate()
+        forecast = self.generator.forecast.execute()
+        reasons = {item["product"]: item.get("reason", "") for item in forecast.get("recommended_orders", [])}
         return {
             "purchase_order_id": "PREVIEW",
             "supplier": purchase_order.supplier,
@@ -29,7 +31,8 @@ class PurchaseOrderService:
                     "quantity": item.quantity,
                     "unit": item.unit,
                     "price": item.estimated_price,
-                    "subtotal": item.subtotal
+                    "subtotal": item.subtotal,
+                    "reason": reasons.get(item.product, "")
                 }
                 for item in purchase_order.items
             ],
@@ -43,8 +46,9 @@ class PurchaseOrderService:
     # --------------------------------------------------
 
     def create(self):
-
         purchase_order = self.generator.generate()
+        forecast = self.generator.forecast.execute()
+        reasons = {item["product"]: item.get("reason", "") for item in forecast.get("recommended_orders", [])}
 
         # Deduplication check: Reuse existing identical draft PO from last 5 minutes
         from db import get_connection
@@ -80,7 +84,8 @@ class PurchaseOrderService:
                                 "quantity": item.quantity,
                                 "unit": item.unit,
                                 "price": item.estimated_price,
-                                "subtotal": item.subtotal
+                                "subtotal": item.subtotal,
+                                "reason": reasons.get(item.product, "")
                             }
                             for item in purchase_order.items
                         ],
@@ -128,37 +133,22 @@ class PurchaseOrderService:
         # --------------------------------------------
 
         return {
-
             "purchase_order_id": purchase_order_id,
-
             "supplier": purchase_order.supplier,
-
             "items": [
-
                 {
-
                     "product": item.product,
-
                     "quantity": item.quantity,
-
                     "unit": item.unit,
-
                     "price": item.estimated_price,
-
-                    "subtotal": item.subtotal
-
+                    "subtotal": item.subtotal,
+                    "reason": reasons.get(item.product, "")
                 }
-
                 for item in purchase_order.items
-
             ],
-
             "total_items": purchase_order.total_items,
-
             "total_quantity": purchase_order.total_quantity,
-
             "total": purchase_order.total_amount
-
         }
 
 

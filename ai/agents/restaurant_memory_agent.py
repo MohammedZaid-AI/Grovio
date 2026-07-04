@@ -44,7 +44,21 @@ Your job is to analyze the user's message and categorize it into one of the foll
        "action": "query_supplier_leaderboard"
    }
 
-5. Otherwise:
+5. If the user asks for the recipe of a dish (e.g. "what is the recipe for chicken steak?", "show recipe for cheese toast"):
+   Return JSON:
+   {
+       "action": "recipe_query",
+       "dish_name": "<dish_name>"
+   }
+
+6. If the user asks for ingredient consumption history, usage metrics, or daily consumption averages based on sales (e.g. "how much chicken did we use this week?", "show consumption summary", "how much milk was used based on sales?"):
+   Return JSON:
+   {
+       "action": "query_consumption",
+       "product": "<product_name_or_null>"
+   }
+
+7. Otherwise:
    Return JSON:
    {
        "action": "unknown"
@@ -62,6 +76,47 @@ class RestaurantMemoryAgent:
     def execute(self, message: str) -> str:
         if not message:
             return "No memory details provided."
+            
+        msg_strip = message.strip()
+        msg_lower = msg_strip.lower()
+        if msg_lower.startswith("recipe:"):
+            parts = msg_strip.split("=", 1)
+            if len(parts) == 2:
+                header = parts[0]
+                try:
+                    dish_name = header.split(":", 1)[1].strip()
+                except IndexError:
+                    return "❌ Invalid recipe format. Use: 'Recipe: Chicken Steak = 200g Chicken, 50g Mixed Veg'"
+                ingredients_str = parts[1].strip()
+                
+                ingredients = []
+                segments = ingredients_str.split(",")
+                for seg in segments:
+                    seg = seg.strip()
+                    if not seg:
+                        continue
+                    match = re.match(r"^(\d+(?:\.\d+)?)\s*([a-zA-Z]+)?\s+(.+)$", seg)
+                    if match:
+                        qty = float(match.group(1))
+                        unit = match.group(2) or "unit"
+                        ing_name = match.group(3).strip()
+                        ingredients.append({
+                            'ingredient_name': ing_name,
+                            'quantity_per_unit': qty,
+                            'unit': unit
+                        })
+                
+                if dish_name and ingredients:
+                    from db import save_recipe
+                    save_recipe(dish_name, ingredients)
+                    lines = [f"✅ Recipe saved for *{dish_name}*:"]
+                    for ing in ingredients:
+                        lines.append(f"• {ing['quantity_per_unit']} {ing['unit']} of {ing['ingredient_name']}")
+                    return "\n".join(lines)
+                else:
+                    return "❌ Invalid recipe format. Use: 'Recipe: Chicken Steak = 200g Chicken, 50g Mixed Veg'"
+            else:
+                return "❌ Invalid recipe format. Use: 'Recipe: Chicken Steak = 200g Chicken, 50g Mixed Veg'"
             
         # Parse intent using LLM
         response = llm.chat(
@@ -150,7 +205,8 @@ class RestaurantMemoryAgent:
                 return "\n".join(reply)
                 
             elif action == "query_supplier_reliability":
-                supplier = data.get("supplier", "").strip()
+                supplier_val = data.get("supplier")
+                supplier = supplier_val.strip() if supplier_val else ""
                 if not supplier:
                     return "Could not determine which supplier you are asking about."
                 rel = get_supplier_reliability(supplier)
@@ -217,6 +273,88 @@ class RestaurantMemoryAgent:
                 reply.append("(Suppliers require at least 3 completed deliveries for scoring).")
                 return "\n".join(reply)
                 
+            elif action == "recipe_query":
+                dish_val = data.get("dish_name")
+                dish_name = dish_val.strip() if dish_val else ""
+                if not dish_name:
+                    return "Could not determine which dish you are asking about."
+                from db import get_recipe
+                recipe = get_recipe(dish_name)
+                if not recipe:
+                    return f"I don't have a recipe defined for *{dish_name}* yet. You can define one by replying:\n'Recipe: {dish_name} = 200g Chicken, 50g Mixed Veg'"
+                
+                reply = [f"📋 *Recipe: {dish_name}*", ""]
+                for ing in recipe:
+                    reply.append(f"• {ing['ingredient_name'].capitalize()}: {ing['quantity_per_unit']} {ing['unit']}")
+                reply.append("")
+                reply.append(f'(Reply "Recipe: {dish_name} = ..." to update).')
+                return "\n".join(reply)
+                
+            elif action == "query_consumption":
+                product_val = data.get("product")
+                product = product_val.strip() if product_val else ""
+                from db import get_product_consumption_stats, get_weekly_consumption_summary, get_product_inventory
+                
+                if product and product.lower() != "null" and product.lower() != "none" and product != "":
+                    base_prod = get_base_product(product)
+                    stats = get_product_consumption_stats(base_prod)
+                    total = stats.get('total_consumed', 0.0)
+                    unit = stats.get('unit') or 'units'
+                    adcr = stats.get('adcr')
+                    conf = stats.get('adcr_confidence', 'NONE')
+                    
+                    inv = get_product_inventory(base_prod)
+                    current_stock = inv[2] if inv and inv[2] is not None else 0.0
+                    inv_unit = inv[4] if inv and inv[4] is not None else unit
+                    
+                    reply = [
+                        f"📊 *Sales-Based Consumption: {base_prod.capitalize()}*",
+                        "",
+                        f"• *Total Consumed*: {total:.1f} {unit}",
+                    ]
+                    if conf == 'HIGH' and adcr:
+                        days_left = current_stock / adcr if adcr > 0 else 999.0
+                        reply.append(f"• *Average Daily Usage*: {adcr:.1f} {unit}/day")
+                        reply.append(f"• *Current Stock Status*: {current_stock:.1f} {inv_unit} remaining (~{days_left:.1f} days left)")
+                        reply.append("• *Confidence*: HIGH")
+                    else:
+                        reply.append("• *Average Daily Usage*: not enough sales data yet")
+                        reply.append(f"• *Current Stock Status*: {current_stock:.1f} {inv_unit} remaining")
+                        reply.append("• *Confidence*: LOW")
+                    return "\n".join(reply)
+                else:
+                    # General summary
+                    summary = get_weekly_consumption_summary()
+                    if not summary:
+                        return "No ingredient consumption recorded over the last 7 days."
+                    reply = [
+                        "📈 *Weekly Ingredient Consumption Summary*",
+                        ""
+                    ]
+                    for item in summary:
+                        prod = item['product_name']
+                        qty = item['consumed_quantity']
+                        unit = item['unit']
+                        
+                        stats = get_product_consumption_stats(prod)
+                        adcr = stats.get('adcr')
+                        conf = stats.get('adcr_confidence', 'NONE')
+                        
+                        inv = get_product_inventory(prod)
+                        current_stock = inv[2] if inv and inv[2] is not None else 0.0
+                        inv_unit = inv[4] if inv and inv[4] is not None else unit
+                        
+                        stock_status = ""
+                        if conf == 'HIGH' and adcr and adcr > 0:
+                            days_left = current_stock / adcr
+                            stock_status = f" (~{days_left:.1f} days stock left)"
+                            
+                        reply.append(f"• *{prod.capitalize()}*: {qty:.1f} {unit} used{stock_status}")
+                    
+                    reply.append("")
+                    reply.append("(Calculated from sales receipts over the last 7 days).")
+                    return "\n".join(reply)
+                    
             else:
                 return (
                     "I couldn't understand your memory request. You can ask me questions like "

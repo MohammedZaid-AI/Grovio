@@ -131,49 +131,56 @@ async def webhook(
     print("=" * 70)
 
     # -------------------------------------------------------
-    # Invoice Processing
+    # Document Ingestion & Classification Staging
     # -------------------------------------------------------
-
     if NumMedia > 0:
-
         try:
-
-            print("Processing Invoice...")
-
-            result = pipeline.process(
-
-                MediaUrl0,
-
-                MediaContentType0
-
-            )
-
-            if result.get("success"):
-
+            print("Downloading and parsing document...")
+            parsed = pipeline.parser.parse(MediaUrl0, MediaContentType0)
+            invoice = pipeline.extractor.extract(parsed["text"])
+            
+            from db import save_pending_document
+            doc_type = invoice.get("doc_type", "SUPPLIER_INVOICE")
+            doc_id = save_pending_document(From, doc_type, invoice)
+            
+            if doc_type == "SUPPLIER_INVOICE":
+                supplier = invoice.get("supplier") or "Unknown Supplier"
+                inv_num = invoice.get("invoice_number") or "N/A"
+                items_summary = ", ".join([f"{item.get('product')} ({item.get('quantity')} {item.get('unit')})" for item in invoice.get("items", []) if item.get("product")])
                 reply = (
-                    "✅ Invoice processed successfully.\n\n"
-                    "Inventory has been updated.\n"
-                    "Price history has been updated."
+                    f"📋 *Supplier Invoice Detected* (ID: {doc_id})\n\n"
+                    f"• *Supplier*: {supplier}\n"
+                    f"• *Invoice #*: {inv_num}\n"
+                    f"• *Items*: {items_summary}\n"
+                    f"• *Total*: ₹{invoice.get('total_amount', 0.0):.2f}\n\n"
+                    f"Reply *YES* to log this purchase and update inventory, or *NO* to cancel."
                 )
-
             else:
-
+                bill_num = invoice.get("invoice_number") or "N/A"
+                items_summary = ", ".join([f"{item.get('quantity') or '?'}x {item.get('product')}" for item in invoice.get("items", []) if item.get("product")])
+                
+                # Check for warnings on missing/unparseable quantities
+                warnings = []
+                for item in invoice.get("items", []):
+                    if item.get("product") and (item.get("quantity") is None or item.get("quantity") == 0):
+                        warnings.append(f"⚠️ Could not parse quantity for item '{item.get('product')}'. Skipped.")
+                
+                warnings_str = "\n".join(warnings) + "\n\n" if warnings else ""
                 reply = (
-                    "❌ Invoice processing failed.\n\n"
-                    f"{result.get('message', 'Unknown error.')}"
+                    f"📊 *Sales Bill Detected* (ID: {doc_id})\n\n"
+                    f"• *Bill #*: {bill_num}\n"
+                    f"• *Items*: {items_summary}\n"
+                    f"• *Total*: ₹{invoice.get('total_amount', 0.0):.2f}\n\n"
+                    f"{warnings_str}"
+                    f"Reply *YES* to log these sales and calculate ingredient consumption, or *NO* to cancel."
                 )
-
         except Exception as e:
-
-            print("\nInvoice Error\n")
-
+            print("\nDocument Ingestion Error\n")
             print(e)
-
             reply = (
-                "❌ Unable to process invoice.\n\n"
+                "❌ Unable to parse document.\n\n"
                 f"{str(e)}"
             )
-
         return whatsapp_reply(reply)
 
     # -------------------------------------------------------

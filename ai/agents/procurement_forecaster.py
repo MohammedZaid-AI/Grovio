@@ -56,7 +56,7 @@ class ProcurementForecaster:
                 continue
 
             # Check inventory levels for emergency stock override
-            from db import get_product_inventory
+            from db import get_product_inventory, get_product_consumption_stats
             inv = get_product_inventory(product)
             current_stock = 0.0
             minimum_stock = 0.0
@@ -64,8 +64,21 @@ class ProcurementForecaster:
                 current_stock = inv[2] if inv[2] is not None else 0.0
                 minimum_stock = inv[3] if inv[3] is not None else 0.0
 
-            # Checks only run if not in emergency stock outage
-            if current_stock > minimum_stock:
+            # Calculate sales-based consumption stock duration
+            stats = get_product_consumption_stats(product)
+            adcr = stats.get('adcr')
+            adcr_confidence = stats.get('adcr_confidence')
+            
+            days_left = None
+            if adcr_confidence == 'HIGH' and adcr and adcr > 0:
+                days_left = current_stock / adcr
+
+            is_physical_low = current_stock <= minimum_stock
+            is_consumption_low = (days_left is not None and days_left <= 2.0)
+            is_emergency = is_physical_low or is_consumption_low
+
+            # Checks only run if not in emergency stock outage (either physical or sales-based)
+            if not is_emergency:
                 mem = get_product_memory(product)
                 if mem:
                     not_due_skip = False
@@ -106,32 +119,28 @@ class ProcurementForecaster:
                         continue
 
             probability = round(
-
                 (quantity / total) * 100,
-
                 2
-
             )
 
+            # Determine reason message based on emergency overrides
+            if is_consumption_low:
+                reason = f"Low stock alert ({days_left:.1f} days left based on sales consumption)"
+            elif is_physical_low:
+                reason = f"Low stock alert (physical stock {current_stock:.1f} left, min is {minimum_stock:.1f})"
+            else:
+                reason = f"Purchased {quantity} time(s) previously."
+
             recommendations.append(
-
                 {
-
                     "product": product,
-
                     "purchase_probability": probability,
-
                     "recommended_quantity": max(
                         1,
                         quantity
                     ),
-
-                    "reason":
-
-                        f"Purchased {quantity} time(s) previously."
-
+                    "reason": reason
                 }
-
             )
 
         recommendations.sort(

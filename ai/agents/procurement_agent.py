@@ -76,6 +76,10 @@ class ProcurementAgent:
                 lines.append(
                     f"  Subtotal : ₹{item['subtotal']:.2f}"
                 )
+                if item.get("reason") and "Low stock alert" in item["reason"]:
+                    lines.append(
+                        f"  Alert : {item['reason']}"
+                    )
                 lines.append("")
 
         # ------------------------------------------

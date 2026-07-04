@@ -315,6 +315,46 @@ Response:
     "agents":["restaurant_memory"]
 }
 
+----------------------------
+
+User:
+Recipe: Chicken Steak = 200g Chicken, 50g Mixed Veg
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+what is the recipe for chicken steak?
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+how much chicken did we use this week based on sales?
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+show consumption summary
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
 ------------------------------------------------
 
 IMPORTANT

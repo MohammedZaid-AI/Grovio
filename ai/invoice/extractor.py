@@ -17,67 +17,50 @@ class InvoiceExtractor:
     def extract(self, invoice_text):
 
         prompt = f"""
-You are an invoice extraction AI.
+You are an expert document extraction AI.
+We process two types of documents:
+1. SUPPLIER_INVOICE: Billed by suppliers/vendors to the restaurant for raw ingredients (e.g. Milk, Butter, Bread, Oil, Veg).
+2. SALES_BILL: Billed by the restaurant to customers for dishes/meals sold (e.g. Chicken Steak, Veg Salad, Butter Toast).
+
+Classify the document type under "doc_type" as either "SUPPLIER_INVOICE" or "SALES_BILL".
 
 Extract ONLY the information available.
-
 Return ONLY valid JSON.
 
 Schema:
-
 {{
-    "supplier": "",
-
-    "invoice_number": "",
-
-    "date": "",
-
-    "items":[
-
+    "doc_type": "SUPPLIER_INVOICE" | "SALES_BILL",
+    "supplier": "", // For SUPPLIER_INVOICE (e.g. ABC Dairy)
+    "invoice_number": "", // invoice number or bill number
+    "date": "YYYY-MM-DD",
+    "items": [
         {{
-
-            "product":"",
-
-            "quantity":0,
-
-            "unit":"",
-
-            "unit_price":0,
-
-            "total":0
-
+            "product": "", // For SUPPLIER_INVOICE, raw ingredient name. For SALES_BILL, prepared dish/item name.
+            "quantity": null, // Quantity of item. If missing or unparseable, set to null.
+            "unit": "", // unit of measurement (e.g. packets, kg, liters, loaves, unit)
+            "unit_price": 0.0,
+            "total": 0.0
         }}
-
     ],
-
-    "total_amount":0
-
+    "total_amount": 0.0
 }}
 
-Rules
-
-- Never invent products.
-- Never invent prices.
-- Never invent quantities.
-- If a field is missing use "" or 0.
+Rules:
+- If a quantity is ambiguous or unparseable, set it to null.
+- If a field is missing use null or "".
 - Return JSON only.
 
-Invoice:
-
+Document Text:
 {invoice_text}
 """
 
         response = llm.chat(
-
             system="""
-You are an expert invoice extraction assistant.
+You are an expert invoice and sales bill extraction assistant.
 Always return valid JSON only.
 """,
-
             user=prompt,
-
             temperature=0
-
         )
 
         try:
@@ -87,6 +70,8 @@ Always return valid JSON only.
         except Exception:
 
             return {
+
+                "doc_type": "SUPPLIER_INVOICE",
 
                 "supplier": "",
 

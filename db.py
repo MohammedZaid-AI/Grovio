@@ -99,6 +99,66 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_documents (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            doc_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            status TEXT DEFAULT 'PENDING',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS recipes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dish_name TEXT NOT NULL,
+            ingredient_name TEXT NOT NULL,
+            quantity_per_unit REAL NOT NULL,
+            unit TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(dish_name, ingredient_name)
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sales_bills (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_number TEXT UNIQUE,
+            bill_date TEXT NOT NULL,
+            total_amount REAL NOT NULL,
+            status TEXT DEFAULT 'PENDING_CONFIRMATION',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sales_bill_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            bill_id INTEGER NOT NULL,
+            dish_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            unit_price REAL,
+            total_price REAL,
+            FOREIGN KEY(bill_id) REFERENCES sales_bills(id)
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS product_consumption (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            consumed_quantity REAL NOT NULL,
+            unit TEXT NOT NULL,
+            calculation_date TEXT NOT NULL,
+            source_bill_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(source_bill_id) REFERENCES sales_bills(id)
+        )
+        ''')
+
         conn.commit()
     finally:
         conn.close()
@@ -1079,6 +1139,250 @@ def get_supplier_leaderboard():
                 'confidence_level': r[3]
             } for r in rows
         ]
+    finally:
+        conn.close()
+
+def save_recipe(dish_name, ingredients):
+    """
+    Saves a recipe for a dish name. Deletes any existing ingredients for the dish first
+    to ensure clean replacement.
+    ingredients: list of dicts: [{'ingredient_name': str, 'quantity_per_unit': float, 'unit': str}]
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM recipes WHERE LOWER(dish_name) = ?", (dish_name.lower().strip(),))
+        for ing in ingredients:
+            norm_name = get_base_product(ing['ingredient_name'])
+            cursor.execute("""
+                INSERT INTO recipes (dish_name, ingredient_name, quantity_per_unit, unit)
+                VALUES (?, ?, ?, ?)
+            """, (dish_name.strip(), norm_name, ing['quantity_per_unit'], ing['unit'].strip()))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_recipe(dish_name):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ingredient_name, quantity_per_unit, unit
+            FROM recipes
+            WHERE LOWER(dish_name) = ?
+        """, (dish_name.lower().strip(),))
+        rows = cursor.fetchall()
+        return [
+            {
+                'ingredient_name': r[0],
+                'quantity_per_unit': r[1],
+                'unit': r[2]
+            } for r in rows
+        ]
+    finally:
+        conn.close()
+
+def save_sales_bill(bill_number, bill_date, total_amount, items, status='PENDING_CONFIRMATION'):
+    """
+    Saves a sales bill and its items.
+    items: list of dicts: [{'dish_name': str, 'quantity': int, 'unit_price': float, 'total_price': float}]
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO sales_bills (bill_number, bill_date, total_amount, status)
+            VALUES (?, ?, ?, ?)
+        """, (bill_number, bill_date, total_amount, status))
+        bill_id = cursor.lastrowid
+        
+        for item in items:
+            cursor.execute("""
+                INSERT INTO sales_bill_items (bill_id, dish_name, quantity, unit_price, total_price)
+                VALUES (?, ?, ?, ?, ?)
+            """, (bill_id, item['dish_name'].strip(), item['quantity'], item.get('unit_price'), item.get('total_price')))
+        conn.commit()
+        return bill_id
+    finally:
+        conn.close()
+
+def confirm_sales_bill(bill_id):
+    """
+    Confirms a sales bill and multiplies quantities sold by recipe ingredients
+    to populate the product_consumption table.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status, bill_date FROM sales_bills WHERE id = ?", (bill_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        status, bill_date = row
+        if status == 'CONFIRMED':
+            return True
+            
+        cursor.execute("UPDATE sales_bills SET status = 'CONFIRMED' WHERE id = ?", (bill_id,))
+        
+        # Multiply dishes sold by recipes
+        cursor.execute("""
+            SELECT dish_name, quantity FROM sales_bill_items WHERE bill_id = ?
+        """, (bill_id,))
+        sold_items = cursor.fetchall()
+        
+        for dish_name, qty_sold in sold_items:
+            cursor.execute("""
+                SELECT ingredient_name, quantity_per_unit, unit FROM recipes WHERE LOWER(dish_name) = ?
+            """, (dish_name.lower().strip(),))
+            ingredients = cursor.fetchall()
+            for ing_name, qty_per_unit, unit in ingredients:
+                total_consumed = qty_sold * qty_per_unit
+                cursor.execute("""
+                    INSERT INTO product_consumption (product_name, consumed_quantity, unit, calculation_date, source_bill_id)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (ing_name, total_consumed, unit, bill_date, bill_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+def get_weekly_consumption_summary():
+    """
+    Calculates total consumption per product over the last 7 days.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        from datetime import datetime, timedelta
+        start_date = (datetime.now() - timedelta(days=6)).strftime('%Y-%m-%d')
+        cursor.execute("""
+            SELECT product_name, SUM(consumed_quantity), unit
+            FROM product_consumption
+            WHERE calculation_date >= ?
+            GROUP BY product_name, unit
+        """, (start_date,))
+        rows = cursor.fetchall()
+        return [
+            {
+                'product_name': r[0],
+                'consumed_quantity': r[1],
+                'unit': r[2]
+            } for r in rows
+        ]
+    finally:
+        conn.close()
+
+def get_product_consumption_stats(product_name):
+    """
+    Returns consumption statistics for a specific product, including ADCR.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        # Check total distinct days of sales bills
+        cursor.execute("SELECT COUNT(DISTINCT bill_date) FROM sales_bills WHERE status = 'CONFIRMED'")
+        distinct_days = cursor.fetchone()[0]
+        
+        cursor.execute("""
+            SELECT SUM(consumed_quantity), unit
+            FROM product_consumption
+            WHERE LOWER(product_name) = ?
+        """, (product_name.lower().strip(),))
+        row = cursor.fetchone()
+        total_consumed = row[0] if row and row[0] is not None else 0.0
+        unit = row[1] if row and row[1] is not None else ''
+        
+        adcr = None
+        confidence = 'NONE'
+        if distinct_days >= 3:
+            # We compute ADCR over the last 7 days
+            from datetime import datetime, timedelta
+            start_date = (datetime.now() - timedelta(days=6)).strftime('%Y-%m-%d')
+            cursor.execute("""
+                SELECT SUM(consumed_quantity)
+                FROM product_consumption
+                WHERE LOWER(product_name) = ? AND calculation_date >= ?
+            """, (product_name.lower().strip(), start_date))
+            weekly_sum = cursor.fetchone()[0]
+            weekly_sum_val = weekly_sum if weekly_sum is not None else 0.0
+            adcr = weekly_sum_val / 7.0
+            confidence = 'HIGH'
+            
+        return {
+            'total_consumed': total_consumed,
+            'unit': unit,
+            'adcr': adcr,
+            'adcr_confidence': confidence,
+            'distinct_days': distinct_days
+        }
+    finally:
+        conn.close()
+
+def save_pending_document(phone, doc_type, payload):
+    """
+    Saves a pending document for a phone number. Marks any existing PENDING documents
+    for that phone number as SUPERSEDED first.
+    payload: dict or JSON string
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE pending_documents
+            SET status = 'SUPERSEDED'
+            WHERE phone = ? AND status = 'PENDING'
+        """, (phone,))
+        
+        import json
+        payload_str = json.dumps(payload) if isinstance(payload, dict) else payload
+        
+        cursor.execute("""
+            INSERT INTO pending_documents (phone, doc_type, payload, status)
+            VALUES (?, ?, ?, 'PENDING')
+        """, (phone, doc_type, payload_str))
+        doc_id = cursor.lastrowid
+        conn.commit()
+        return doc_id
+    finally:
+        conn.close()
+
+def get_latest_pending_document(phone):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, doc_type, payload, status
+            FROM pending_documents
+            WHERE phone = ? AND status = 'PENDING'
+            ORDER BY id DESC LIMIT 1
+        """, (phone,))
+        row = cursor.fetchone()
+        if row:
+            import json
+            try:
+                payload = json.loads(row[2])
+            except Exception:
+                payload = row[2]
+            return {
+                'id': row[0],
+                'doc_type': row[1],
+                'payload': payload,
+                'status': row[3]
+            }
+        return None
+    finally:
+        conn.close()
+
+def update_pending_document_status(doc_id, status):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE pending_documents
+            SET status = ?
+            WHERE id = ?
+        """, (status, doc_id))
+        conn.commit()
     finally:
         conn.close()
 

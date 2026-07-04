@@ -57,6 +57,65 @@ async def process_message(
     result = None
 
     # ==================================================
+    # PENDING DOCUMENT CONFIRMATION (Safety Net)
+    # ==================================================
+    from db import get_latest_pending_document, update_pending_document_status
+    pending_doc = get_latest_pending_document(phone)
+    if pending_doc:
+        msg_clean = message.strip().lower()
+        if msg_clean in ["yes", "no", "y", "n"]:
+            doc_id = pending_doc["id"]
+            doc_type = pending_doc["doc_type"]
+            payload = pending_doc["payload"]
+            
+            if msg_clean in ["yes", "y"]:
+                update_pending_document_status(doc_id, "CONFIRMED")
+                
+                if doc_type == "SUPPLIER_INVOICE":
+                    from ai.invoice.processor import InvoiceProcessor
+                    proc = InvoiceProcessor()
+                    res = proc.process(payload)
+                    if res.get("success"):
+                        return (
+                            "✅ *Supplier Invoice Confirmed & Logged*\n\n"
+                            "Inventory has been updated.\n"
+                            "Price history has been updated."
+                        )
+                    else:
+                        return f"❌ Failed to process supplier invoice: {res.get('message', 'Unknown error')}"
+                
+                elif doc_type == "SALES_BILL":
+                    from db import save_sales_bill, confirm_sales_bill
+                    from datetime import datetime
+                    bill_number = payload.get("invoice_number") or f"SB-{doc_id}"
+                    bill_date = payload.get("date") or datetime.now().strftime("%Y-%m-%d")
+                    total_amount = payload.get("total_amount") or 0.0
+                    
+                    items = []
+                    for item in payload.get("items", []):
+                        qty = item.get("quantity")
+                        if qty is not None and qty > 0:
+                            items.append({
+                                "dish_name": item.get("product"),
+                                "quantity": int(qty),
+                                "unit_price": item.get("unit_price"),
+                                "total_price": item.get("total")
+                            })
+                    
+                    bill_db_id = save_sales_bill(bill_number, bill_date, total_amount, items, status='PENDING_CONFIRMATION')
+                    confirm_sales_bill(bill_db_id)
+                    
+                    return (
+                        f"✅ *Sales Bill Confirmed & Logged*\n\n"
+                        f"Bill Number: {bill_number}\n"
+                        f"Dishes sold: {len(items)}\n"
+                        f"Ingredient consumption has been calculated."
+                    )
+            else:
+                update_pending_document_status(doc_id, "CANCELLED")
+                return f"❌ Document confirmation cancelled. The draft (ID: {doc_id}) was discarded."
+
+    # ==================================================
     # AUTO PROCUREMENT
     # ==================================================
 
