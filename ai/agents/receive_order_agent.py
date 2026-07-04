@@ -6,7 +6,8 @@ from db import (
     update_incoming_inventory_item,
     add_to_inventory_stock,
     mark_delivery_delivered,
-    transition_po_to_received_and_updated
+    transition_po_to_received_and_updated,
+    get_product_inventory
 )
 
 class ReceiveOrderAgent:
@@ -15,7 +16,7 @@ class ReceiveOrderAgent:
     Updates incoming_inventory and main inventory, and transitions PO states.
     """
     
-    def parse_received_quantity(self, message, product_name, expected_qty):
+    def parse_received_quantity(self, message, product_name):
         msg = " " + re.sub(r'\s+', ' ', message.lower()) + " "
         prod = product_name.lower()
         
@@ -25,10 +26,6 @@ class ReceiveOrderAgent:
         match = re.search(pattern, msg)
         if match:
             return float(match.group(1))
-            
-        # If product name is simply mentioned, assume full expected quantity
-        if prod in msg:
-            return float(expected_qty)
             
         return None
 
@@ -57,16 +54,43 @@ class ReceiveOrderAgent:
             
         received_items = []
         discrepancies = []
+        new_items_warnings = []
         received_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        
+        # Check if the user specified that the entire order arrived
+        has_all_keyword = any(k in message.lower() for k in ["all items", "everything", "all products", "received all", "entire order", "arrived all"])
         
         # 4. Match and process items
         for item_id, product, expected_qty, unit, received_status, _ in incoming_items:
-            # If already received in a previous partial delivery, skip or check updates
             if received_status == 1:
                 continue
                 
-            received_qty = self.parse_received_quantity(message, product, expected_qty)
+            received_qty = None
+            if has_all_keyword:
+                received_qty = float(expected_qty)
+            else:
+                # Try to parse numeric quantity
+                parsed_qty = self.parse_received_quantity(message, product)
+                if parsed_qty is not None:
+                    received_qty = parsed_qty
+                else:
+                    # Check if the product name was mentioned but without a quantity
+                    if product.lower() in message.lower():
+                        return (
+                            f"⚠️ I noticed you mentioned '{product}' received from {actual_supplier}, "
+                            f"but the quantity was not specified. To ensure accurate discrepancy logging, "
+                            f"please state the exact quantity (e.g., 'received 8 {product} from {actual_supplier}')."
+                        )
+            
             if received_qty is not None:
+                # Check if item is new to inventory table before adding
+                existing_stock_record = get_product_inventory(product)
+                if not existing_stock_record:
+                    new_items_warnings.append(
+                        f"⚠️ '{product}' was added to inventory for the first time. "
+                        f"Its minimum stock is currently set to 0.0. Please update it to enable low-stock alerts."
+                    )
+                
                 # Update incoming_inventory record
                 update_incoming_inventory_item(item_id, received_qty, received_date)
                 
@@ -103,5 +127,9 @@ class ReceiveOrderAgent:
         if discrepancies:
             response.append("\n*Discrepancies Logged:*")
             response.extend(discrepancies)
+            
+        if new_items_warnings:
+            response.append("\n*Inventory Warnings:*")
+            response.extend(new_items_warnings)
             
         return "\n".join(response)
