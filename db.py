@@ -675,7 +675,7 @@ def recalculate_product_memory(product_name):
             
         # 2. Fetch all historical purchases containing the base product keyword in purchase_items
         cursor.execute("""
-            SELECT pi.invoice_date, pi.supplier, pit.product
+            SELECT pi.invoice_date, pi.supplier
             FROM purchase_items pit
             JOIN purchase_invoices pi ON pit.invoice_id = pi.id
             WHERE LOWER(pit.product) LIKE ?
@@ -718,23 +718,9 @@ def recalculate_product_memory(product_name):
                 intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
                 avg_reorder_interval = sum(intervals) / len(intervals)
                 
-        # Preferred Brand (only compute if AUTO)
-        if brand_src == 'AUTO':
-            brands = []
-            for r in rows:
-                desc = r[2] # E.g. "Nandini Shubham Milk"
-                # Extract brand using heuristic
-                words = desc.strip().split()
-                if len(words) > 1:
-                    first_word = words[0]
-                    # Check if first word is generic
-                    if first_word.lower() not in [base_prod, "fresh", "organic", "pure", "raw", "salted", "unsalted", "cow", "buffalo", "packaged"]:
-                        brands.append(first_word)
-            if brands:
-                from collections import Counter
-                pref_brand = Counter(brands).most_common(1)[0][0]
-            else:
-                pref_brand = None
+        # Preferred Brand: DO NOT auto-detect. Keep existing pref_brand if MANUAL, otherwise set to None.
+        if brand_src != 'MANUAL':
+            pref_brand = None
                 
         # Preferred Supplier (only compute if AUTO)
         if supplier_src == 'AUTO':
