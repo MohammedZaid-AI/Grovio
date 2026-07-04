@@ -255,6 +255,8 @@ class DecisionEngine:
 
     def execute(self):
 
+        self.memory.refresh()
+
         return {
 
             "daily_brief":

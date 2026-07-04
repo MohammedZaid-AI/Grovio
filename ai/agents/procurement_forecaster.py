@@ -23,6 +23,8 @@ class ProcurementForecaster:
 
         self.already_ordered = []
 
+        self.memory.refresh()
+
         counter = Counter()
 
         total = 0

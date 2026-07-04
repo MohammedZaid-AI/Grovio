@@ -107,6 +107,8 @@ class Inventory:
 
     def execute(self):
 
+        self.inventory = get_inventory()
+
         inventory = self.inventory_summary()
 
         low_stock = self.low_stock()
