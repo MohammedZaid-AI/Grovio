@@ -121,9 +121,12 @@ class ProcurementAgent:
         already_ordered = getattr(self.service.generator.forecast, "already_ordered", [])
         if already_ordered:
             lines.append("")
-            lines.append("Already Ordered (arriving soon):")
+            lines.append("Already Ordered / Not Due Yet:")
             for item in already_ordered:
-                lines.append(f"• {item['product']}: already ordered, arriving {item['expected_date']}")
+                if item.get("not_due"):
+                    lines.append(f"• {item['product']}: not due yet, next order expected on {item['expected_date']}")
+                else:
+                    lines.append(f"• {item['product']}: already ordered, arriving {item['expected_date']}")
 
         lines.append("")
 

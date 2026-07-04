@@ -44,7 +44,7 @@ class ProcurementForecaster:
 
         recommendations = []
 
-        from db import get_incoming_non_received_inventory_item
+        from db import get_incoming_non_received_inventory_item, get_product_memory
 
         for product, quantity in counter.items():
             expected_date = get_incoming_non_received_inventory_item(product)
@@ -54,6 +54,26 @@ class ProcurementForecaster:
                     "expected_date": expected_date
                 })
                 continue
+
+            # Reorder interval check
+            mem = get_product_memory(product)
+            if mem and mem['confidence_level'] == 'HIGH' and mem['avg_reorder_interval'] and mem['last_purchase_date']:
+                from datetime import datetime, timedelta
+                try:
+                    last_date_part = mem['last_purchase_date'].split()[0]
+                    last_date = datetime.strptime(last_date_part, "%Y-%m-%d")
+                    days_elapsed = (datetime.now() - last_date).days
+                    expected_interval = mem['avg_reorder_interval']
+                    if days_elapsed < expected_interval - 1:
+                        expected_order_date = (last_date + timedelta(days=expected_interval)).strftime("%Y-%m-%d")
+                        self.already_ordered.append({
+                            "product": product,
+                            "expected_date": expected_order_date,
+                            "not_due": True
+                        })
+                        continue
+                except Exception as e:
+                    print(f"Error checking reorder interval for {product}: {e}")
 
             probability = round(
 

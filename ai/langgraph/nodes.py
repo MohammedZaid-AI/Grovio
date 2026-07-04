@@ -243,6 +243,10 @@ def response_node(state):
 
         state["response"] = state["results"]["receive_order"]
 
+    elif "restaurant_memory" in state["results"]:
+
+        state["response"] = state["results"]["restaurant_memory"]
+
     else:
 
         state["response"] = "No response."

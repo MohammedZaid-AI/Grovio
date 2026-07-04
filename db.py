@@ -62,6 +62,20 @@ def init_db():
             FOREIGN KEY(purchase_order_id) REFERENCES purchase_orders(id)
         )
         ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS product_memory (
+            product_name TEXT PRIMARY KEY,
+            preferred_brand TEXT,
+            preferred_brand_source TEXT DEFAULT 'AUTO',
+            preferred_supplier TEXT,
+            preferred_supplier_source TEXT DEFAULT 'AUTO',
+            avg_reorder_interval REAL,
+            last_purchase_date TEXT,
+            confidence_level TEXT DEFAULT 'NONE',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         conn.commit()
     finally:
         conn.close()
@@ -619,6 +633,204 @@ def get_incoming_non_received_inventory_item(product_name):
         """, (product_name, today))
         row = cursor.fetchone()
         return row[0] if row else None
+    finally:
+        conn.close()
+
+def get_base_product(description):
+    desc = description.lower().strip()
+    if "milk" in desc:
+        return "milk"
+    if "butter" in desc:
+        return "butter"
+    if "bread" in desc:
+        return "bread"
+    words = desc.split()
+    return words[-1] if words else desc
+
+def recalculate_product_memory(product_name):
+    base_prod = get_base_product(product_name)
+    
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        # 1. Fetch existing manual overrides
+        cursor.execute("""
+            SELECT preferred_brand_source, preferred_supplier_source, preferred_brand, preferred_supplier 
+            FROM product_memory 
+            WHERE product_name = ?
+        """, (base_prod,))
+        existing = cursor.fetchone()
+        
+        brand_src = 'AUTO'
+        supplier_src = 'AUTO'
+        pref_brand = None
+        pref_supplier = None
+        
+        if existing:
+            brand_src = existing[0]
+            supplier_src = existing[1]
+            pref_brand = existing[2]
+            pref_supplier = existing[3]
+            
+        # 2. Fetch all historical purchases containing the base product keyword in purchase_items
+        cursor.execute("""
+            SELECT pi.invoice_date, pi.supplier, pit.product
+            FROM purchase_items pit
+            JOIN purchase_invoices pi ON pit.invoice_id = pi.id
+            WHERE LOWER(pit.product) LIKE ?
+            ORDER BY pi.invoice_date ASC
+        """, (f"%{base_prod}%",))
+        rows = cursor.fetchall()
+        
+        # 3. Calculate statistics
+        num_purchases = len(rows)
+        
+        # Confidence Rules:
+        if num_purchases == 0:
+            confidence = 'NONE'
+        elif num_purchases in (1, 2):
+            confidence = 'LOW'
+        else:
+            confidence = 'HIGH'
+            
+        # Last Purchase Date
+        last_purchase_date = None
+        if num_purchases > 0:
+            last_purchase_date = rows[-1][0] # invoice_date is YYYY-MM-DD
+            
+        # Average Reorder Interval
+        avg_reorder_interval = None
+        if num_purchases >= 3:
+            from datetime import datetime
+            dates = []
+            for r in rows:
+                try:
+                    # Strip timestamp if any and keep date part
+                    date_part = r[0].split()[0]
+                    d = datetime.strptime(date_part, "%Y-%m-%d")
+                    dates.append(d)
+                except Exception:
+                    pass
+            # Unique sorted dates to prevent same-day invoice artifacts
+            dates = sorted(list(set(dates)))
+            if len(dates) >= 3:
+                intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
+                avg_reorder_interval = sum(intervals) / len(intervals)
+                
+        # Preferred Brand (only compute if AUTO)
+        if brand_src == 'AUTO':
+            brands = []
+            for r in rows:
+                desc = r[2] # E.g. "Nandini Shubham Milk"
+                # Extract brand using heuristic
+                words = desc.strip().split()
+                if len(words) > 1:
+                    first_word = words[0]
+                    # Check if first word is generic
+                    if first_word.lower() not in [base_prod, "fresh", "organic", "pure", "raw", "salted", "unsalted", "cow", "buffalo", "packaged"]:
+                        brands.append(first_word)
+            if brands:
+                from collections import Counter
+                pref_brand = Counter(brands).most_common(1)[0][0]
+            else:
+                pref_brand = None
+                
+        # Preferred Supplier (only compute if AUTO)
+        if supplier_src == 'AUTO':
+            suppliers = [r[1] for r in rows if r[1]]
+            if suppliers:
+                from collections import Counter
+                pref_supplier = Counter(suppliers).most_common(1)[0][0]
+            else:
+                pref_supplier = None
+                
+        # 4. Insert or Update product_memory using OR REPLACE or ON CONFLICT
+        cursor.execute("""
+            INSERT INTO product_memory (
+                product_name, preferred_brand, preferred_brand_source,
+                preferred_supplier, preferred_supplier_source,
+                avg_reorder_interval, last_purchase_date, confidence_level, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(product_name) DO UPDATE SET
+                preferred_brand = excluded.preferred_brand,
+                preferred_brand_source = excluded.preferred_brand_source,
+                preferred_supplier = excluded.preferred_supplier,
+                preferred_supplier_source = excluded.preferred_supplier_source,
+                avg_reorder_interval = excluded.avg_reorder_interval,
+                last_purchase_date = excluded.last_purchase_date,
+                confidence_level = excluded.confidence_level,
+                updated_at = CURRENT_TIMESTAMP
+        """, (base_prod, pref_brand, brand_src, pref_supplier, supplier_src, avg_reorder_interval, last_purchase_date, confidence))
+        
+        conn.commit()
+    finally:
+        conn.close()
+
+def set_manual_product_preference(product_name, preferred_brand=None, preferred_supplier=None):
+    base_prod = get_base_product(product_name)
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT product_name FROM product_memory WHERE product_name=?", (base_prod,))
+        exists = cursor.fetchone()
+        
+        if exists:
+            if preferred_brand is not None:
+                cursor.execute("""
+                    UPDATE product_memory 
+                    SET preferred_brand = ?, preferred_brand_source = 'MANUAL', updated_at = CURRENT_TIMESTAMP
+                    WHERE product_name = ?
+                """, (preferred_brand, base_prod))
+            if preferred_supplier is not None:
+                cursor.execute("""
+                    UPDATE product_memory 
+                    SET preferred_supplier = ?, preferred_supplier_source = 'MANUAL', updated_at = CURRENT_TIMESTAMP
+                    WHERE product_name = ?
+                """, (preferred_supplier, base_prod))
+        else:
+            brand_val = preferred_brand
+            brand_src = 'MANUAL' if preferred_brand is not None else 'AUTO'
+            supplier_val = preferred_supplier
+            supplier_src = 'MANUAL' if preferred_supplier is not None else 'AUTO'
+            
+            cursor.execute("""
+                INSERT INTO product_memory (
+                    product_name, preferred_brand, preferred_brand_source, 
+                    preferred_supplier, preferred_supplier_source, confidence_level
+                ) VALUES (?, ?, ?, ?, ?, 'NONE')
+            """, (base_prod, brand_val, brand_src, supplier_val, supplier_src))
+        conn.commit()
+    finally:
+        conn.close()
+    
+    # Recalculate other non-manual stats after update
+    recalculate_product_memory(base_prod)
+
+def get_product_memory(product_name):
+    base_prod = get_base_product(product_name)
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT preferred_brand, preferred_brand_source,
+                   preferred_supplier, preferred_supplier_source,
+                   avg_reorder_interval, last_purchase_date, confidence_level
+            FROM product_memory
+            WHERE product_name = ?
+        """, (base_prod,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                'preferred_brand': row[0],
+                'preferred_brand_source': row[1],
+                'preferred_supplier': row[2],
+                'preferred_supplier_source': row[3],
+                'avg_reorder_interval': row[4],
+                'last_purchase_date': row[5],
+                'confidence_level': row[6]
+            }
+        return None
     finally:
         conn.close()
 

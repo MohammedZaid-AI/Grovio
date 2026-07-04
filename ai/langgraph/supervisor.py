@@ -99,7 +99,9 @@ class Supervisor:
 
                 "auto_order",
 
-                "receive_order"
+                "receive_order",
+
+                "restaurant_memory"
 
             }
 

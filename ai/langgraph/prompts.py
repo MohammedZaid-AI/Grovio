@@ -69,6 +69,14 @@ Mark PO as received or delivered
 "received milk and bread from ABC Dairy"
 Incoming items receipt
 
+restaurant_memory
+Queries on order intervals or last purchase dates
+Setting preferred brand or preferred supplier
+"when did we last order milk?"
+"what brand of milk do we usually get?"
+"we prefer Nandini brand for milk"
+"we prefer ABC Dairy for butter"
+
 ------------------------------------------------
 EXAMPLES
 ------------------------------------------------
@@ -262,6 +270,26 @@ received milk and bread from ABC Dairy
 Response:
 {
     "agents":["receive_order"]
+}
+
+----------------------------
+
+User:
+when did we last order milk?
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+we prefer Nandini brand for milk
+
+Response:
+{
+    "agents":["restaurant_memory"]
 }
 
 ------------------------------------------------

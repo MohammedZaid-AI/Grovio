@@ -8,6 +8,7 @@ from ai.agents.purchase_order_editor_agent import PurchaseOrderEditorAgent
 from ai.agents.dashboard_agent import DashboardAgent
 from ai.agents.auto_order_agent import AutoOrderAgent
 from ai.agents.receive_order_agent import ReceiveOrderAgent
+from ai.agents.restaurant_memory_agent import RestaurantMemoryAgent
 
 class AgentRegistry:
 
@@ -38,6 +39,8 @@ class AgentRegistry:
             "auto_order": AutoOrderAgent(),
 
             "receive_order": ReceiveOrderAgent(),
+
+            "restaurant_memory": RestaurantMemoryAgent(),
 
         }
 

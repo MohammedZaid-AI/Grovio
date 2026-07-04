@@ -7,7 +7,10 @@ from db import (
     add_to_inventory_stock,
     mark_delivery_delivered,
     transition_po_to_received_and_updated,
-    get_product_inventory
+    get_product_inventory,
+    save_invoice,
+    recalculate_product_memory,
+    get_connection
 )
 
 class ReceiveOrderAgent:
@@ -53,6 +56,7 @@ class ReceiveOrderAgent:
             return f"No expected inventory items found for Purchase Order #{po_id}."
             
         received_items = []
+        invoice_items = []
         discrepancies = []
         new_items_warnings = []
         received_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -91,6 +95,20 @@ class ReceiveOrderAgent:
                         f"Its minimum stock is currently set to 0.0. Please update it to enable low-stock alerts."
                     )
                 
+                # Fetch unit price from purchase_order_items for this product
+                conn = get_connection()
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT estimated_price 
+                        FROM purchase_order_items 
+                        WHERE purchase_order_id = ? AND LOWER(product) = LOWER(?)
+                    """, (po_id, product))
+                    price_row = cursor.fetchone()
+                    unit_price = price_row[0] if price_row else 0.0
+                finally:
+                    conn.close()
+                
                 # Update incoming_inventory record
                 update_incoming_inventory_item(item_id, received_qty, received_date)
                 
@@ -98,6 +116,14 @@ class ReceiveOrderAgent:
                 add_to_inventory_stock(product, received_qty, unit)
                 
                 received_items.append(f"• {product}: {received_qty} {unit} (expected: {expected_qty})")
+                
+                invoice_items.append({
+                    'product': product,
+                    'quantity': received_qty,
+                    'unit': unit,
+                    'unit_price': unit_price,
+                    'total': received_qty * unit_price
+                })
                 
                 # Log discrepancy if received differs from ordered
                 if received_qty != expected_qty:
@@ -108,14 +134,30 @@ class ReceiveOrderAgent:
         if not received_items:
             return f"None of the expected items for Purchase Order #{po_id} were found in your message."
             
-        # 5. Advance PO status to RECEIVED, then to INVENTORY_UPDATED
+        # 5. Create Purchase Invoice record
+        if invoice_items:
+            invoice_total = sum(item['total'] for item in invoice_items)
+            invoice = {
+                'supplier': actual_supplier,
+                'invoice_number': f"REC-{po_id}-{int(datetime.now().timestamp())}",
+                'date': datetime.now().strftime("%Y-%m-%d"),
+                'total_amount': invoice_total,
+                'items': invoice_items
+            }
+            save_invoice(invoice)
+            
+            # Recalculate memory for each product
+            for item in invoice_items:
+                recalculate_product_memory(item['product'])
+            
+        # 6. Advance PO status to RECEIVED, then to INVENTORY_UPDATED
         try:
             transition_po_to_received_and_updated(po_id)
             mark_delivery_delivered(po_id)
         except Exception as e:
             return f"Processed items, but failed to update order status: {e}"
             
-        # 6. Formulate response
+        # 7. Formulate response
         response = [
             f"✅ *Purchase Order #{po_id} Receipt Processed*",
             f"Supplier: {actual_supplier}",
