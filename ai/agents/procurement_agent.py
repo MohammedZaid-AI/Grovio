@@ -48,75 +48,50 @@ class ProcurementAgent:
                 f"🛒 Purchase Order #{result['purchase_order_id']}"
             )
 
-        lines.append("")
-
-        lines.append(
-
-            f"🏪 Supplier: {result['supplier']}"
-
-        )
-
-        lines.append("")
-
-        lines.append("📦 Products")
-
-        lines.append("")
-
-        # ------------------------------------------
-        # Purchase Order Items
-        # ------------------------------------------
-
-        for item in result["items"]:
-
-            lines.append(
-
-                f"• {item['product']}"
-
-            )
-
-            lines.append(
-
-                f"  Qty : {item['quantity']} {item['unit']}"
-
-            )
-
-            lines.append(
-
-                f"  Price : ₹{item['price']:.2f}"
-
-            )
-
-            lines.append(
-
-                f"  Subtotal : ₹{item['subtotal']:.2f}"
-
-            )
-
+        if result.get("total_items", 0) == 0:
             lines.append("")
+            lines.append("No new items need ordering right now.")
+        else:
+            lines.append("")
+            lines.append(
+                f"🏪 Supplier: {result['supplier']}"
+            )
+            lines.append("")
+            lines.append("📦 Products")
+            lines.append("")
+
+            # ------------------------------------------
+            # Purchase Order Items
+            # ------------------------------------------
+            for item in result["items"]:
+                lines.append(
+                    f"• {item['product']}"
+                )
+                lines.append(
+                    f"  Qty : {item['quantity']} {item['unit']}"
+                )
+                lines.append(
+                    f"  Price : ₹{item['price']:.2f}"
+                )
+                lines.append(
+                    f"  Subtotal : ₹{item['subtotal']:.2f}"
+                )
+                lines.append("")
 
         # ------------------------------------------
         # Summary
         # ------------------------------------------
-
-        lines.append("────────────────────")
-
-        lines.append(
-
-            f"📦 Total Products : {result['total_items']}"
-
-        )
-
-        lines.append(
-
-            f"📊 Total Quantity : {result['total_quantity']}"
-
-        )
-
-        lines.append(
-
-            f"💰 Estimated Total : ₹{result['total']:.2f}"
-
-        )
+        if result.get("total_items", 0) > 0:
+            lines.append("────────────────────")
+            lines.append(
+                f"📦 Total Products : {result['total_items']}"
+            )
+            lines.append(
+                f"📊 Total Quantity : {result['total_quantity']}"
+            )
+            lines.append(
+                f"💰 Estimated Total : ₹{result['total']:.2f}"
+            )
 
         already_ordered = getattr(self.service.generator.forecast, "already_ordered", [])
         if already_ordered:
