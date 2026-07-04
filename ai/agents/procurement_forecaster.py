@@ -21,6 +21,8 @@ class ProcurementForecaster:
 
     def forecast(self):
 
+        self.already_ordered = []
+
         counter = Counter()
 
         total = 0
