@@ -118,6 +118,13 @@ class ProcurementAgent:
 
         )
 
+        already_ordered = getattr(self.service.generator.forecast, "already_ordered", [])
+        if already_ordered:
+            lines.append("")
+            lines.append("Already Ordered (arriving soon):")
+            for item in already_ordered:
+                lines.append(f"• {item['product']}: already ordered, arriving {item['expected_date']}")
+
         lines.append("")
 
         if is_preview:

@@ -97,7 +97,9 @@ class Supervisor:
 
                 "purchase_history",
 
-                "auto_order"
+                "auto_order",
+
+                "receive_order"
 
             }
 

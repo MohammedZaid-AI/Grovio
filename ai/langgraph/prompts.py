@@ -62,6 +62,13 @@ Today's shopping
 Automatic procurement
 Buy today's stock
 
+receive_order
+Receive products
+Received items from supplier
+Mark PO as received or delivered
+"received milk and bread from ABC Dairy"
+Incoming items receipt
+
 ------------------------------------------------
 EXAMPLES
 ------------------------------------------------
@@ -245,6 +252,16 @@ order this from ABC Dairy
 Response:
 {
     "agents":["procurement"]
+}
+
+----------------------------
+
+User:
+received milk and bread from ABC Dairy
+
+Response:
+{
+    "agents":["receive_order"]
 }
 
 ------------------------------------------------

@@ -13,6 +13,7 @@ class ProcurementForecaster:
     def __init__(self):
 
         self.memory = ProcurementMemory()
+        self.already_ordered = []
 
     # -----------------------------------
     # Forecast
@@ -35,12 +36,20 @@ class ProcurementForecaster:
             total += quantity
 
         if total == 0:
-
             return []
 
         recommendations = []
 
+        from db import get_incoming_non_received_inventory_item
+
         for product, quantity in counter.items():
+            expected_date = get_incoming_non_received_inventory_item(product)
+            if expected_date:
+                self.already_ordered.append({
+                    "product": product,
+                    "expected_date": expected_date
+                })
+                continue
 
             probability = round(
 
@@ -108,7 +117,7 @@ class ProcurementForecaster:
     # -----------------------------------
 
     def execute(self):
-
+        rec_orders = self.forecast()
         return {
 
             "generated_at":
@@ -129,7 +138,11 @@ class ProcurementForecaster:
 
             "recommended_orders":
 
-                self.forecast()
+                rec_orders,
+
+            "already_ordered":
+
+                self.already_ordered
 
         }
 

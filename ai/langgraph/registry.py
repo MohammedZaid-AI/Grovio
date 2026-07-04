@@ -7,6 +7,7 @@ from ai.agents.purchase_history_agent import PurchaseHistoryAgent
 from ai.agents.purchase_order_editor_agent import PurchaseOrderEditorAgent
 from ai.agents.dashboard_agent import DashboardAgent
 from ai.agents.auto_order_agent import AutoOrderAgent
+from ai.agents.receive_order_agent import ReceiveOrderAgent
 
 class AgentRegistry:
 
@@ -36,7 +37,7 @@ class AgentRegistry:
 
             "auto_order": AutoOrderAgent(),
 
-            
+            "receive_order": ReceiveOrderAgent(),
 
         }
 

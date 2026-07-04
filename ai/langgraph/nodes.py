@@ -235,10 +235,13 @@ def response_node(state):
                 reply.append(f"• {risk}")
 
         state["response"] = "\n".join(reply)
-    
     elif "auto_order" in state["results"]:
 
         state["response"] = state["results"]["auto_order"]["message"]
+
+    elif "receive_order" in state["results"]:
+
+        state["response"] = state["results"]["receive_order"]
 
     else:
 

@@ -348,6 +348,8 @@ def update_purchase_order_status(purchase_order_id, target_status):
         PurchaseOrderStateMachine.validate_transition(current_status, target_status)
         
         cursor.execute("UPDATE purchase_orders SET status=? WHERE id=?", (target_status, purchase_order_id))
+        if target_status.upper() == 'APPROVED':
+            create_delivery_and_incoming_records_txn(cursor, purchase_order_id)
         conn.commit()
     finally:
         conn.close()
@@ -468,6 +470,158 @@ def get_all_purchase_invoices():
         return rows
     finally:
         conn.close()
+
+def create_delivery_and_incoming_records_txn(cursor, purchase_order_id):
+    # 1. Fetch PO supplier and items
+    cursor.execute("SELECT supplier FROM purchase_orders WHERE id=?", (purchase_order_id,))
+    po_row = cursor.fetchone()
+    if not po_row:
+        return
+    supplier = po_row[0]
+    
+    cursor.execute("SELECT product, quantity, unit FROM purchase_order_items WHERE purchase_order_id=?", (purchase_order_id,))
+    items = cursor.fetchall()
+    
+    # 2. Add to expected_deliveries
+    from datetime import datetime, timedelta
+    expected_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d") # default to tomorrow
+    
+    cursor.execute("""
+        INSERT INTO expected_deliveries (purchase_order_id, supplier, expected_date, status)
+        VALUES (?, ?, ?, 'PENDING')
+    """, (purchase_order_id, supplier, expected_date))
+    
+    # 3. Add items to incoming_inventory
+    for product, quantity, unit in items:
+        cursor.execute("""
+            INSERT INTO incoming_inventory (purchase_order_id, product, quantity, unit, expected_date, received)
+            VALUES (?, ?, ?, ?, ?, 0)
+        """, (purchase_order_id, product, quantity, unit, expected_date))
+
+def get_open_purchase_order_by_supplier(supplier_name):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, status, supplier 
+            FROM purchase_orders 
+            WHERE LOWER(supplier) = LOWER(?) 
+            AND status NOT IN ('CLOSED', 'REJECTED', 'CANCELLED')
+            ORDER BY id DESC 
+            LIMIT 1
+        """, (supplier_name,))
+        return cursor.fetchone()
+    finally:
+        conn.close()
+
+def get_incoming_inventory_for_po(purchase_order_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, product, quantity, unit, received, received_quantity 
+            FROM incoming_inventory 
+            WHERE purchase_order_id = ?
+        """, (purchase_order_id,))
+        return cursor.fetchall()
+    finally:
+        conn.close()
+
+def update_incoming_inventory_item(item_id, received_qty, received_date):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE incoming_inventory 
+            SET received = 1,
+                received_date = ?,
+                received_quantity = ?
+            WHERE id = ?
+        """, (received_date, received_qty, item_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+def mark_delivery_delivered(purchase_order_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE expected_deliveries
+            SET status = 'DELIVERED'
+            WHERE purchase_order_id = ?
+        """, (purchase_order_id,))
+        conn.commit()
+    finally:
+        conn.close()
+
+def add_to_inventory_stock(product_name, quantity, unit):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT current_stock FROM inventory WHERE LOWER(product_name)=LOWER(?)", (product_name,))
+        row = cursor.fetchone()
+        if row:
+            cursor.execute("""
+                UPDATE inventory 
+                SET current_stock = current_stock + ?, 
+                    updated_at = CURRENT_TIMESTAMP 
+                WHERE LOWER(product_name)=LOWER(?)
+            """, (quantity, product_name))
+        else:
+            cursor.execute("""
+                INSERT INTO inventory (product_name, current_stock, minimum_stock, unit) 
+                VALUES (?, ?, 0.0, ?)
+            """, (product_name, quantity, unit))
+        conn.commit()
+    finally:
+        conn.close()
+
+def transition_po_to_received_and_updated(purchase_order_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM purchase_orders WHERE id=?", (purchase_order_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise ValueError(f"Purchase order with ID {purchase_order_id} does not exist.")
+        status = row[0].upper()
+    finally:
+        conn.close()
+        
+    # Apply sequential valid transitions
+    if status == 'APPROVED':
+        update_purchase_order_status(purchase_order_id, 'ORDERED')
+        status = 'ORDERED'
+    if status == 'ORDERED':
+        update_purchase_order_status(purchase_order_id, 'SHIPPED')
+        status = 'SHIPPED'
+    if status == 'SHIPPED':
+        update_purchase_order_status(purchase_order_id, 'RECEIVED')
+        status = 'RECEIVED'
+    if status == 'RECEIVED':
+        update_purchase_order_status(purchase_order_id, 'INVENTORY_UPDATED')
+
+def get_incoming_non_received_inventory_item(product_name):
+    conn = get_connection()
+    try:
+        from datetime import datetime
+        cursor = conn.cursor()
+        today = datetime.now().strftime("%Y-%m-%d")
+        cursor.execute("""
+            SELECT expected_date 
+            FROM incoming_inventory 
+            WHERE LOWER(product) = LOWER(?) 
+            AND received = 0 
+            AND expected_date >= ?
+            ORDER BY expected_date ASC
+            LIMIT 1
+        """, (product_name, today))
+        row = cursor.fetchone()
+        return row[0] if row else None
+    finally:
+        conn.close()
+
 if __name__ == '__main__':
     init_db()
     print('Database initialized successfully.')
