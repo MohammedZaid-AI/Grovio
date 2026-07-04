@@ -55,25 +55,55 @@ class ProcurementForecaster:
                 })
                 continue
 
-            # Reorder interval check
-            mem = get_product_memory(product)
-            if mem and mem['confidence_level'] == 'HIGH' and mem['avg_reorder_interval'] and mem['last_purchase_date']:
-                from datetime import datetime, timedelta
-                try:
-                    last_date_part = mem['last_purchase_date'].split()[0]
-                    last_date = datetime.strptime(last_date_part, "%Y-%m-%d")
-                    days_elapsed = (datetime.now() - last_date).days
-                    expected_interval = mem['avg_reorder_interval']
-                    if days_elapsed < expected_interval - 1:
-                        expected_order_date = (last_date + timedelta(days=expected_interval)).strftime("%Y-%m-%d")
+            # Check inventory levels for emergency stock override
+            from db import get_product_inventory
+            inv = get_product_inventory(product)
+            current_stock = 0.0
+            minimum_stock = 0.0
+            if inv:
+                current_stock = inv[2] if inv[2] is not None else 0.0
+                minimum_stock = inv[3] if inv[3] is not None else 0.0
+
+            # Checks only run if not in emergency stock outage
+            if current_stock > minimum_stock:
+                mem = get_product_memory(product)
+                if mem:
+                    not_due_skip = False
+                    wrong_day_skip = False
+                    expected_order_date = None
+                    usual_day_name = None
+
+                    # 1. Reorder interval check
+                    if mem.get('confidence_level') == 'HIGH' and mem.get('avg_reorder_interval') and mem.get('last_purchase_date'):
+                        from datetime import datetime, timedelta
+                        try:
+                            last_date_part = mem['last_purchase_date'].split()[0]
+                            last_date = datetime.strptime(last_date_part, "%Y-%m-%d")
+                            days_elapsed = (datetime.now() - last_date).days
+                            expected_interval = mem['avg_reorder_interval']
+                            if days_elapsed < expected_interval - 1:
+                                not_due_skip = True
+                                expected_order_date = (last_date + timedelta(days=expected_interval)).strftime("%Y-%m-%d")
+                        except Exception as e:
+                            print(f"Error checking reorder interval for {product}: {e}")
+
+                    # 2. Day of week check
+                    if mem.get('usual_day_of_week_confidence') == 'HIGH' and mem.get('usual_day_of_week'):
+                        current_day = datetime.now().strftime("%A")
+                        usual_day_name = mem['usual_day_of_week']
+                        if current_day != usual_day_name:
+                            wrong_day_skip = True
+
+                    # Skip decision and priority mapping
+                    if not_due_skip or wrong_day_skip:
                         self.already_ordered.append({
                             "product": product,
                             "expected_date": expected_order_date,
-                            "not_due": True
+                            "not_due": not_due_skip,
+                            "wrong_day": wrong_day_skip,
+                            "usual_day": usual_day_name
                         })
                         continue
-                except Exception as e:
-                    print(f"Error checking reorder interval for {product}: {e}")
 
             probability = round(
 

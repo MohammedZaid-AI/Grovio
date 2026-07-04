@@ -10,7 +10,8 @@ from db import (
     get_product_inventory,
     save_invoice,
     recalculate_product_memory,
-    get_connection
+    get_connection,
+    recalculate_supplier_reliability
 )
 
 class ReceiveOrderAgent:
@@ -154,6 +155,7 @@ class ReceiveOrderAgent:
         try:
             transition_po_to_received_and_updated(po_id)
             mark_delivery_delivered(po_id)
+            recalculate_supplier_reliability(actual_supplier)
         except Exception as e:
             return f"Processed items, but failed to update order status: {e}"
             

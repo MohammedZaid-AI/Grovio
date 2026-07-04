@@ -123,8 +123,12 @@ class ProcurementAgent:
             lines.append("")
             lines.append("Already Ordered / Not Due Yet:")
             for item in already_ordered:
-                if item.get("not_due"):
+                if item.get("not_due") and item.get("wrong_day"):
+                    lines.append(f"• {item['product']}: not due yet (expected {item['expected_date']}), next usual order scheduled on {item['usual_day']}")
+                elif item.get("not_due"):
                     lines.append(f"• {item['product']}: not due yet, next order expected on {item['expected_date']}")
+                elif item.get("wrong_day"):
+                    lines.append(f"• {item['product']}: next usual order scheduled on {item['usual_day']}")
                 else:
                     lines.append(f"• {item['product']}: already ordered, arriving {item['expected_date']}")
 

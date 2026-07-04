@@ -76,6 +76,29 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+
+        # Safe schema migration for product_memory table
+        cursor.execute("PRAGMA table_info(product_memory)")
+        pm_columns = [row[1] for row in cursor.fetchall()]
+        if 'usual_day_of_week' not in pm_columns:
+            cursor.execute("ALTER TABLE product_memory ADD COLUMN usual_day_of_week TEXT")
+        if 'usual_day_of_week_confidence' not in pm_columns:
+            cursor.execute("ALTER TABLE product_memory ADD COLUMN usual_day_of_week_confidence TEXT DEFAULT 'NONE'")
+        if 'seasonal_spikes' not in pm_columns:
+            cursor.execute("ALTER TABLE product_memory ADD COLUMN seasonal_spikes TEXT")
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS supplier_reliability (
+            supplier_name TEXT PRIMARY KEY,
+            total_deliveries INTEGER DEFAULT 0,
+            on_time_deliveries INTEGER DEFAULT 0,
+            accuracy_rate REAL,
+            avg_delay_days REAL,
+            quantity_accuracy_rate REAL,
+            confidence_level TEXT DEFAULT 'NONE',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
         conn.commit()
     finally:
         conn.close()
@@ -675,7 +698,7 @@ def recalculate_product_memory(product_name):
             
         # 2. Fetch all historical purchases containing the base product keyword in purchase_items
         cursor.execute("""
-            SELECT pi.invoice_date, pi.supplier
+            SELECT pi.invoice_date, pi.supplier, pit.quantity
             FROM purchase_items pit
             JOIN purchase_invoices pi ON pit.invoice_id = pi.id
             WHERE LOWER(pit.product) LIKE ?
@@ -701,23 +724,20 @@ def recalculate_product_memory(product_name):
             
         # Average Reorder Interval
         avg_reorder_interval = None
-        if num_purchases >= 3:
-            from datetime import datetime
-            dates = []
-            for r in rows:
-                try:
-                    # Strip timestamp if any and keep date part
-                    date_part = r[0].split()[0]
-                    d = datetime.strptime(date_part, "%Y-%m-%d")
-                    dates.append(d)
-                except Exception:
-                    pass
-            # Unique sorted dates to prevent same-day invoice artifacts
-            dates = sorted(list(set(dates)))
-            if len(dates) >= 3:
-                intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
-                avg_reorder_interval = sum(intervals) / len(intervals)
-                
+        from datetime import datetime
+        dates = []
+        for r in rows:
+            try:
+                date_part = r[0].split()[0]
+                d = datetime.strptime(date_part, "%Y-%m-%d")
+                dates.append(d)
+            except Exception:
+                pass
+        dates = sorted(list(set(dates)))
+        if len(dates) >= 3:
+            intervals = [(dates[i] - dates[i-1]).days for i in range(1, len(dates))]
+            avg_reorder_interval = sum(intervals) / len(intervals)
+            
         # Preferred Brand: DO NOT auto-detect. Keep existing pref_brand if MANUAL, otherwise set to None.
         if brand_src != 'MANUAL':
             pref_brand = None
@@ -731,13 +751,87 @@ def recalculate_product_memory(product_name):
             else:
                 pref_supplier = None
                 
-        # 4. Insert or Update product_memory using OR REPLACE or ON CONFLICT
+        # 4. Usual Day of Week Calculation
+        usual_day = None
+        usual_day_conf = 'NONE'
+        if num_purchases > 0:
+            days = []
+            for r in rows:
+                try:
+                    date_part = r[0].split()[0]
+                    d = datetime.strptime(date_part, "%Y-%m-%d")
+                    days.append(d.strftime("%A"))
+                except Exception:
+                    pass
+            if days:
+                from collections import Counter
+                day_counts = Counter(days)
+                mode_day, mode_count = day_counts.most_common(1)[0]
+                total_valid_days = len(days)
+                
+                # Minimum sample size: 5 purchases, mode frequency >= 60%
+                if total_valid_days >= 5 and (mode_count / total_valid_days) >= 0.60:
+                    usual_day = mode_day
+                    usual_day_conf = 'HIGH'
+                elif total_valid_days >= 1:
+                    usual_day = None
+                    usual_day_conf = 'LOW'
+                    
+        # 5. Seasonal Spikes Calculation
+        seasonal_spikes = None
+        if num_purchases > 0:
+            year_months = set()
+            for r in rows:
+                try:
+                    date_part = r[0].split()[0]
+                    year_months.add(date_part[:7])
+                except Exception:
+                    pass
+            # 24-month rule threshold
+            if len(year_months) >= 24:
+                month_quantities = {}
+                all_quantities = []
+                for r in rows:
+                    try:
+                        date_part = r[0].split()[0]
+                        m = int(date_part[5:7])
+                        qty = float(r[2])
+                        if m not in month_quantities:
+                            month_quantities[m] = []
+                        month_quantities[m].append(qty)
+                        all_quantities.append(qty)
+                    except Exception:
+                        pass
+                
+                overall_avg_qty = sum(all_quantities) / len(all_quantities) if all_quantities else 0.0
+                peak_months = []
+                for m in range(1, 13):
+                    q_list = month_quantities.get(m, [])
+                    years_for_month = set()
+                    for r in rows:
+                        try:
+                            date_part = r[0].split()[0]
+                            if int(date_part[5:7]) == m:
+                                years_for_month.add(date_part[:4])
+                        except Exception:
+                            pass
+                    if len(years_for_month) >= 2 and q_list:
+                        month_avg = sum(q_list) / len(q_list)
+                        if month_avg >= 1.5 * overall_avg_qty:
+                            import calendar
+                            peak_months.append(calendar.month_name[m])
+                if peak_months:
+                    import json
+                    seasonal_spikes = json.dumps(peak_months)
+                    
+        # 6. Insert or Update product_memory using OR REPLACE or ON CONFLICT
         cursor.execute("""
             INSERT INTO product_memory (
                 product_name, preferred_brand, preferred_brand_source,
                 preferred_supplier, preferred_supplier_source,
-                avg_reorder_interval, last_purchase_date, confidence_level, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                avg_reorder_interval, last_purchase_date, confidence_level,
+                usual_day_of_week, usual_day_of_week_confidence, seasonal_spikes, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(product_name) DO UPDATE SET
                 preferred_brand = excluded.preferred_brand,
                 preferred_brand_source = excluded.preferred_brand_source,
@@ -746,8 +840,11 @@ def recalculate_product_memory(product_name):
                 avg_reorder_interval = excluded.avg_reorder_interval,
                 last_purchase_date = excluded.last_purchase_date,
                 confidence_level = excluded.confidence_level,
+                usual_day_of_week = excluded.usual_day_of_week,
+                usual_day_of_week_confidence = excluded.usual_day_of_week_confidence,
+                seasonal_spikes = excluded.seasonal_spikes,
                 updated_at = CURRENT_TIMESTAMP
-        """, (base_prod, pref_brand, brand_src, pref_supplier, supplier_src, avg_reorder_interval, last_purchase_date, confidence))
+        """, (base_prod, pref_brand, brand_src, pref_supplier, supplier_src, avg_reorder_interval, last_purchase_date, confidence, usual_day, usual_day_conf, seasonal_spikes))
         
         conn.commit()
     finally:
@@ -801,7 +898,8 @@ def get_product_memory(product_name):
         cursor.execute("""
             SELECT preferred_brand, preferred_brand_source,
                    preferred_supplier, preferred_supplier_source,
-                   avg_reorder_interval, last_purchase_date, confidence_level
+                   avg_reorder_interval, last_purchase_date, confidence_level,
+                   usual_day_of_week, usual_day_of_week_confidence, seasonal_spikes
             FROM product_memory
             WHERE product_name = ?
         """, (base_prod,))
@@ -814,9 +912,173 @@ def get_product_memory(product_name):
                 'preferred_supplier_source': row[3],
                 'avg_reorder_interval': row[4],
                 'last_purchase_date': row[5],
-                'confidence_level': row[6]
+                'confidence_level': row[6],
+                'usual_day_of_week': row[7],
+                'usual_day_of_week_confidence': row[8],
+                'seasonal_spikes': row[9]
             }
         return None
+    finally:
+        conn.close()
+
+def recalculate_supplier_reliability(supplier_name):
+    if not supplier_name:
+        return
+    
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT id FROM purchase_orders
+            WHERE supplier = ? AND status IN ('INVENTORY_UPDATED', 'RECEIVED')
+        """, (supplier_name,))
+        po_rows = cursor.fetchall()
+        po_ids = [row[0] for row in po_rows]
+        
+        total_deliveries = len(po_ids)
+        
+        if total_deliveries == 0:
+            confidence = 'NONE'
+        elif total_deliveries in (1, 2):
+            confidence = 'LOW'
+        else:
+            confidence = 'HIGH'
+            
+        if total_deliveries == 0:
+            cursor.execute("""
+                INSERT INTO supplier_reliability (
+                    supplier_name, total_deliveries, on_time_deliveries,
+                    accuracy_rate, avg_delay_days, quantity_accuracy_rate,
+                    confidence_level, updated_at
+                ) VALUES (?, 0, 0, NULL, NULL, NULL, 'NONE', CURRENT_TIMESTAMP)
+                ON CONFLICT(supplier_name) DO UPDATE SET
+                    total_deliveries = 0,
+                    on_time_deliveries = 0,
+                    accuracy_rate = NULL,
+                    avg_delay_days = NULL,
+                    quantity_accuracy_rate = NULL,
+                    confidence_level = 'NONE',
+                    updated_at = CURRENT_TIMESTAMP
+            """, (supplier_name,))
+            conn.commit()
+            return
+            
+        on_time_deliveries = 0
+        total_delay_days = 0.0
+        late_deliveries_count = 0
+        
+        total_expected_items = 0
+        fully_received_items = 0
+        
+        from datetime import datetime
+        for po_id in po_ids:
+            cursor.execute("SELECT expected_date FROM expected_deliveries WHERE purchase_order_id = ?", (po_id,))
+            exp_row = cursor.fetchone()
+            if exp_row and exp_row[0]:
+                expected_str = exp_row[0].split()[0]
+                
+                cursor.execute("""
+                    SELECT MAX(received_date) FROM incoming_inventory
+                    WHERE purchase_order_id = ? AND received = 1
+                """, (po_id,))
+                rec_row = cursor.fetchone()
+                if rec_row and rec_row[0]:
+                    received_str = rec_row[0].split()[0]
+                    
+                    try:
+                        exp_date = datetime.strptime(expected_str, "%Y-%m-%d")
+                        rec_date = datetime.strptime(received_str, "%Y-%m-%d")
+                        delay = (rec_date - exp_date).days
+                        
+                        if delay <= 0:
+                            on_time_deliveries += 1
+                        else:
+                            total_delay_days += delay
+                            late_deliveries_count += 1
+                    except Exception as e:
+                        print(f"Error parsing dates for PO {po_id}: {e}")
+                        
+            cursor.execute("""
+                SELECT quantity, received_quantity FROM incoming_inventory
+                WHERE purchase_order_id = ?
+            """, (po_id,))
+            item_rows = cursor.fetchall()
+            for ordered_qty, rec_qty in item_rows:
+                total_expected_items += 1
+                rec_qty_val = rec_qty if rec_qty is not None else 0.0
+                if rec_qty_val >= ordered_qty:
+                    fully_received_items += 1
+                    
+        accuracy_rate = (on_time_deliveries / total_deliveries) * 100.0
+        avg_delay_days = (total_delay_days / late_deliveries_count) if late_deliveries_count > 0 else 0.0
+        quantity_accuracy_rate = (fully_received_items / total_expected_items * 100.0) if total_expected_items > 0 else 100.0
+        
+        stats_accuracy_rate = accuracy_rate if confidence == 'HIGH' else None
+        stats_avg_delay_days = avg_delay_days if confidence == 'HIGH' else None
+        stats_quantity_accuracy_rate = quantity_accuracy_rate if confidence == 'HIGH' else None
+        
+        cursor.execute("""
+            INSERT INTO supplier_reliability (
+                supplier_name, total_deliveries, on_time_deliveries,
+                accuracy_rate, avg_delay_days, quantity_accuracy_rate,
+                confidence_level, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(supplier_name) DO UPDATE SET
+                total_deliveries = excluded.total_deliveries,
+                on_time_deliveries = excluded.on_time_deliveries,
+                accuracy_rate = excluded.accuracy_rate,
+                avg_delay_days = excluded.avg_delay_days,
+                quantity_accuracy_rate = excluded.quantity_accuracy_rate,
+                confidence_level = excluded.confidence_level,
+                updated_at = CURRENT_TIMESTAMP
+        """, (supplier_name, total_deliveries, on_time_deliveries, stats_accuracy_rate, stats_avg_delay_days, stats_quantity_accuracy_rate, confidence))
+        
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_supplier_reliability(supplier_name):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT total_deliveries, on_time_deliveries, accuracy_rate, avg_delay_days, quantity_accuracy_rate, confidence_level
+            FROM supplier_reliability
+            WHERE supplier_name = ?
+        """, (supplier_name,))
+        row = cursor.fetchone()
+        if row:
+            return {
+                'total_deliveries': row[0],
+                'on_time_deliveries': row[1],
+                'accuracy_rate': row[2],
+                'avg_delay_days': row[3],
+                'quantity_accuracy_rate': row[4],
+                'confidence_level': row[5]
+            }
+        return None
+    finally:
+        conn.close()
+
+def get_supplier_leaderboard():
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT supplier_name, accuracy_rate, quantity_accuracy_rate, confidence_level
+            FROM supplier_reliability
+            ORDER BY accuracy_rate DESC, quantity_accuracy_rate DESC
+        """)
+        rows = cursor.fetchall()
+        return [
+            {
+                'supplier_name': r[0],
+                'accuracy_rate': r[1],
+                'quantity_accuracy_rate': r[2],
+                'confidence_level': r[3]
+            } for r in rows
+        ]
     finally:
         conn.close()
 

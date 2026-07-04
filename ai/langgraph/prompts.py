@@ -70,12 +70,15 @@ Mark PO as received or delivered
 Incoming items receipt
 
 restaurant_memory
-Queries on order intervals or last purchase dates
+Queries on order intervals, last purchase dates, day-of-week, or seasonal demand
 Setting preferred brand or preferred supplier
+Checking supplier reliability, delay, or leaderboard ranking
 "when did we last order milk?"
 "what brand of milk do we usually get?"
 "we prefer Nandini brand for milk"
 "we prefer ABC Dairy for butter"
+"how reliable is ABC Dairy?"
+"show supplier leaderboard"
 
 ------------------------------------------------
 EXAMPLES
@@ -286,6 +289,26 @@ Response:
 
 User:
 we prefer Nandini brand for milk
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+how reliable is ABC Dairy?
+
+Response:
+{
+    "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+show supplier leaderboard
 
 Response:
 {
