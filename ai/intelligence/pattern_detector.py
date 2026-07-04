@@ -177,6 +177,8 @@ class PatternDetector:
 
     def execute(self):
 
+        self.history = get_order_history()
+
         return {
 
             "top_products":
