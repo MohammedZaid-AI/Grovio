@@ -106,6 +106,16 @@ def response_node(state):
         state["response"] = state["results"]["coo"]["analysis"]
 
     elif "decision" in state["results"]:
+        import inspect
+        import hashlib
+        try:
+            func = response_node
+            src = inspect.getsource(func)
+            src_hash = hashlib.sha256(src.encode('utf-8')).hexdigest()[:10]
+            print(f"\n[DEBUG_FORMATTER] File: {inspect.getfile(func)}, StartLine: {inspect.getsourcelines(func)[1]}, Hash: {src_hash}\n")
+        except Exception as debug_err:
+            print(f"\n[DEBUG_FORMATTER_ERROR] {debug_err}\n")
+
         data = state["results"]["decision"]
         
         reply = []
@@ -142,10 +152,16 @@ def response_node(state):
         proc = data.get("procurement", {})
         reply.append(f"📈 *Procurement Forecast*: {proc.get('action', 'WAIT_FOR_MORE_DATA')} (Confidence: {proc.get('confidence', 0)}%)")
         forecast = proc.get("forecast", {})
-        if forecast.get("recommendations"):
+        recommended_orders = forecast.get("recommended_orders", [])
+        if recommended_orders:
             reply.append("  📋 *Recommended Purchases*:")
-            for rec in forecast["recommendations"]:
-                reply.append(f"    • {rec.get('product', 'Unknown')}: {rec.get('quantity', 0)} {rec.get('unit', '')} from {rec.get('supplier', 'Unknown')}")
+            for rec in recommended_orders:
+                p_name = rec.get('product', 'Unknown')
+                p_qty = rec.get('recommended_quantity', 0)
+                p_prob = rec.get('purchase_probability', 0.0)
+                p_reason = rec.get('reason', '')
+                unit_label = "unit" if p_qty == 1 else "units"
+                reply.append(f"    • {p_name}: {p_qty} {unit_label} ({int(p_prob)}% purchase probability) — {p_reason}")
         reply.append("")
         
         # 4. Risks & Opportunities

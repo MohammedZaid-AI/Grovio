@@ -3,7 +3,9 @@ import json
 DB_PATH = 'database/orders.db'
 
 def get_connection():
-    return sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
 def init_db():
     conn = get_connection()
@@ -33,6 +35,33 @@ def init_db():
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS inventory(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT UNIQUE,\n\n        current_stock REAL,\n\n        minimum_stock REAL,\n\n        unit TEXT,\n\n        updated_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
         cursor.execute("\n    CREATE TABLE IF NOT EXISTS purchase_orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT NOT NULL,\n\n        status TEXT DEFAULT 'DRAFT',\n\n        total_amount REAL DEFAULT 0,\n\n        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ")
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_order_items(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        purchase_order_id INTEGER,\n\n        product TEXT,\n\n        quantity REAL,\n\n        unit TEXT,\n\n        estimated_price REAL,\n\n        subtotal REAL,\n\n        FOREIGN KEY(purchase_order_id)\n            REFERENCES purchase_orders(id)\n\n    )\n    ')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS expected_deliveries (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL,
+            supplier TEXT NOT NULL,
+            expected_date TEXT NOT NULL,
+            status TEXT DEFAULT 'PENDING',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(purchase_order_id) REFERENCES purchase_orders(id)
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS incoming_inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            purchase_order_id INTEGER NOT NULL,
+            product TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            unit TEXT NOT NULL,
+            expected_date TEXT NOT NULL,
+            received INTEGER DEFAULT 0,
+            received_date TEXT,
+            received_quantity REAL,
+            FOREIGN KEY(purchase_order_id) REFERENCES purchase_orders(id)
+        )
+        ''')
         conn.commit()
     finally:
         conn.close()

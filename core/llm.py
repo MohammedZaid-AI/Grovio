@@ -43,6 +43,9 @@ class LLM:
 
     ):
 
+        base_url = Config.OPENAI_BASE_URL if getattr(self, "is_openai", False) else "Groq API"
+        print(f"\n[DEBUG_LLM_CALL] Model: {Config.MODEL}, BaseURL: {base_url}, Temp: {temperature if temperature is not None else Config.TEMPERATURE}\n")
+
         if temperature is None:
 
             temperature = Config.TEMPERATURE

@@ -65,6 +65,8 @@ def split_message(text: str, max_length: int = 1500) -> list:
 
 def whatsapp_reply(message: str or list):
 
+    print(f"\n[DEBUG_FINAL_OUTPUT] {repr(message)}\n")
+
     twiml = MessagingResponse()
 
     if isinstance(message, list):
