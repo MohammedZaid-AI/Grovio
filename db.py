@@ -424,7 +424,7 @@ def get_product_inventory(product_name):
 def get_low_stock_items():
     conn = get_connection()
     try:
-        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE current_stock <= minimum_stock\n        ').fetchall()
+        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE minimum_stock > 0 AND current_stock <= minimum_stock\n        ').fetchall()
         return rows
     finally:
         conn.close()
@@ -720,15 +720,7 @@ def get_incoming_non_received_inventory_item(product_name):
         conn.close()
 
 def get_base_product(description):
-    desc = description.lower().strip()
-    if "milk" in desc:
-        return "milk"
-    if "butter" in desc:
-        return "butter"
-    if "bread" in desc:
-        return "bread"
-    words = desc.split()
-    return words[-1] if words else desc
+    return description.lower().strip()
 
 def recalculate_product_memory(product_name):
     base_prod = get_base_product(product_name)

@@ -73,7 +73,7 @@ class ProcurementForecaster:
             if adcr_confidence == 'HIGH' and adcr and adcr > 0:
                 days_left = current_stock / adcr
 
-            is_physical_low = current_stock <= minimum_stock
+            is_physical_low = (minimum_stock > 0.0) and (current_stock <= minimum_stock)
             is_consumption_low = (days_left is not None and days_left <= 2.0)
             is_emergency = is_physical_low or is_consumption_low
 
