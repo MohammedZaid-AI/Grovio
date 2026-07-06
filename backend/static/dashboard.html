@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Grovio Admin Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📊</text></svg>">
+</head>
+<body>
+    <header>
+        <div class="logo">
+            <span>Grovio</span> Admin Dashboard
+        </div>
+        <div class="user-controls">
+            <button id="logout-btn" class="btn btn-secondary">Logout</button>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="dashboard-grid">
+            <!-- Customer Sales Bills Card -->
+            <div class="card" id="sales-bill-card">
+                <h2>📊 Customer Sales Bills</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
+                    Upload customer sales bills to log sales and calculate ingredient consumption.
+                </p>
+                <div class="upload-zone" id="sales-bill-dropzone">
+                    <div class="loading-overlay" id="sales-bill-loading">
+                        <div class="spinner"></div>
+                        <p style="color: #fff; font-weight: 500;">Extracting document...</p>
+                    </div>
+                    <div class="upload-icon">📊</div>
+                    <p>Drag and drop sales bill here, or <span>browse</span></p>
+                    <p style="font-size: 0.75rem; margin-top: 0.5rem; opacity: 0.7;">Supports PDF, JPG, PNG (Max 10MB)</p>
+                    <input type="file" id="sales-bill-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
+                </div>
+            </div>
+
+            <!-- Supplier Invoices Card -->
+            <div class="card" id="grocery-invoice-card">
+                <h2>📋 Grocery / Supplier Invoices</h2>
+                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
+                    Upload vendor invoices to log inventory updates and record ingredient purchase prices.
+                </p>
+                <div class="upload-zone" id="grocery-invoice-dropzone">
+                    <div class="loading-overlay" id="grocery-invoice-loading">
+                        <div class="spinner"></div>
+                        <p style="color: #fff; font-weight: 500;">Extracting document...</p>
+                    </div>
+                    <div class="upload-icon">📋</div>
+                    <p>Drag and drop supplier invoice here, or <span>browse</span></p>
+                    <p style="font-size: 0.75rem; margin-top: 0.5rem; opacity: 0.7;">Supports PDF, JPG, PNG (Max 10MB)</p>
+                    <input type="file" id="grocery-invoice-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
+                </div>
+            </div>
+        </div>
+
+        <h2 class="section-title">🕒 Pending Confirmations</h2>
+        <div id="pending-container" class="pending-list">
+            <div class="empty-state">
+                <div class="empty-state-icon">📭</div>
+                <p>No pending documents to confirm.</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toast-container"></div>
+
+    <script src="/static/js/dashboard.js"></script>
+</body>
+</html>

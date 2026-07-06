@@ -1365,6 +1365,64 @@ def get_latest_pending_document(phone):
     finally:
         conn.close()
 
+def get_all_pending_documents():
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, phone, doc_type, payload, status, created_at
+            FROM pending_documents
+            WHERE status = 'PENDING'
+            ORDER BY id DESC
+        """)
+        rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            import json
+            try:
+                payload = json.loads(row[3])
+            except Exception:
+                payload = row[3]
+            results.append({
+                'id': row[0],
+                'phone': row[1],
+                'doc_type': row[2],
+                'payload': payload,
+                'status': row[4],
+                'created_at': row[5]
+            })
+        return results
+    finally:
+        conn.close()
+
+def get_pending_document_by_id(doc_id):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, phone, doc_type, payload, status, created_at
+            FROM pending_documents
+            WHERE id = ?
+        """, (doc_id,))
+        row = cursor.fetchone()
+        if row:
+            import json
+            try:
+                payload = json.loads(row[3])
+            except Exception:
+                payload = row[3]
+            return {
+                'id': row[0],
+                'phone': row[1],
+                'doc_type': row[2],
+                'payload': payload,
+                'status': row[4],
+                'created_at': row[5]
+            }
+        return None
+    finally:
+        conn.close()
+
 def update_pending_document_status(doc_id, status):
     conn = get_connection()
     try:
