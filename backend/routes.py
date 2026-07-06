@@ -484,3 +484,89 @@ def reject_document(id: int, request: Request):
         "success": True,
         "message": f"Document (ID: {id}) has been discarded/cancelled."
     }
+
+@router.get("/admin/recipes")
+def get_recipes(request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_all_recipes
+    recipes = get_all_recipes()
+    return recipes
+
+@router.post("/admin/recipes")
+async def save_recipe_route(request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid JSON body"})
+
+    dish_name = data.get("dish_name", "").strip()
+    ingredients = data.get("ingredients", [])
+
+    if not dish_name:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Dish name is required"})
+    if not isinstance(ingredients, list) or not ingredients:
+        return JSONResponse(status_code=400, content={"success": False, "message": "At least one ingredient is required"})
+
+    valid_ingredients = []
+    for idx, ing in enumerate(ingredients):
+        ing_name = ing.get("ingredient_name", "").strip()
+        qty = ing.get("quantity_per_unit")
+        unit = ing.get("unit", "").strip()
+
+        if not ing_name:
+            return JSONResponse(status_code=400, content={"success": False, "message": f"Ingredient name is required at row {idx+1}"})
+        if qty is None:
+            return JSONResponse(status_code=400, content={"success": False, "message": f"Quantity is required for ingredient '{ing_name}'"})
+        try:
+            qty_val = float(qty)
+            if qty_val <= 0:
+                raise ValueError()
+        except ValueError:
+            return JSONResponse(status_code=400, content={"success": False, "message": f"Quantity must be a positive number for ingredient '{ing_name}'"})
+        if not unit:
+            return JSONResponse(status_code=400, content={"success": False, "message": f"Unit is required for ingredient '{ing_name}'"})
+
+        valid_ingredients.append({
+            "ingredient_name": ing_name,
+            "quantity_per_unit": qty_val,
+            "unit": unit
+        })
+
+    from db import save_recipe
+    try:
+        save_recipe(dish_name, valid_ingredients)
+        return {"success": True, "message": f"Recipe for '{dish_name}' saved successfully!"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+@router.post("/admin/recipes/delete")
+async def delete_recipe_route(request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid JSON body"})
+
+    dish_name = data.get("dish_name", "").strip()
+    if not dish_name:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Dish name is required for deletion"})
+
+    from db import delete_recipe
+    try:
+        delete_recipe(dish_name)
+        return {"success": True, "message": f"Recipe for '{dish_name}' deleted successfully!"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})

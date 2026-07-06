@@ -56,6 +56,46 @@
             </div>
         </div>
 
+        <!-- Recipe Manager Card -->
+        <div class="card" id="recipe-manager-card" style="margin-top: 2rem; margin-bottom: 2rem;">
+            <h2>🍳 Recipe Manager</h2>
+            <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
+                Configure the ingredient mappings for your menu items. Mapped ingredients will be automatically consumed when sales bills are confirmed.
+            </p>
+            <div class="recipe-container">
+                <!-- Recipe Form -->
+                <div class="recipe-form-side">
+                    <h3 style="margin-bottom: 1rem; font-size: 1.1rem; color: #fff;">Add / Update Recipe</h3>
+                    <form id="recipe-form">
+                        <div class="form-group">
+                            <label for="recipe-dish-name">Dish / Menu Item Name</label>
+                            <input type="text" id="recipe-dish-name" class="form-input" placeholder="e.g. Chicken Steak" required>
+                        </div>
+                        
+                        <div class="form-group">
+                            <label style="display: flex; justify-content: space-between; align-items: center;">
+                                <span>Ingredients Mapping</span>
+                                <button type="button" class="btn btn-secondary btn-small" id="btn-add-ingredient-row" style="padding: 0.25rem 0.6rem; font-size: 0.75rem;">+ Add Row</button>
+                            </label>
+                            <div id="recipe-ingredients-rows" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                                <!-- Dynamic rows added here -->
+                            </div>
+                        </div>
+                        
+                        <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Save Recipe</button>
+                    </form>
+                </div>
+
+                <!-- Recipe List -->
+                <div class="recipe-list-side">
+                    <h3 style="margin-bottom: 1rem; font-size: 1.1rem; color: #fff;">Active Recipes</h3>
+                    <div id="recipe-list-container" class="recipe-list-scroll">
+                        <!-- Dynamic list of recipes added here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <h2 class="section-title">🕒 Pending Confirmations</h2>
         <div id="pending-container" class="pending-list">
             <div class="empty-state">

@@ -496,4 +496,202 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     };
+
+    // -------------------------------------------------------
+    // Recipe Manager Logic
+    // -------------------------------------------------------
+    const recipeForm = document.getElementById('recipe-form');
+    const recipeDishInput = document.getElementById('recipe-dish-name');
+    const addIngRowBtn = document.getElementById('btn-add-ingredient-row');
+    const recipeIngredientsRows = document.getElementById('recipe-ingredients-rows');
+    const recipeListContainer = document.getElementById('recipe-list-container');
+
+    // Fetch and render initial recipes list
+    fetchRecipes();
+
+    // Default: Add one empty row
+    if (recipeIngredientsRows) {
+        addIngredientRow();
+    }
+
+    // Event listener: Add row button
+    if (addIngRowBtn) {
+        addIngRowBtn.addEventListener('click', () => addIngredientRow());
+    }
+
+    function addIngredientRow(name = '', qty = '', unit = '') {
+        if (!recipeIngredientsRows) return;
+        const row = document.createElement('div');
+        row.className = 'recipe-ingredient-row';
+        row.innerHTML = `
+            <input type="text" class="form-input ing-name-field" placeholder="Ingredient name" value="${escapeHtml(name)}" required style="flex: 2;">
+            <input type="number" step="any" class="form-input ing-qty-field" placeholder="Qty" value="${qty}" required style="flex: 1;">
+            <input type="text" class="form-input ing-unit-field" placeholder="Unit (e.g. kg)" value="${escapeHtml(unit)}" required style="flex: 1;">
+            <button type="button" class="btn-remove-row" title="Remove row">&times;</button>
+        `;
+
+        // Event listener: Remove row button
+        row.querySelector('.btn-remove-row').addEventListener('click', () => {
+            const rows = recipeIngredientsRows.querySelectorAll('.recipe-ingredient-row');
+            if (rows.length > 1) {
+                row.remove();
+            } else {
+                showToast('A recipe must have at least one ingredient mapping.', 'warning');
+            }
+        });
+
+        recipeIngredientsRows.appendChild(row);
+    }
+
+    async function fetchRecipes() {
+        try {
+            const response = await fetch('/admin/recipes');
+            if (response.status === 401) return;
+            const recipes = await response.json();
+            renderRecipesList(recipes);
+        } catch (err) {
+            console.error('Failed to fetch recipes:', err);
+        }
+    }
+
+    function renderRecipesList(recipes) {
+        if (!recipeListContainer) return;
+        
+        const keys = Object.keys(recipes);
+        if (keys.length === 0) {
+            recipeListContainer.innerHTML = `
+                <div style="text-align: center; color: var(--text-secondary); padding: 2rem 0; font-size: 0.9rem;">
+                    🍳 No recipes configured yet. Fill in the form on the left to add one!
+                </div>
+            `;
+            return;
+        }
+
+        recipeListContainer.innerHTML = '';
+        keys.forEach(dish => {
+            const ingredients = recipes[dish];
+            const itemCard = document.createElement('div');
+            itemCard.className = 'recipe-item-card';
+
+            const pills = ingredients.map(ing => {
+                return `<span class="recipe-ingredient-pill">${escapeHtml(ing.ingredient_name)}: ${ing.quantity_per_unit} ${escapeHtml(ing.unit)}</span>`;
+            }).join('');
+
+            itemCard.innerHTML = `
+                <div class="recipe-item-header">
+                    <span class="recipe-item-name">${escapeHtml(dish)}</span>
+                    <div class="recipe-item-actions">
+                        <button type="button" class="btn-icon edit" title="Edit recipe">✏️</button>
+                        <button type="button" class="btn-icon delete" title="Delete recipe">🗑️</button>
+                    </div>
+                </div>
+                <div class="recipe-ingredient-pill-list">
+                    ${pills}
+                </div>
+            `;
+
+            // Event listener: Edit button
+            itemCard.querySelector('.edit').addEventListener('click', () => {
+                recipeDishInput.value = dish;
+                recipeIngredientsRows.innerHTML = '';
+                ingredients.forEach(ing => {
+                    addIngredientRow(ing.ingredient_name, ing.quantity_per_unit, ing.unit);
+                });
+                showToast(`Loaded '${dish}' recipe into editor.`, 'success');
+                recipeDishInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            });
+
+            // Event listener: Delete button
+            itemCard.querySelector('.delete').addEventListener('click', async () => {
+                if (confirm(`Are you sure you want to delete the recipe mapping for '${dish}'?`)) {
+                    try {
+                        const response = await fetch('/admin/recipes/delete', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ dish_name: dish })
+                        });
+                        const resData = await response.json();
+                        if (response.ok && resData.success) {
+                            showToast(resData.message || 'Recipe deleted successfully.', 'success');
+                            // If currently editing this dish, clear the form
+                            if (recipeDishInput.value === dish) {
+                                recipeForm.reset();
+                                recipeIngredientsRows.innerHTML = '';
+                                addIngredientRow();
+                            }
+                            fetchRecipes();
+                        } else {
+                            showToast(resData.message || 'Failed to delete recipe.', 'error');
+                        }
+                    } catch (err) {
+                        showToast('Network error during deletion.', 'error');
+                    }
+                }
+            });
+
+            recipeListContainer.appendChild(itemCard);
+        });
+    }
+
+    // Submit Recipe Form
+    if (recipeForm) {
+        recipeForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const dishName = recipeDishInput.value.trim();
+            const rowElements = recipeIngredientsRows.querySelectorAll('.recipe-ingredient-row');
+            
+            const ingredientsList = [];
+            let isValid = true;
+
+            rowElements.forEach((row, idx) => {
+                const nameInput = row.querySelector('.ing-name-field');
+                const qtyInput = row.querySelector('.ing-qty-field');
+                const unitInput = row.querySelector('.ing-unit-field');
+
+                const name = nameInput.value.trim();
+                const qty = parseFloat(qtyInput.value);
+                const unit = unitInput.value.trim();
+
+                if (!name || isNaN(qty) || qty <= 0 || !unit) {
+                    isValid = false;
+                    row.style.borderColor = 'var(--danger)';
+                    setTimeout(() => row.style.borderColor = 'var(--glass-border)', 2000);
+                } else {
+                    ingredientsList.push({
+                        ingredient_name: name,
+                        quantity_per_unit: qty,
+                        unit: unit
+                    });
+                }
+            });
+
+            if (!isValid || ingredientsList.length === 0) {
+                showToast('Please verify all ingredient fields are complete and quantities are positive.', 'error');
+                return;
+            }
+
+            try {
+                const response = await fetch('/admin/recipes', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        dish_name: dishName,
+                        ingredients: ingredientsList
+                    })
+                });
+                const resData = await response.json();
+                if (response.ok && resData.success) {
+                    showToast(resData.message || 'Recipe saved successfully!', 'success');
+                    recipeForm.reset();
+                    recipeIngredientsRows.innerHTML = '';
+                    addIngredientRow();
+                    fetchRecipes();
+                } else {
+                    showToast(resData.message || 'Failed to save recipe.', 'error');
+                }
+            } catch (err) {
+                showToast('Network error saving recipe.', 'error');
+            }
+        });
+    }
 });
