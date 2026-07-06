@@ -53,13 +53,17 @@ class InvoiceValidator:
 
                     return False, f"Missing '{key}' in item."
 
-            if item["quantity"] <= 0:
+            if item["quantity"] is None or item["quantity"] <= 0:
 
-                return False, "Quantity must be greater than zero."
+                return False, f"Quantity must be greater than zero for '{item.get('product', 'unknown item')}'."
 
-            if item["unit_price"] <= 0:
+            if item["unit_price"] is None or item["unit_price"] <= 0:
 
-                return False, "Unit price must be greater than zero."
+                return False, f"Unit price must be greater than zero for '{item.get('product', 'unknown item')}'."
+
+            if item["total"] is None:
+
+                return False, f"Total is missing for '{item.get('product', 'unknown item')}'."
 
             calculated_total += item["total"]
 

@@ -137,6 +137,19 @@ class InvoiceParser:
 
             return text
 
+        elif filepath.lower().endswith((".jpg", ".jpeg", ".png")):
+
+            import easyocr
+
+            if not hasattr(self, "reader"):
+                self.reader = easyocr.Reader(["en"], gpu=False)
+
+            result = self.reader.readtext(filepath)
+            text = ""
+            for item in result:
+                text += item[1] + "\n"
+            return text
+
         return ""
 
     # ------------------------------------------
@@ -184,6 +197,24 @@ class InvoiceParser:
             content_type
 
         )
+
+        text = self.extract_text(
+
+            filepath
+
+        )
+
+        return {
+
+            "file_path": filepath,
+
+            "content_type": content_type,
+
+            "text": text
+
+        }
+
+    def parse_local(self, filepath, content_type):
 
         text = self.extract_text(
 

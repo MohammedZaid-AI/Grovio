@@ -51,31 +51,19 @@ class LLM:
             temperature = Config.TEMPERATURE
 
         response = self.client.chat.completions.create(
-
             model=Config.MODEL,
-
             temperature=temperature,
-
+            max_tokens=4096,
             messages=[
-
                 {
-
                     "role": "system",
-
                     "content": system
-
                 },
-
                 {
-
                     "role": "user",
-
                     "content": user
-
                 }
-
             ]
-
         )
 
         return response.choices[0].message.content
