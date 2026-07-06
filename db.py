@@ -1174,6 +1174,45 @@ def get_recipe(dish_name):
     finally:
         conn.close()
 
+def get_all_recipes():
+    """
+    Retrieves all recipes grouped by dish name.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT dish_name, ingredient_name, quantity_per_unit, unit 
+            FROM recipes 
+            ORDER BY dish_name
+        """)
+        rows = cursor.fetchall()
+        recipes = {}
+        for row in rows:
+            dish, ing, qty, unit = row
+            if dish not in recipes:
+                recipes[dish] = []
+            recipes[dish].append({
+                'ingredient_name': ing,
+                'quantity_per_unit': qty,
+                'unit': unit
+            })
+        return recipes
+    finally:
+        conn.close()
+
+def delete_recipe(dish_name):
+    """
+    Deletes all recipe rows for the specified dish.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM recipes WHERE LOWER(dish_name) = ?", (dish_name.lower().strip(),))
+        conn.commit()
+    finally:
+        conn.close()
+
 def save_sales_bill(bill_number, bill_date, total_amount, items, status='PENDING_CONFIRMATION'):
     """
     Saves a sales bill and its items.
@@ -1233,6 +1272,22 @@ def confirm_sales_bill(bill_id):
                     INSERT INTO product_consumption (product_name, consumed_quantity, unit, calculation_date, source_bill_id)
                     VALUES (?, ?, ?, ?, ?)
                 """, (ing_name, total_consumed, unit, bill_date, bill_id))
+                
+                # Check if ingredient exists in inventory
+                cursor.execute("SELECT 1 FROM inventory WHERE LOWER(product_name) = LOWER(?)", (ing_name,))
+                exists = cursor.fetchone()
+                if exists:
+                    cursor.execute("""
+                        UPDATE inventory
+                        SET current_stock = current_stock - ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE LOWER(product_name) = LOWER(?)
+                    """, (total_consumed, ing_name))
+                else:
+                    cursor.execute("""
+                        INSERT INTO inventory (product_name, current_stock, minimum_stock, unit)
+                        VALUES (?, ?, 0.0, ?)
+                    """, (ing_name, -total_consumed, unit))
         conn.commit()
         return True
     finally:
