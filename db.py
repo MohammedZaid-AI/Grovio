@@ -178,6 +178,24 @@ def init_db():
         )
         ''')
 
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS inventory_audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            product_name TEXT NOT NULL,
+            action_type TEXT NOT NULL,
+            old_stock REAL,
+            new_stock REAL,
+            old_unit TEXT,
+            new_unit TEXT,
+            old_minimum REAL,
+            new_minimum REAL,
+            source TEXT NOT NULL,
+            user_phone TEXT,
+            notes TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
         conn.commit()
     finally:
         conn.close()
@@ -445,6 +463,57 @@ def get_low_stock_items():
     try:
         rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE minimum_stock > 0 AND current_stock <= minimum_stock\n        ').fetchall()
         return rows
+    finally:
+        conn.close()
+
+def log_inventory_audit(product_name, action_type, source, user_phone=None, old_stock=None, new_stock=None, old_unit=None, new_unit=None, old_minimum=None, new_minimum=None, notes=None):
+    """Log inventory changes to audit trail."""
+    conn = get_connection()
+    try:
+        conn.execute('''
+        INSERT INTO inventory_audit_log (
+            product_name, action_type, old_stock, new_stock,
+            old_unit, new_unit, old_minimum, new_minimum,
+            source, user_phone, notes
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (product_name, action_type, old_stock, new_stock, old_unit, new_unit, old_minimum, new_minimum, source, user_phone, notes))
+        conn.commit()
+    finally:
+        conn.close()
+
+def get_inventory_audit_log(product_name=None, limit=50):
+    """Retrieve inventory audit log entries."""
+    conn = get_connection()
+    try:
+        if product_name:
+            rows = conn.execute('''
+            SELECT * FROM inventory_audit_log
+            WHERE product_name = ?
+            ORDER BY created_at DESC
+            LIMIT ?
+            ''', (product_name, limit)).fetchall()
+        else:
+            rows = conn.execute('''
+            SELECT * FROM inventory_audit_log
+            ORDER BY created_at DESC
+            LIMIT ?
+            ''', (limit,)).fetchall()
+        return rows
+    finally:
+        conn.close()
+
+def delete_inventory(product_name):
+    """Soft-delete an inventory item (mark as inactive, preserve history)."""
+    conn = get_connection()
+    try:
+        # Set current_stock to 0 and mark as deleted (or could add is_active column)
+        # For now, we'll just set stock to 0
+        conn.execute('''
+        UPDATE inventory
+        SET current_stock = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE product_name = ?
+        ''', (product_name,))
+        conn.commit()
     finally:
         conn.close()
 

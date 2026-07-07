@@ -571,6 +571,242 @@ async def delete_recipe_route(request: Request):
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
 
+# ==================================================
+# INVENTORY MANAGEMENT (Dashboard API)
+# ==================================================
+
+@router.get("/admin/inventory")
+def get_inventory_route(request: Request):
+    """Get current inventory items."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_inventory
+    try:
+        items = get_inventory()
+        inventory = []
+        for item in items:
+            inventory.append({
+                "id": item[0],
+                "product_name": item[1],
+                "current_stock": item[2],
+                "minimum_stock": item[3],
+                "unit": item[4],
+                "updated_at": item[5]
+            })
+        return {"success": True, "data": inventory}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+
+@router.post("/admin/inventory/add")
+async def add_inventory_route(request: Request):
+    """Add or create a new inventory item."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid JSON body"})
+
+    product_name = data.get("product_name", "").strip()
+    current_stock = data.get("current_stock")
+    minimum_stock = data.get("minimum_stock")
+    unit = data.get("unit", "").strip()
+
+    if not product_name or not unit:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Product name and unit are required"})
+
+    try:
+        current_stock = float(current_stock) if current_stock is not None else 0
+        minimum_stock = float(minimum_stock) if minimum_stock is not None else 0
+    except ValueError:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Stock values must be numeric"})
+
+    if current_stock < 0 or minimum_stock < 0:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Stock values cannot be negative"})
+
+    from db import save_inventory, log_inventory_audit
+    try:
+        save_inventory(product_name, current_stock, minimum_stock, unit)
+        log_inventory_audit(
+            product_name=product_name,
+            action_type="SET_ABSOLUTE",
+            old_stock=None,
+            new_stock=current_stock,
+            old_unit=None,
+            new_unit=unit,
+            old_minimum=None,
+            new_minimum=minimum_stock,
+            source="dashboard",
+            user_phone=None,
+            notes=f"Added via dashboard"
+        )
+        return {"success": True, "message": f"Product '{product_name}' added to inventory"}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+
+@router.post("/admin/inventory/update")
+async def update_inventory_route(request: Request):
+    """Update inventory item (SET absolute or ADJUST delta)."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid JSON body"})
+
+    product_name = data.get("product_name", "").strip()
+    new_stock = data.get("new_stock")
+    new_minimum = data.get("new_minimum")
+    action_type = data.get("action_type", "SET_ABSOLUTE")  # SET_ABSOLUTE or ADJUST_DELTA
+    confirm_unit_change = data.get("confirm_unit_change", False)
+
+    if not product_name:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Product name is required"})
+
+    from db import get_product_inventory, save_inventory, update_inventory, log_inventory_audit
+
+    try:
+        existing = get_product_inventory(product_name)
+        if not existing:
+            return JSONResponse(status_code=404, content={"success": False, "message": f"Product '{product_name}' not found"})
+
+        old_stock = existing[2]
+        old_minimum = existing[3]
+        old_unit = existing[4]
+
+        # Handle stock update
+        if new_stock is not None:
+            try:
+                new_stock = float(new_stock)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"success": False, "message": "Stock value must be numeric"})
+
+            if new_stock < 0:
+                return JSONResponse(status_code=400, content={"success": False, "message": "Stock cannot be negative"})
+
+            if action_type == "ADJUST_DELTA":
+                final_stock = old_stock + new_stock
+                if final_stock < 0:
+                    return JSONResponse(status_code=400, content={"success": False, "message": f"Cannot adjust by {new_stock} (would result in negative stock)"})
+                update_inventory(product_name, new_stock)
+            else:  # SET_ABSOLUTE
+                save_inventory(product_name, new_stock, old_minimum, old_unit)
+                final_stock = new_stock
+        else:
+            final_stock = old_stock
+
+        # Update minimum if provided
+        if new_minimum is not None:
+            try:
+                new_minimum = float(new_minimum)
+            except ValueError:
+                return JSONResponse(status_code=400, content={"success": False, "message": "Minimum value must be numeric"})
+
+            if new_minimum < 0:
+                return JSONResponse(status_code=400, content={"success": False, "message": "Minimum cannot be negative"})
+
+            save_inventory(product_name, final_stock, new_minimum, old_unit)
+        else:
+            new_minimum = old_minimum
+
+        # Log audit
+        log_inventory_audit(
+            product_name=product_name,
+            action_type=action_type,
+            old_stock=old_stock,
+            new_stock=final_stock if new_stock is not None else old_stock,
+            old_unit=old_unit,
+            new_unit=old_unit,
+            old_minimum=old_minimum,
+            new_minimum=new_minimum,
+            source="dashboard",
+            user_phone=None,
+            notes=f"Updated via dashboard"
+        )
+
+        return {
+            "success": True,
+            "message": f"Inventory for '{product_name}' updated successfully"
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+
+@router.get("/admin/inventory/audit-log")
+def get_audit_log_route(request: Request, product_name: str = None, limit: int = 50):
+    """Get inventory audit log."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_inventory_audit_log
+    try:
+        logs = get_inventory_audit_log(product_name, limit)
+        audit = []
+        for log in logs:
+            audit.append({
+                "id": log[0],
+                "product_name": log[1],
+                "action_type": log[2],
+                "old_stock": log[3],
+                "new_stock": log[4],
+                "old_unit": log[5],
+                "new_unit": log[6],
+                "old_minimum": log[7],
+                "new_minimum": log[8],
+                "source": log[9],
+                "user_phone": log[10],
+                "notes": log[11],
+                "created_at": log[12]
+            })
+        return {"success": True, "data": audit}
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+
+@router.post("/admin/inventory/delete")
+async def delete_inventory_route(request: Request):
+    """Soft-delete an inventory item (mark as inactive)."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid JSON body"})
+
+    product_name = data.get("product_name", "").strip()
+    if not product_name:
+        return JSONResponse(status_code=400, content={"success": False, "message": "Product name is required"})
+
+    from db import get_product_inventory, delete_inventory
+
+    try:
+        existing = get_product_inventory(product_name)
+        if not existing:
+            return JSONResponse(status_code=404, content={"success": False, "message": f"Product '{product_name}' not found"})
+
+        delete_inventory(product_name)
+        return {"success": True, "message": f"Product '{product_name}' has been deactivated"}
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
 @router.get("/admin/inventory-deductions/pending")
 def get_pending_deductions_route(request: Request):
     try:

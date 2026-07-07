@@ -78,6 +78,15 @@ Single-product stock queries
 "Current butter inventory?"
 "Check bread levels"
 
+inventory_manager
+Manual inventory adjustments
+Set absolute stock levels
+Add/Remove stock (delta adjustments)
+Inventory corrections after physical count
+"Set paneer stock to 10 kg, minimum 2 kg"
+"Add 5 kg milk"
+"Remove 2.5 L oil"
+
 restaurant_memory
 Queries on order intervals, last purchase dates, day-of-week, or seasonal demand
 Setting preferred brand or preferred supplier
@@ -392,6 +401,36 @@ Current butter levels
 Response:
 {
     "agents":["inventory_query"]
+}
+
+----------------------------
+
+User:
+Set paneer stock to 10 kg, minimum 2 kg
+
+Response:
+{
+    "agents":["inventory_manager"]
+}
+
+----------------------------
+
+User:
+Add 5 kg milk
+
+Response:
+{
+    "agents":["inventory_manager"]
+}
+
+----------------------------
+
+User:
+Remove 2.5 L oil
+
+Response:
+{
+    "agents":["inventory_manager"]
 }
 
 ------------------------------------------------

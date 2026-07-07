@@ -86,7 +86,11 @@ def execute_agents(state):
 
 def response_node(state):
 
-    if "inventory_query" in state["results"]:
+    if "inventory_manager" in state["results"]:
+
+        state["response"] = state["results"]["inventory_manager"]["message"]
+
+    elif "inventory_query" in state["results"]:
 
         state["response"] = state["results"]["inventory_query"]["message"]
 

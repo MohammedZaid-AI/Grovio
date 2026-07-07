@@ -1,8 +1,52 @@
+import os
+import re
+
 from ai.langgraph.graph import graph
 from ai.conversation.session_memory import memory
 
 from ai.shopping.shopping_session import shopping_session
 from ai.shopping.orchestrator import ShoppingOrchestrator
+
+
+def is_inventory_admin(from_phone: str) -> bool:
+    """
+    Check if phone is authorized for inventory commands.
+
+    SECURITY: Fails CLOSED (blocks all) if not configured.
+    A missing INVENTORY_ADMIN_PHONES should never grant access.
+    """
+    admin_phones_config = os.getenv("INVENTORY_ADMIN_PHONES", "").strip()
+
+    # NOT configured → block all (fail closed)
+    if not admin_phones_config:
+        return False
+
+    # Parse comma-separated list
+    admin_list = [p.strip() for p in admin_phones_config.split(",") if p.strip()]
+
+    # Normalize incoming phone (strip "whatsapp:" prefix)
+    normalized_phone = from_phone.replace("whatsapp:", "").strip()
+
+    return normalized_phone in admin_list
+
+
+def _is_inventory_command(message: str) -> bool:
+    """Detect if message is an inventory SET/ADD/REMOVE command."""
+    msg_lower = message.lower().strip()
+
+    # SET pattern: "set [product] stock to..."
+    if re.search(r"^set\s+.+\s+stock\s+to\s+", msg_lower):
+        return True
+
+    # ADD pattern: "add [qty] [unit] [product]"
+    if re.search(r"^add\s+[\d.]+\s+[a-z]+\s+", msg_lower):
+        return True
+
+    # REMOVE pattern: "remove [qty] [unit] [product]"
+    if re.search(r"^(?:remove|subtract)\s+[\d.]+\s+[a-z]+\s+", msg_lower):
+        return True
+
+    return False
 
 
 def get_cart_summary(phone):
@@ -490,6 +534,19 @@ async def process_message(
         # ----------------------------------
 
         return result["message"] if result else "No message."
+
+    # ==================================================
+    # INVENTORY MANAGEMENT (WITH ACCESS CONTROL)
+    # ==================================================
+
+    if _is_inventory_command(message):
+        if not is_inventory_admin(phone):
+            return "❌ *Not Authorized*\n\nInventory commands (Set/Add/Remove stock) are restricted to admin users.\n\nContact your administrator if you should have access."
+
+        from ai.agents.inventory_manager_agent import InventoryManagerAgent
+        agent = InventoryManagerAgent()
+        result = agent.execute(message, user_phone=phone)
+        return result.get("message", "Inventory command processed.")
 
     # ==================================================
     # LANGGRAPH

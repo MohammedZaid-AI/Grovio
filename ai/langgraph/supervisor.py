@@ -103,7 +103,9 @@ class Supervisor:
 
                 "restaurant_memory",
 
-                "inventory_query"
+                "inventory_query",
+
+                "inventory_manager"
 
             }
 
