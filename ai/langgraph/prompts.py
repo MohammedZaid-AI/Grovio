@@ -69,6 +69,15 @@ Mark PO as received or delivered
 "received milk and bread from ABC Dairy"
 Incoming items receipt
 
+inventory_query
+Current stock levels for specific products
+Quick inventory checks
+Single-product stock queries
+"What's our paneer stock?"
+"How much milk do we have?"
+"Current butter inventory?"
+"Check bread levels"
+
 restaurant_memory
 Queries on order intervals, last purchase dates, day-of-week, or seasonal demand
 Setting preferred brand or preferred supplier
@@ -353,6 +362,36 @@ show consumption summary
 Response:
 {
     "agents":["restaurant_memory"]
+}
+
+----------------------------
+
+User:
+What's our paneer stock?
+
+Response:
+{
+    "agents":["inventory_query"]
+}
+
+----------------------------
+
+User:
+How much milk do we have?
+
+Response:
+{
+    "agents":["inventory_query"]
+}
+
+----------------------------
+
+User:
+Current butter levels
+
+Response:
+{
+    "agents":["inventory_query"]
 }
 
 ------------------------------------------------

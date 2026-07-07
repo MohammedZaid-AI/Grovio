@@ -101,7 +101,9 @@ class Supervisor:
 
                 "receive_order",
 
-                "restaurant_memory"
+                "restaurant_memory",
+
+                "inventory_query"
 
             }
 
