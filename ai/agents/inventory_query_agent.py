@@ -1,5 +1,6 @@
 import re
 from db import get_product_inventory
+from core.formatters import format_quantity
 
 
 class InventoryQueryAgent:
@@ -34,10 +35,12 @@ class InventoryQueryAgent:
         # Format response
         product, current_stock, minimum_stock, unit = inventory_row[1], inventory_row[2], inventory_row[3], inventory_row[4]
 
-        reply = f"📦 *{product}*: {current_stock} {unit}"
+        current_stock_fmt = format_quantity(current_stock)
+        reply = f"📦 *{product}*: {current_stock_fmt} {unit}"
 
         if minimum_stock:
-            reply += f" (min: {minimum_stock} {unit})"
+            minimum_stock_fmt = format_quantity(minimum_stock)
+            reply += f" (min: {minimum_stock_fmt} {unit})"
 
         if current_stock < minimum_stock if minimum_stock else False:
             reply += f"\n⚠️ Low stock! Below minimum threshold."

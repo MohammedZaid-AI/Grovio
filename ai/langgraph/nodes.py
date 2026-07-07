@@ -1,5 +1,6 @@
 from ai.langgraph.registry import registry
 from ai.langgraph.supervisor import Supervisor
+from core.formatters import format_quantity
 import asyncio
 
 
@@ -142,12 +143,14 @@ def response_node(state):
             for item in inv["low_stock"]:
                 if isinstance(item, dict):
                     p_name = item.get('product', 'Unknown')
-                    p_stock = item.get('stock', 0)
+                    p_stock = format_quantity(item.get('stock', 0))
                     p_unit = item.get('unit', '')
-                    p_min = item.get('minimum', 0)
+                    p_min = format_quantity(item.get('minimum', 0))
                     reply.append(f"    • {p_name}: {p_stock} {p_unit} (min: {p_min})")
                 elif isinstance(item, (list, tuple)) and len(item) >= 5:
-                    reply.append(f"    • {item[1]}: {item[2]} {item[4]} (min: {item[3]})")
+                    p_stock = format_quantity(item[2])
+                    p_min = format_quantity(item[3])
+                    reply.append(f"    • {item[1]}: {p_stock} {item[4]} (min: {p_min})")
                 else:
                     reply.append(f"    • {item}")
         reply.append("")

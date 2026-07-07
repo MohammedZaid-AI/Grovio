@@ -2,6 +2,7 @@ from ai.reports.daily_brief import generate_daily_brief
 from ai.intelligence.inventory import Inventory
 from ai.agents.procurement_forecaster import ProcurementForecaster
 from ai.intelligence.decision_engine import DecisionEngine
+from core.formatters import format_quantity
 
 
 class MorningBrief:
@@ -65,11 +66,12 @@ class MorningBrief:
         if inventory["low_stock"]:
 
             for item in inventory["low_stock"]:
+                stock_fmt = format_quantity(item['stock'])
 
                 lines.append(
 
                     f"⚠ {item['product']} : "
-                    f"{item['stock']} {item['unit']} remaining"
+                    f"{stock_fmt} {item['unit']} remaining"
 
                 )
 
