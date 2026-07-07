@@ -9,8 +9,9 @@ document.addEventListener('DOMContentLoaded', () => {
     const groceryInvoiceInput = document.getElementById('grocery-invoice-input');
     const pendingContainer = document.getElementById('pending-container');
 
-    // Load initial pending list
-    fetchPendingDocs();
+    // Setup Hash Routing
+    window.addEventListener('hashchange', handleHashRouting);
+    handleHashRouting(); // Initial routing on page load
 
     // Setup Logout
     if (logoutBtn) {
@@ -32,6 +33,50 @@ document.addEventListener('DOMContentLoaded', () => {
     // Setup Dropzones
     setupDropzone(salesBillDropzone, salesBillInput, '/admin/upload/sales-bill', 'sales-bill-loading');
     setupDropzone(groceryInvoiceDropzone, groceryInvoiceInput, '/admin/upload/grocery-invoice', 'grocery-invoice-loading');
+
+    // -------------------------------------------------------
+    // Navigation / Tab Routing (SPA Hash Routing)
+    // -------------------------------------------------------
+    function handleHashRouting() {
+        const validTabs = ['documents', 'recipes', 'deductions'];
+        let hash = window.location.hash.replace('#', '').toLowerCase();
+        if (!validTabs.includes(hash)) {
+            hash = 'documents';
+            window.location.hash = '#documents';
+        }
+        switchTab(hash);
+    }
+
+    function switchTab(tabId) {
+        // Hide all tab contents
+        document.querySelectorAll('.tab-content').forEach(el => {
+            el.style.display = 'none';
+        });
+
+        // Show selected tab content
+        const targetTab = document.getElementById(`tab-${tabId}`);
+        if (targetTab) {
+            targetTab.style.display = 'block';
+        }
+
+        // Set active class on navbar links
+        document.querySelectorAll('.nav-tab').forEach(el => {
+            if (el.getAttribute('data-tab') === tabId) {
+                el.classList.add('active');
+            } else {
+                el.classList.remove('active');
+              }
+        });
+
+        // Segregated data loading
+        if (tabId === 'documents') {
+            fetchPendingDocs();
+        } else if (tabId === 'recipes') {
+            fetchRecipes();
+        } else if (tabId === 'deductions') {
+            fetchPendingDeductions();
+        }
+    }
 
     // -------------------------------------------------------
     // Helper: Toast Notifications
@@ -132,6 +177,7 @@ document.addEventListener('DOMContentLoaded', () => {
             if (response.ok && data.success) {
                 showToast('Document uploaded and parsed successfully!', 'success');
                 fetchPendingDocs(); // Refresh pending items
+                fetchPendingDeductions(); // Refresh pending deductions
             } else {
                 showToast(data.message || 'Failed to parse document.', 'error');
             }
@@ -477,9 +523,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     setTimeout(() => {
                         card.remove();
                         fetchPendingDocs();
+                        fetchPendingDeductions();
                     }, 300);
                 } else {
                     fetchPendingDocs();
+                    fetchPendingDeductions();
                 }
             } else {
                 showToast(data.message || 'Action failed.', 'error');
@@ -694,4 +742,190 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
+
+    // -------------------------------------------------------
+    // Pending Inventory Deductions UI Logic
+    // -------------------------------------------------------
+    const deductionsContainer = document.getElementById('deductions-container');
+
+    async function fetchPendingDeductions() {
+        try {
+            const response = await fetch('/admin/inventory-deductions/pending');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+            const data = await response.json();
+            renderDeductionsList(data);
+        } catch (err) {
+            console.error('Failed to fetch pending deductions:', err);
+            showToast('Failed to fetch pending inventory deductions.', 'error');
+        }
+    }
+
+    function renderDeductionsList(deductions) {
+        if (!deductionsContainer) return;
+
+        if (!deductions || deductions.length === 0) {
+            deductionsContainer.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon">⚖️</div>
+                    <p>No pending inventory deductions to approve.</p>
+                </div>
+            `;
+            return;
+        }
+
+        deductionsContainer.innerHTML = '';
+        deductions.forEach(ded => {
+            const id = ded.id;
+            const ingName = ded.ingredient_name;
+            const qty = ded.estimated_quantity;
+            const unit = ded.unit;
+            const billNumber = ded.bill_number;
+            const billDate = ded.bill_date;
+            const stock = ded.current_stock;
+
+            let statusBadgeHtml = '';
+            let approveBtnAttributes = '';
+
+            if (stock === null) {
+                // Untracked ingredient
+                statusBadgeHtml = `<span class="badge badge-error" style="margin-bottom: 0.5rem;">⚠️ Untracked (Approve blocked)</span>`;
+                approveBtnAttributes = 'disabled style="opacity: 0.5; pointer-events: none;"';
+            } else if (stock < qty) {
+                // Insufficient stock
+                statusBadgeHtml = `<span class="badge badge-warning" style="margin-bottom: 0.5rem;">⚠️ Insufficient (Stock: ${stock} ${unit})</span>`;
+                approveBtnAttributes = `onclick="approveDeduction(${id}, true, ${stock}, ${qty}, '${escapeHtml(unit)}', '${escapeHtml(ingName)}')"`;
+            } else {
+                // Sufficient stock
+                statusBadgeHtml = `<span class="badge badge-success" style="margin-bottom: 0.5rem;">Sufficient (Stock: ${stock} ${unit})</span>`;
+                approveBtnAttributes = `onclick="approveDeduction(${id}, false, ${stock}, ${qty}, '${escapeHtml(unit)}', '${escapeHtml(ingName)}')"`;
+            }
+
+            const card = document.createElement('div');
+            card.className = 'pending-card';
+            card.id = `deduction-card-${id}`;
+            card.innerHTML = `
+                <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
+                    <div>
+                        <div class="doc-title" style="font-size: 1.1rem; color: #fff; font-weight: 600;">${escapeHtml(ingName)}</div>
+                        <div style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">
+                            Estimated Qty: <strong style="color: var(--accent);">${qty} ${escapeHtml(unit)}</strong>
+                        </div>
+                        <div style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.25rem;">
+                            Source Bill: <strong>${escapeHtml(billNumber)}</strong> (${escapeHtml(billDate)})
+                        </div>
+                    </div>
+                    <div style="text-align: right; display: flex; flex-direction: column; gap: 0.25rem; align-items: flex-end;">
+                        ${statusBadgeHtml}
+                        <div class="actions" style="margin-top: 0.5rem;">
+                            <button type="button" class="btn btn-secondary btn-small" onclick="rejectDeduction(${id}, '${escapeHtml(ingName)}')">Reject</button>
+                            <button type="button" class="btn btn-success btn-small" ${approveBtnAttributes}>Approve</button>
+                        </div>
+                    </div>
+                </div>
+            `;
+            deductionsContainer.appendChild(card);
+        });
+    }
+
+    window.approveDeduction = async (id, isInsufficient, currentStock, estimatedQty, unit, ingName) => {
+        if (isInsufficient) {
+            const proceed = confirm(`Warning: Approving this deduction will result in a negative stock level (${(currentStock - estimatedQty).toFixed(2)} ${unit}) for "${ingName}".\n\nDo you want to proceed?`);
+            if (!proceed) return;
+        }
+
+        const card = document.getElementById(`deduction-card-${id}`);
+        if (card) {
+            card.style.opacity = '0.5';
+            card.style.pointerEvents = 'none';
+        }
+
+        try {
+            const response = await fetch(`/admin/inventory-deductions/${id}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' }
+            });
+            const data = await response.json();
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            if (response.ok && data.success) {
+                showToast(data.message || 'Deduction approved successfully.', 'success');
+                if (card) {
+                    card.style.transform = 'scale(0.9)';
+                    card.style.opacity = '0';
+                    setTimeout(() => {
+                        card.remove();
+                        fetchPendingDeductions();
+                    }, 300);
+                } else {
+                    fetchPendingDeductions();
+                }
+            } else {
+                showToast(data.message || 'Failed to approve deduction.', 'error');
+                if (card) {
+                    card.style.opacity = '1';
+                    card.style.pointerEvents = 'all';
+                }
+            }
+        } catch (err) {
+            showToast('Network error approving deduction.', 'error');
+            if (card) {
+                card.style.opacity = '1';
+                card.style.pointerEvents = 'all';
+            }
+        }
+    };
+
+    window.rejectDeduction = async (id, ingName) => {
+        if (confirm(`Are you sure you want to reject the inventory deduction for "${ingName}"? (Physical stock remains unchanged)`)) {
+            const card = document.getElementById(`deduction-card-${id}`);
+            if (card) {
+                card.style.opacity = '0.5';
+                card.style.pointerEvents = 'none';
+            }
+
+            try {
+                const response = await fetch(`/admin/inventory-deductions/${id}/reject`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                const data = await response.json();
+                if (response.status === 401) {
+                    window.location.href = '/admin/login';
+                    return;
+                }
+
+                if (response.ok && data.success) {
+                    showToast(data.message || 'Deduction rejected successfully.', 'success');
+                    if (card) {
+                        card.style.transform = 'scale(0.9)';
+                        card.style.opacity = '0';
+                        setTimeout(() => {
+                            card.remove();
+                            fetchPendingDeductions();
+                        }, 300);
+                    } else {
+                        fetchPendingDeductions();
+                    }
+                } else {
+                    showToast(data.message || 'Failed to reject deduction.', 'error');
+                    if (card) {
+                        card.style.opacity = '1';
+                        card.style.pointerEvents = 'all';
+                    }
+                }
+            } catch (err) {
+                showToast('Network error rejecting deduction.', 'error');
+                if (card) {
+                    card.style.opacity = '1';
+                    card.style.pointerEvents = 'all';
+                }
+            }
+        }
+    };
 });

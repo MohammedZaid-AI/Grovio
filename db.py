@@ -159,6 +159,25 @@ def init_db():
         )
         ''')
 
+        # Safe schema migration for product_consumption table (add status column)
+        cursor.execute("PRAGMA table_info(product_consumption)")
+        pc_columns = [row[1] for row in cursor.fetchall()]
+        if 'status' not in pc_columns:
+            cursor.execute("ALTER TABLE product_consumption ADD COLUMN status TEXT DEFAULT 'PENDING'")
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS pending_inventory_deductions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ingredient_name TEXT NOT NULL,
+            estimated_quantity REAL NOT NULL,
+            unit TEXT NOT NULL,
+            source_sales_bill_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'PENDING',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(source_sales_bill_id) REFERENCES sales_bills(id)
+        )
+        ''')
+
         conn.commit()
     finally:
         conn.close()
@@ -1269,25 +1288,14 @@ def confirm_sales_bill(bill_id):
             for ing_name, qty_per_unit, unit in ingredients:
                 total_consumed = qty_sold * qty_per_unit
                 cursor.execute("""
-                    INSERT INTO product_consumption (product_name, consumed_quantity, unit, calculation_date, source_bill_id)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO product_consumption (product_name, consumed_quantity, unit, calculation_date, source_bill_id, status)
+                    VALUES (?, ?, ?, ?, ?, 'PENDING')
                 """, (ing_name, total_consumed, unit, bill_date, bill_id))
                 
-                # Check if ingredient exists in inventory
-                cursor.execute("SELECT 1 FROM inventory WHERE LOWER(product_name) = LOWER(?)", (ing_name,))
-                exists = cursor.fetchone()
-                if exists:
-                    cursor.execute("""
-                        UPDATE inventory
-                        SET current_stock = current_stock - ?,
-                            updated_at = CURRENT_TIMESTAMP
-                        WHERE LOWER(product_name) = LOWER(?)
-                    """, (total_consumed, ing_name))
-                else:
-                    cursor.execute("""
-                        INSERT INTO inventory (product_name, current_stock, minimum_stock, unit)
-                        VALUES (?, ?, 0.0, ?)
-                    """, (ing_name, -total_consumed, unit))
+                cursor.execute("""
+                    INSERT INTO pending_inventory_deductions (ingredient_name, estimated_quantity, unit, source_sales_bill_id)
+                    VALUES (?, ?, ?, ?)
+                """, (ing_name, total_consumed, unit, bill_id))
         conn.commit()
         return True
     finally:
@@ -1488,6 +1496,121 @@ def update_pending_document_status(doc_id, status):
             WHERE id = ?
         """, (status, doc_id))
         conn.commit()
+    finally:
+        conn.close()
+
+def get_pending_inventory_deductions():
+    """
+    Retrieves all pending inventory deductions with their source sales bill details and current stock levels.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                p.id,
+                p.ingredient_name,
+                p.estimated_quantity,
+                p.unit,
+                p.source_sales_bill_id,
+                s.bill_number,
+                s.bill_date,
+                i.current_stock
+            FROM pending_inventory_deductions p
+            JOIN sales_bills s ON p.source_sales_bill_id = s.id
+            LEFT JOIN inventory i ON LOWER(p.ingredient_name) = LOWER(i.product_name)
+            WHERE p.status = 'PENDING'
+            ORDER BY s.bill_date DESC, p.id ASC
+        """)
+        rows = cursor.fetchall()
+        results = []
+        for row in rows:
+            results.append({
+                'id': row[0],
+                'ingredient_name': row[1],
+                'estimated_quantity': row[2],
+                'unit': row[3],
+                'source_sales_bill_id': row[4],
+                'bill_number': row[5],
+                'bill_date': row[6],
+                'current_stock': row[7]
+            })
+        return results
+    finally:
+        conn.close()
+
+def approve_inventory_deduction(deduction_id):
+    """
+    Approve deduction: decrement inventory current_stock and update statuses to 'APPROVED'.
+    Blocks approval if the ingredient is untracked.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT ingredient_name, estimated_quantity, unit, source_sales_bill_id, status FROM pending_inventory_deductions WHERE id = ?", (deduction_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False, "Deduction not found."
+        ing_name, qty, unit, bill_id, status = row
+        if status != 'PENDING':
+            return False, f"Deduction is already {status}."
+        
+        # Enforce that the ingredient must be tracked
+        cursor.execute("SELECT 1 FROM inventory WHERE LOWER(product_name) = LOWER(?)", (ing_name,))
+        exists = cursor.fetchone()
+        if not exists:
+            return False, f"Ingredient '{ing_name}' is not tracked in inventory. Add it to inventory first."
+        
+        # Perform the stock decrement
+        cursor.execute("""
+            UPDATE inventory
+            SET current_stock = current_stock - ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE LOWER(product_name) = LOWER(?)
+        """, (qty, ing_name))
+        
+        # Update pending deduction status
+        cursor.execute("UPDATE pending_inventory_deductions SET status = 'APPROVED' WHERE id = ?", (deduction_id,))
+        
+        # Update product consumption status
+        cursor.execute("""
+            UPDATE product_consumption 
+            SET status = 'APPROVED' 
+            WHERE LOWER(product_name) = LOWER(?) AND source_bill_id = ?
+        """, (ing_name, bill_id))
+        
+        conn.commit()
+        return True, "Deduction approved successfully."
+    finally:
+        conn.close()
+
+def reject_inventory_deduction(deduction_id):
+    """
+    Reject deduction: do not touch stock, change status of deduction and consumption to 'REJECTED'.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT ingredient_name, source_sales_bill_id, status FROM pending_inventory_deductions WHERE id = ?", (deduction_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False, "Deduction not found."
+        ing_name, bill_id, status = row
+        if status != 'PENDING':
+            return False, f"Deduction is already {status}."
+        
+        # Update pending deduction status
+        cursor.execute("UPDATE pending_inventory_deductions SET status = 'REJECTED' WHERE id = ?", (deduction_id,))
+        
+        # Update product consumption status
+        cursor.execute("""
+            UPDATE product_consumption 
+            SET status = 'REJECTED' 
+            WHERE LOWER(product_name) = LOWER(?) AND source_bill_id = ?
+        """, (ing_name, bill_id))
+        
+        conn.commit()
+        return True, "Deduction rejected successfully."
     finally:
         conn.close()
 

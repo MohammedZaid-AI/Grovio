@@ -570,3 +570,51 @@ async def delete_recipe_route(request: Request):
         return {"success": True, "message": f"Recipe for '{dish_name}' deleted successfully!"}
     except Exception as e:
         return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+@router.get("/admin/inventory-deductions/pending")
+def get_pending_deductions_route(request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_pending_inventory_deductions
+    try:
+        deductions = get_pending_inventory_deductions()
+        return deductions
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+
+@router.post("/admin/inventory-deductions/{id}/approve")
+def approve_deduction_route(id: int, request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import approve_inventory_deduction
+    try:
+        success, message = approve_inventory_deduction(id)
+        if success:
+            return {"success": True, "message": message}
+        else:
+            return JSONResponse(status_code=400, content={"success": False, "message": message})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Unexpected error: {str(e)}"})
+
+@router.post("/admin/inventory-deductions/{id}/reject")
+def reject_deduction_route(id: int, request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import reject_inventory_deduction
+    try:
+        success, message = reject_inventory_deduction(id)
+        if success:
+            return {"success": True, "message": message}
+        else:
+            return JSONResponse(status_code=400, content={"success": False, "message": message})
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"success": False, "message": f"Unexpected error: {str(e)}"})
