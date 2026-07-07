@@ -38,7 +38,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // Navigation / Tab Routing (SPA Hash Routing)
     // -------------------------------------------------------
     function handleHashRouting() {
-        const validTabs = ['documents', 'recipes', 'deductions'];
+        const validTabs = ['documents', 'recipes', 'inventory', 'deductions'];
         let hash = window.location.hash.replace('#', '').toLowerCase();
         if (!validTabs.includes(hash)) {
             hash = 'documents';
@@ -73,6 +73,8 @@ document.addEventListener('DOMContentLoaded', () => {
             fetchPendingDocs();
         } else if (tabId === 'recipes') {
             fetchRecipes();
+        } else if (tabId === 'inventory') {
+            initInventoryTab();
         } else if (tabId === 'deductions') {
             fetchPendingDeductions();
         }
@@ -928,4 +930,403 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         }
     };
+
+    // -------------------------------------------------------
+    // INVENTORY MANAGEMENT TAB
+    // -------------------------------------------------------
+
+    let currentEditingProduct = null;
+
+    async function initInventoryTab() {
+        setupInventoryForm();
+        fetchInventoryList();
+        fetchAuditLog();
+    }
+
+    function setupInventoryForm() {
+        const form = document.getElementById('inventory-form');
+        const clearBtn = document.getElementById('inv-clear-btn');
+
+        if (form) {
+            form.removeEventListener('submit', handleInventoryFormSubmit);
+            form.addEventListener('submit', handleInventoryFormSubmit);
+        }
+
+        if (clearBtn) {
+            clearBtn.removeEventListener('click', clearInventoryForm);
+            clearBtn.addEventListener('click', clearInventoryForm);
+        }
+
+        // Modal controls
+        setupModals();
+    }
+
+    function clearInventoryForm() {
+        document.getElementById('inventory-form').reset();
+        currentEditingProduct = null;
+        document.getElementById('inv-submit-btn').textContent = 'Save Product';
+    }
+
+    async function handleInventoryFormSubmit(e) {
+        e.preventDefault();
+
+        const productName = document.getElementById('inv-product-name').value.trim();
+        const currentStock = parseFloat(document.getElementById('inv-stock').value);
+        const minimumStock = parseFloat(document.getElementById('inv-minimum').value);
+        const unit = document.getElementById('inv-unit').value;
+
+        if (!productName || !unit) {
+            showToast('Product name and unit are required.', 'error');
+            return;
+        }
+
+        if (isNaN(currentStock) || isNaN(minimumStock)) {
+            showToast('Stock values must be numbers.', 'error');
+            return;
+        }
+
+        try {
+            const endpoint = '/admin/inventory/add';
+            const response = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    product_name: productName,
+                    current_stock: currentStock,
+                    minimum_stock: minimumStock,
+                    unit: unit
+                })
+            });
+
+            const data = await response.json();
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            if (response.ok) {
+                showToast(data.message || 'Product saved successfully!', 'success');
+                clearInventoryForm();
+                fetchInventoryList();
+                fetchAuditLog();
+            } else {
+                showToast(data.message || 'Failed to save product.', 'error');
+            }
+        } catch (err) {
+            showToast('Network error saving product.', 'error');
+        }
+    }
+
+    async function fetchInventoryList() {
+        try {
+            const response = await fetch('/admin/inventory');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            const data = await response.json();
+            renderInventoryTable(data.data || []);
+        } catch (err) {
+            showToast('Failed to fetch inventory.', 'error');
+            renderInventoryTable([]);
+        }
+    }
+
+    function renderInventoryTable(items) {
+        const tbody = document.getElementById('inventory-table-body');
+        if (!items || items.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                        No inventory items. Add your first product using the form above.
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbody.innerHTML = items.map((item, idx) => {
+            const [id, productName, currentStock, minimumStock, unit] = item;
+            let status = '✅ OK';
+            let statusClass = 'ok';
+
+            if (currentStock <= 0) {
+                status = '❌ OUT OF STOCK';
+                statusClass = 'critical';
+            } else if (currentStock < minimumStock) {
+                status = '⚠️ LOW STOCK';
+                statusClass = 'low';
+            }
+
+            return `
+                <tr>
+                    <td><strong>${escapeHtml(productName)}</strong></td>
+                    <td>${currentStock.toFixed(1)}</td>
+                    <td>${minimumStock.toFixed(1)}</td>
+                    <td>${unit}</td>
+                    <td><span class="status-badge ${statusClass}">${status}</span></td>
+                    <td style="text-align: center;">
+                        <button class="btn btn-secondary btn-small" onclick="window.editInventoryProduct('${escapeHtml(productName).replace(/'/g, "\\'")}')">✏️ Edit</button>
+                        <button class="btn btn-danger btn-small" onclick="window.deleteInventoryProduct('${escapeHtml(productName).replace(/'/g, "\\'")}')">🗑️ Delete</button>
+                    </td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    async function fetchAuditLog() {
+        try {
+            const response = await fetch('/admin/inventory/audit-log?limit=20');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            const data = await response.json();
+            renderAuditLog(data.data || []);
+        } catch (err) {
+            showToast('Failed to fetch audit log.', 'error');
+            renderAuditLog([]);
+        }
+    }
+
+    function renderAuditLog(logs) {
+        const tbody = document.getElementById('audit-log-body');
+        if (!logs || logs.length === 0) {
+            tbody.innerHTML = `
+                <tr>
+                    <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
+                        No audit log entries yet.
+                    </td>
+                </tr>
+            `;
+            return;
+        }
+
+        tbody.innerHTML = logs.map((log) => {
+            const [id, productName, action, oldStock, newStock, oldUnit, newUnit, oldMinimum, newMinimum, source, userPhone, notes, createdAt] = log;
+
+            const actionLabel = action === 'SET_ABSOLUTE' ? '📝 SET' :
+                              action === 'ADJUST_DELTA' ? '➕ ADJUST' : action;
+
+            const oldStockDisplay = oldStock !== null && oldStock !== undefined ? oldStock.toFixed(1) : '-';
+            const newStockDisplay = newStock !== null && newStock !== undefined ? newStock.toFixed(1) : '-';
+
+            const timestamp = createdAt ? new Date(createdAt).toLocaleString() : '-';
+
+            return `
+                <tr>
+                    <td><strong>${escapeHtml(productName)}</strong></td>
+                    <td>${actionLabel}</td>
+                    <td>${oldStockDisplay}</td>
+                    <td>${newStockDisplay}</td>
+                    <td><span style="font-size: 0.8rem; color: var(--text-secondary);">${source}</span></td>
+                    <td style="font-size: 0.8rem; color: var(--text-secondary);">${timestamp}</td>
+                </tr>
+            `;
+        }).join('');
+    }
+
+    // Window-level functions for onclick handlers
+    window.editInventoryProduct = async (productName) => {
+        try {
+            const response = await fetch('/admin/inventory');
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            const data = await response.json();
+            const item = data.data.find(i => i[1] === productName);
+            if (!item) {
+                showToast('Product not found.', 'error');
+                return;
+            }
+
+            const [id, name, currentStock, minimumStock, unit] = item;
+            currentEditingProduct = name;
+
+            document.getElementById('edit-product-name').value = name;
+            document.getElementById('edit-new-stock').value = currentStock.toFixed(1);
+            document.getElementById('edit-new-minimum').value = minimumStock.toFixed(1);
+
+            // Switch to SET mode by default
+            document.querySelectorAll('.modal-tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            document.querySelector('[data-mode="set"]').classList.add('active');
+            document.getElementById('edit-mode-set').style.display = 'block';
+            document.getElementById('edit-mode-adjust').style.display = 'none';
+
+            showModal('edit-modal');
+        } catch (err) {
+            showToast('Failed to load product details.', 'error');
+        }
+    };
+
+    window.deleteInventoryProduct = (productName) => {
+        document.getElementById('delete-confirm-text').textContent =
+            `Are you sure you want to remove "${productName}" from inventory? This will mark it as inactive but keep the audit history.`;
+        document.getElementById('delete-modal').dataset.productName = productName;
+        showModal('delete-modal');
+    };
+
+    // Modal functions
+    function setupModals() {
+        // Edit modal tabs
+        document.querySelectorAll('#edit-mode-tabs .modal-tab-btn').forEach(btn => {
+            btn.removeEventListener('click', handleEditModeTab);
+            btn.addEventListener('click', handleEditModeTab);
+        });
+
+        // Edit form submit
+        const editForm = document.getElementById('edit-form');
+        if (editForm) {
+            editForm.removeEventListener('submit', handleEditFormSubmit);
+            editForm.addEventListener('submit', handleEditFormSubmit);
+        }
+
+        // Delete confirm
+        const deleteConfirmBtn = document.getElementById('delete-confirm-btn');
+        if (deleteConfirmBtn) {
+            deleteConfirmBtn.removeEventListener('click', handleDeleteConfirm);
+            deleteConfirmBtn.addEventListener('click', handleDeleteConfirm);
+        }
+
+        // Close buttons
+        document.getElementById('edit-modal-close').addEventListener('click', () => closeModal('edit-modal'));
+        document.getElementById('delete-modal-close').addEventListener('click', () => closeModal('delete-modal'));
+        document.getElementById('delete-cancel-btn').addEventListener('click', () => closeModal('delete-modal'));
+    }
+
+    function handleEditModeTab(e) {
+        const mode = e.target.dataset.mode;
+        document.querySelectorAll('.modal-tab-btn').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        e.target.classList.add('active');
+
+        document.querySelectorAll('.edit-mode-content').forEach(el => {
+            el.style.display = 'none';
+        });
+        document.getElementById(`edit-mode-${mode}`).style.display = 'block';
+    }
+
+    async function handleEditFormSubmit(e) {
+        e.preventDefault();
+
+        const productName = document.getElementById('edit-product-name').value;
+        const activeMode = document.querySelector('.modal-tab-btn.active').dataset.mode;
+
+        try {
+            let body = { product_name: productName };
+
+            if (activeMode === 'set') {
+                const newStock = parseFloat(document.getElementById('edit-new-stock').value);
+                const newMinimum = parseFloat(document.getElementById('edit-new-minimum').value);
+
+                if (isNaN(newStock) || isNaN(newMinimum)) {
+                    showToast('Stock values must be numbers.', 'error');
+                    return;
+                }
+
+                body.action_type = 'SET_ABSOLUTE';
+                body.new_stock = newStock;
+                body.new_minimum = newMinimum;
+            } else {
+                const deltaQty = parseFloat(document.getElementById('edit-delta-qty').value);
+                const deltaType = document.getElementById('edit-delta-type').value;
+
+                if (isNaN(deltaQty)) {
+                    showToast('Quantity must be a number.', 'error');
+                    return;
+                }
+
+                body.action_type = 'ADJUST_DELTA';
+                body.delta_quantity = deltaType === 'add' ? deltaQty : -deltaQty;
+            }
+
+            const response = await fetch('/admin/inventory/update', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            });
+
+            const data = await response.json();
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            if (response.ok) {
+                showToast(data.message || 'Inventory updated successfully!', 'success');
+                closeModal('edit-modal');
+                fetchInventoryList();
+                fetchAuditLog();
+            } else {
+                showToast(data.message || 'Failed to update inventory.', 'error');
+            }
+        } catch (err) {
+            showToast('Network error updating inventory.', 'error');
+        }
+    }
+
+    async function handleDeleteConfirm() {
+        const productName = document.getElementById('delete-modal').dataset.productName;
+        if (!productName) {
+            showToast('Product name not found.', 'error');
+            return;
+        }
+
+        try {
+            const response = await fetch('/admin/inventory/delete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ product_name: productName })
+            });
+
+            const data = await response.json();
+            if (response.status === 401) {
+                window.location.href = '/admin/login';
+                return;
+            }
+
+            if (response.ok) {
+                showToast(data.message || 'Product deleted successfully!', 'success');
+                closeModal('delete-modal');
+                fetchInventoryList();
+                fetchAuditLog();
+            } else {
+                showToast(data.message || 'Failed to delete product.', 'error');
+            }
+        } catch (err) {
+            showToast('Network error deleting product.', 'error');
+        }
+    }
+
+    function showModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            setTimeout(() => {
+                modal.classList.add('show');
+            }, 10);
+        }
+    }
+
+    function closeModal(modalId) {
+        const modal = document.getElementById(modalId);
+        if (modal) {
+            modal.classList.remove('show');
+        }
+    }
+
+    // Close modals when clicking outside
+    document.querySelectorAll('.modal').forEach(modal => {
+        modal.addEventListener('click', (e) => {
+            if (e.target === modal) {
+                modal.classList.remove('show');
+            }
+        });
+    });
 });
