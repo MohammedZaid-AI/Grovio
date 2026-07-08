@@ -103,9 +103,12 @@ class Supervisor:
 
                 "restaurant_memory",
 
-                "inventory_query",
+                "inventory_query"
 
-                "inventory_manager"
+                # NOTE: "inventory_manager" is deliberately NOT routable via the
+                # LLM. Inventory MUTATIONS must only go through the admin-gated
+                # regex path in backend/chat.py or the JWT-protected dashboard.
+                # See security fix H-1.
 
             }
 

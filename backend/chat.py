@@ -8,26 +8,19 @@ from ai.shopping.shopping_session import shopping_session
 from ai.shopping.orchestrator import ShoppingOrchestrator
 
 
-def is_inventory_admin(from_phone: str) -> bool:
-    """
-    Check if phone is authorized for inventory commands.
+# Authorization helpers live in core.authz (a leaf module) so the same
+# fail-closed allowlist logic can be shared with the LangGraph nodes without
+# introducing a circular import. See security fixes H-1 / H-2.
+from core.authz import is_inventory_admin, is_authorized_user
 
-    SECURITY: Fails CLOSED (blocks all) if not configured.
-    A missing INVENTORY_ADMIN_PHONES should never grant access.
-    """
-    admin_phones_config = os.getenv("INVENTORY_ADMIN_PHONES", "").strip()
 
-    # NOT configured → block all (fail closed)
-    if not admin_phones_config:
-        return False
-
-    # Parse comma-separated list
-    admin_list = [p.strip() for p in admin_phones_config.split(",") if p.strip()]
-
-    # Normalize incoming phone (strip "whatsapp:" prefix)
-    normalized_phone = from_phone.replace("whatsapp:", "").strip()
-
-    return normalized_phone in admin_list
+# User-facing message for unauthorized business/financial actions.
+UNAUTHORIZED_ACTION_MESSAGE = (
+    "❌ *Not Authorized*\n\n"
+    "Ordering, purchase-order approvals, and business/financial reports are "
+    "restricted to authorized users.\n\n"
+    "Contact your administrator if you should have access."
+)
 
 
 def _is_inventory_command(message: str) -> bool:
@@ -47,6 +40,21 @@ def _is_inventory_command(message: str) -> bool:
         return True
 
     return False
+
+
+def _format_payment_options(options, prefix=""):
+    """Build the WhatsApp payment-method selection prompt."""
+    reply = []
+    if prefix:
+        reply.append(prefix.rstrip("\n"))
+        reply.append("")
+    reply.append("💳 *Choose Payment Method*")
+    reply.append("")
+    for index, opt in enumerate(options, start=1):
+        reply.append(f"{index}. {opt['label']}")
+    reply.append("")
+    reply.append("Reply with the number of your preferred payment method.")
+    return "\n".join(reply)
 
 
 def get_cart_summary(phone):
@@ -179,6 +187,10 @@ async def process_message(
 
     ):
 
+        # H-2: gate real money-spending grocery ordering behind the allowlist.
+        if not is_authorized_user(phone):
+            return UNAUTHORIZED_ACTION_MESSAGE
+
         from ai.agents.auto_order_agent import AutoOrderAgent
 
         agent = AutoOrderAgent()
@@ -299,7 +311,62 @@ async def process_message(
 
             )
 
-            result = await service.checkout()
+            # Swiggy requires an explicit payment method — never default one.
+            # Fetch the options and hand the choice to the user before checkout.
+            payment_result = await service.get_payment_options()
+
+            if not payment_result.get("success"):
+
+                return payment_result.get(
+                    "message",
+                    "⚠️ We couldn't load payment methods right now. Please try again in a few minutes."
+                )
+
+            options = payment_result["options"]
+
+            session = shopping_session.get(phone)
+            if session is not None:
+                session["payment_options"] = options
+
+            shopping_session.set_stage(phone, "payment_selection")
+
+            return _format_payment_options(options)
+
+        # ----------------------------------------------
+        # PAYMENT SELECTION
+        # ----------------------------------------------
+
+        elif stage == "payment_selection":
+
+            session = shopping_session.get(phone)
+
+            options = session.get("payment_options", []) if session else []
+
+            if not message.isdigit():
+
+                return _format_payment_options(
+                    options,
+                    prefix="Please reply with the number of a payment method.\n\n"
+                )
+
+            choice = int(message)
+
+            if choice < 1 or choice > len(options):
+
+                return _format_payment_options(
+                    options,
+                    prefix=f"Please choose a number between 1 and {len(options)}.\n\n"
+                )
+
+            selected_method = options[choice - 1]
+
+            service = ShoppingOrchestrator().service
+
+            result = await service.checkout(
+
+                payment_method=selected_method["id"]
+
+            )
 
         # ----------------------------------------------
         # CHECKOUT RECOVERY
@@ -557,6 +624,8 @@ async def process_message(
         {
 
             "message": message,
+
+            "phone": phone,
 
             "selected_agents": [],
 

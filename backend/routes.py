@@ -6,6 +6,10 @@ import os
 import jwt
 import datetime
 import uuid
+import hmac
+import collections
+
+from core.logger import logger
 
 # Startup check: fail if JWT_SECRET is not in environment or is too weak
 JWT_SECRET = os.getenv("JWT_SECRET")
@@ -49,6 +53,59 @@ def get_current_user(request: Request):
 router = APIRouter()
 
 pipeline = InvoicePipeline()
+
+# -------------------------------------------------------
+# Login Rate Limiting (in-memory, single-process)
+# -------------------------------------------------------
+# SECURITY: prevents unbounded password-guessing against /admin/login.
+# Keyed by client IP. Not distributed (fine for this single-instance
+# SQLite-backed deployment; see CLAUDE.md known limitations).
+LOGIN_MAX_ATTEMPTS = 5
+LOGIN_LOCKOUT_SECONDS = 15 * 60  # 15 minutes
+
+_login_failures = collections.defaultdict(list)  # ip -> [failure timestamps]
+
+
+def _client_ip(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
+def _is_locked_out(ip: str) -> bool:
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cutoff = now - datetime.timedelta(seconds=LOGIN_LOCKOUT_SECONDS)
+    _login_failures[ip] = [t for t in _login_failures[ip] if t > cutoff]
+    return len(_login_failures[ip]) >= LOGIN_MAX_ATTEMPTS
+
+
+def _record_login_failure(ip: str):
+    _login_failures[ip].append(datetime.datetime.now(datetime.timezone.utc))
+
+
+def _clear_login_failures(ip: str):
+    _login_failures.pop(ip, None)
+
+
+# -------------------------------------------------------
+# Generic Error Responses (SECURITY: L-2)
+# -------------------------------------------------------
+# Never return raw exception text to the client — it can leak schema,
+# file paths, or other internals. Log the full exception server-side
+# (with traceback) and hand back a safe, generic message instead.
+GENERIC_ERROR_MESSAGE = "An internal error occurred. Please try again or contact support."
+
+
+def _server_error(e: Exception, context: str) -> dict:
+    logger.error(f"{context}: {e}", exc_info=True)
+    return {"success": False, "message": GENERIC_ERROR_MESSAGE}
+
+
+# -------------------------------------------------------
+# Debug Artifacts (SECURITY: L-3)
+# -------------------------------------------------------
+# Full message content and raw OCR text can contain customer/financial data.
+# Only print/persist it when DEBUG is explicitly enabled (default: off).
+def _debug_enabled() -> bool:
+    return os.getenv("DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
 def split_message(text: str, max_length: int = 1500) -> list:
@@ -104,7 +161,8 @@ def split_message(text: str, max_length: int = 1500) -> list:
 
 def whatsapp_reply(message: str or list):
 
-    print(f"\n[DEBUG_FINAL_OUTPUT] {repr(message)}\n")
+    if _debug_enabled():
+        print(f"\n[DEBUG_FINAL_OUTPUT] {repr(message)}\n")
 
     twiml = MessagingResponse()
 
@@ -147,20 +205,26 @@ async def webhook(
     # -------------------------------------------------------
     # Twilio Signature Verification
     # -------------------------------------------------------
+    # SECURITY (M-2): fail CLOSED. A missing/blank TWILIO_AUTH_TOKEN must
+    # never silently skip verification — that would let anyone POST forged
+    # WhatsApp messages straight into the conversation engine.
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    if auth_token:
-        validator = RequestValidator(auth_token)
-        signature = request.headers.get("x-twilio-signature", "")
-        proto = request.headers.get("x-forwarded-proto", "http")
-        host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
-        url = f"{proto}://{host}{request.url.path}"
-        
-        form_data = await request.form()
-        params = dict(form_data)
-        
-        if not validator.validate(url, params, signature):
-            print("🚫 Webhook Signature Verification Failed!")
-            raise HTTPException(status_code=403, detail="Invalid Twilio signature")
+    if not auth_token:
+        print("[SECURITY] Webhook rejected: TWILIO_AUTH_TOKEN is not configured on the server.")
+        raise HTTPException(status_code=500, detail="Webhook is not configured correctly.")
+
+    validator = RequestValidator(auth_token)
+    signature = request.headers.get("x-twilio-signature", "")
+    proto = request.headers.get("x-forwarded-proto", "http")
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
+    url = f"{proto}://{host}{request.url.path}"
+
+    form_data = await request.form()
+    params = dict(form_data)
+
+    if not validator.validate(url, params, signature):
+        print("🚫 Webhook Signature Verification Failed!")
+        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     print("\n" + "=" * 70)
     print("📩 Incoming WhatsApp Message")
@@ -235,32 +299,46 @@ async def webhook(
 def get_login_page(request: Request):
     if check_authenticated(request):
         return RedirectResponse(url="/admin", status_code=303)
-    return FileResponse("backend/static/login.html")
+    return FileResponse("backend/pages/login.html")
 
 @router.get("/admin")
 def get_dashboard(request: Request):
     if not check_authenticated(request):
         return RedirectResponse(url="/admin/login", status_code=303)
-    return FileResponse("backend/static/dashboard.html")
+    return FileResponse("backend/pages/dashboard.html")
 
 @router.post("/admin/login")
 async def login(request: Request, password: str = Form(...)):
     expected_password = os.getenv("DASHBOARD_PASSWORD")
     if not expected_password:
         return JSONResponse(status_code=401, content={"success": False, "message": "Dashboard password is not configured on server."})
-    
-    if password == expected_password:
+
+    ip = _client_ip(request)
+
+    # SECURITY (M-4): block brute-force password guessing.
+    if _is_locked_out(ip):
+        return JSONResponse(
+            status_code=429,
+            content={"success": False, "message": f"Too many failed login attempts. Try again in {LOGIN_LOCKOUT_SECONDS // 60} minutes."}
+        )
+
+    # SECURITY (M-4): constant-time comparison to avoid timing side-channels.
+    # Compare as bytes so non-ASCII passwords don't raise in hmac.compare_digest.
+    if hmac.compare_digest(password.encode("utf-8"), expected_password.encode("utf-8")):
+        _clear_login_failures(ip)
         token = create_access_token({"sub": "admin"})
         response = JSONResponse(content={"success": True})
         response.set_cookie(
             key="session_token",
             value=token,
             httponly=True,
+            secure=True,      # SECURITY (M-1): never send over plain HTTP
             samesite="lax",
             max_age=24*3600
         )
         return response
-    
+
+    _record_login_failure(ip)
     return JSONResponse(status_code=401, content={"success": False, "message": "Incorrect password"})
 
 @router.post("/admin/logout")
@@ -269,10 +347,17 @@ def logout():
     response.delete_cookie("session_token")
     return response
 
+_UPLOAD_EXTENSIONS = {
+    "application/pdf": ".pdf",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+}
+
+
 async def process_web_upload(file: UploadFile, doc_type: str):
     # 1. Type validation
-    allowed_types = ["application/pdf", "image/jpeg", "image/jpg", "image/png"]
-    if file.content_type not in allowed_types:
+    if file.content_type not in _UPLOAD_EXTENSIONS:
         raise HTTPException(status_code=400, detail="Invalid file type. Only PDF and JPEG/PNG images are allowed.")
 
     # 2. Size validation (max 10MB)
@@ -284,9 +369,15 @@ async def process_web_upload(file: UploadFile, doc_type: str):
     # Reset cursor after reading
     await file.seek(0)
 
-    # 3. Create temp file path
+    # 3. Create temp file path.
+    # SECURITY (M-3): never build the path from the client-supplied filename
+    # (path traversal risk, e.g. "../../../evil.py"). The extension is derived
+    # solely from the already-whitelisted content_type — it's also what
+    # parser.extract_text() branches on (".pdf" vs image), so this is both
+    # safer and functionally correct.
     os.makedirs("downloads", exist_ok=True)
-    temp_filename = f"web_{uuid.uuid4().hex}_{file.filename}"
+    ext = _UPLOAD_EXTENSIONS[file.content_type]
+    temp_filename = f"web_{uuid.uuid4().hex}{ext}"
     temp_filepath = os.path.join("downloads", temp_filename)
 
     try:
@@ -297,14 +388,16 @@ async def process_web_upload(file: UploadFile, doc_type: str):
         # 4. Parse local file
         parsed = pipeline.parser.parse_local(temp_filepath, file.content_type)
         
-        # Save raw OCR text for debug
-        debug_dir = os.path.join("downloads", "ocr_debug")
-        os.makedirs(debug_dir, exist_ok=True)
-        debug_filename = f"raw_ocr_{doc_type}_{uuid.uuid4().hex}.txt"
-        debug_filepath = os.path.join(debug_dir, debug_filename)
-        with open(debug_filepath, "w", encoding="utf-8") as f_debug:
-            f_debug.write(parsed.get("text", ""))
-        print(f"[DEBUG] Raw OCR text saved to: {debug_filepath}")
+        # Save raw OCR text for debug (dev-only: this can contain
+        # customer/financial data, so never persist it in production).
+        if _debug_enabled():
+            debug_dir = os.path.join("downloads", "ocr_debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            debug_filename = f"raw_ocr_{doc_type}_{uuid.uuid4().hex}.txt"
+            debug_filepath = os.path.join(debug_dir, debug_filename)
+            with open(debug_filepath, "w", encoding="utf-8") as f_debug:
+                f_debug.write(parsed.get("text", ""))
+            print(f"[DEBUG] Raw OCR text saved to: {debug_filepath}")
 
         # Extract structured JSON
         invoice = pipeline.extractor.extract(parsed["text"])
@@ -346,7 +439,7 @@ async def upload_sales_bill(request: Request, file: UploadFile = File(...)):
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"success": False, "message": e.detail})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+        return JSONResponse(status_code=500, content=_server_error(e, "upload_sales_bill"))
 
 @router.post("/admin/upload/grocery-invoice")
 async def upload_grocery_invoice(request: Request, file: UploadFile = File(...)):
@@ -361,7 +454,7 @@ async def upload_grocery_invoice(request: Request, file: UploadFile = File(...))
     except HTTPException as e:
         return JSONResponse(status_code=e.status_code, content={"success": False, "message": e.detail})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": str(e)})
+        return JSONResponse(status_code=500, content=_server_error(e, "upload_grocery_invoice"))
 
 @router.get("/admin/pending-documents")
 def get_pending_documents(request: Request):
@@ -462,7 +555,7 @@ async def confirm_document(id: int, request: Request):
 
     except Exception as e:
         update_pending_document_status(id, "PENDING")
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Unexpected error during processing: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, f"confirm_document (id={id})"))
 
 @router.post("/admin/reject/{id}")
 def reject_document(id: int, request: Request):
@@ -546,7 +639,7 @@ async def save_recipe_route(request: Request):
         save_recipe(dish_name, valid_ingredients)
         return {"success": True, "message": f"Recipe for '{dish_name}' saved successfully!"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "save_recipe_route"))
 
 @router.post("/admin/recipes/delete")
 async def delete_recipe_route(request: Request):
@@ -569,7 +662,7 @@ async def delete_recipe_route(request: Request):
         delete_recipe(dish_name)
         return {"success": True, "message": f"Recipe for '{dish_name}' deleted successfully!"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "delete_recipe_route"))
 
 # ==================================================
 # INVENTORY MANAGEMENT (Dashboard API)
@@ -598,7 +691,7 @@ def get_inventory_route(request: Request):
             })
         return {"success": True, "data": inventory}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "get_inventory_route"))
 
 
 @router.post("/admin/inventory/add")
@@ -649,7 +742,7 @@ async def add_inventory_route(request: Request):
         )
         return {"success": True, "message": f"Product '{product_name}' added to inventory"}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "add_inventory_route"))
 
 
 @router.post("/admin/inventory/update")
@@ -741,7 +834,7 @@ async def update_inventory_route(request: Request):
         }
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "update_inventory_route"))
 
 
 @router.get("/admin/inventory/audit-log")
@@ -774,7 +867,7 @@ def get_audit_log_route(request: Request, product_name: str = None, limit: int =
             })
         return {"success": True, "data": audit}
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "get_audit_log_route"))
 
 
 @router.post("/admin/inventory/delete")
@@ -805,7 +898,7 @@ async def delete_inventory_route(request: Request):
         return {"success": True, "message": f"Product '{product_name}' has been deactivated"}
 
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "delete_inventory_route"))
 
 @router.get("/admin/inventory-deductions/pending")
 def get_pending_deductions_route(request: Request):
@@ -819,7 +912,7 @@ def get_pending_deductions_route(request: Request):
         deductions = get_pending_inventory_deductions()
         return deductions
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Database error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, "get_pending_deductions_route"))
 
 @router.post("/admin/inventory-deductions/{id}/approve")
 def approve_deduction_route(id: int, request: Request):
@@ -836,7 +929,7 @@ def approve_deduction_route(id: int, request: Request):
         else:
             return JSONResponse(status_code=400, content={"success": False, "message": message})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Unexpected error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, f"approve_deduction_route (id={id})"))
 
 @router.post("/admin/inventory-deductions/{id}/reject")
 def reject_deduction_route(id: int, request: Request):
@@ -853,4 +946,4 @@ def reject_deduction_route(id: int, request: Request):
         else:
             return JSONResponse(status_code=400, content={"success": False, "message": message})
     except Exception as e:
-        return JSONResponse(status_code=500, content={"success": False, "message": f"Unexpected error: {str(e)}"})
+        return JSONResponse(status_code=500, content=_server_error(e, f"reject_deduction_route (id={id})"))

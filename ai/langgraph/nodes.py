@@ -1,10 +1,30 @@
 from ai.langgraph.registry import registry
 from ai.langgraph.supervisor import Supervisor
 from core.formatters import format_quantity
+from core.authz import is_authorized_user
 import asyncio
 
 
 supervisor = Supervisor()
+
+
+# H-2: agents that spend money, approve/reject purchase orders, or expose
+# financial/business reports. These are only executed for allowlisted senders
+# (AUTHORIZED_PHONES). Everything else (e.g. read-only inventory_query) stays
+# open. Fails CLOSED: if the phone is not authorized, these are never run.
+RESTRICTED_AGENTS = {
+    "coo",
+    "decision",
+    "dashboard",
+    "procurement",
+    "purchase_editor",
+    "purchase_approval",
+    "purchase_rejection",
+    "purchase_history",
+    "auto_order",
+    "receive_order",
+    "restaurant_memory",
+}
 
 
 def supervisor_node(state):
@@ -24,9 +44,24 @@ def execute_agents(state):
 
     results = {}
 
+    # H-2: authorize the sender for money/approval/financial agents.
+    phone = state.get("phone", "")
+    authorized = is_authorized_user(phone)
+    blocked = []
+
     for agent in state["selected_agents"]:
 
+        # Skip restricted agents entirely for unauthorized senders.
+        if agent in RESTRICTED_AGENTS and not authorized:
+            blocked.append(agent)
+            continue
+
         instance = registry.get(agent)
+
+        # Defense in depth: a deregistered agent (e.g. inventory_manager after
+        # H-1) is not routable and must never be executed. Skip it safely.
+        if instance is None:
+            continue
 
         # Purchase Editor
         if agent == "purchase_editor":
@@ -79,12 +114,30 @@ def execute_agents(state):
 
             )
 
+    # H-2: if the only thing the router selected was restricted and the sender
+    # is not authorized, return a clear denial instead of silently doing nothing.
+    if not results and blocked:
+        results["unauthorized"] = {
+            "message": (
+                "❌ *Not Authorized*\n\n"
+                "Ordering, purchase-order approvals, and business/financial "
+                "reports are restricted to authorized users.\n\n"
+                "Contact your administrator if you should have access."
+            )
+        }
+
     state["results"] = results
 
     return state
 
 
 def response_node(state):
+
+    if "unauthorized" in state["results"]:
+
+        state["response"] = state["results"]["unauthorized"]["message"]
+
+        return state
 
     if "inventory_manager" in state["results"]:
 

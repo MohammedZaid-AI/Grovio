@@ -105,10 +105,105 @@ class SwiggyService:
         return await client.get_cart()
 
     # ------------------------------------
+    # Payment Options
+    # ------------------------------------
+
+    async def get_payment_options(self):
+
+        client = await self.initialize()
+
+        result = await client.get_payment_options()
+
+        if getattr(result, "isError", False):
+
+            # Log full detail server-side to diagnose tool name / argument issues.
+            raw_text = None
+            content = getattr(result, "content", None)
+            if content and getattr(content[0], "text", None):
+                raw_text = content[0].text
+            print(f"[SwiggyService] get_payment_options FAILED. "
+                  f"text={raw_text!r} structured={getattr(result, 'structuredContent', None)!r}")
+
+            return {
+                "success": False,
+                "message": "⚠️ We couldn't load the available payment methods right now. Please try again in a few minutes."
+            }
+
+        return self._parse_payment_options(result)
+
+    def _parse_payment_options(self, result):
+        """Normalize the Swiggy get_payment_options response into a simple list.
+
+        Returns:
+            {"success": True, "options": [{"id": <method value>, "label": <text>}, ...]}
+            or a friendly error dict on failure.
+
+        Defensive: the exact Swiggy schema for payment options is not fixed, so
+        we look for the list under several common keys and extract an id/label
+        from several common field names.
+        """
+        try:
+            structured = getattr(result, "structuredContent", None) or {}
+
+            raw_list = None
+            for key in ("paymentOptions", "payment_options", "paymentMethods",
+                        "payment_methods", "options", "methods"):
+                if isinstance(structured.get(key), list):
+                    raw_list = structured[key]
+                    break
+
+            # Fallback: parse the JSON text payload.
+            if raw_list is None:
+                content = getattr(result, "content", None)
+                if content and getattr(content[0], "text", None):
+                    data = json.loads(content[0].text)
+                    payload = data.get("data", data) if isinstance(data, dict) else data
+                    if isinstance(payload, dict):
+                        for key in ("paymentOptions", "payment_options", "paymentMethods",
+                                    "payment_methods", "options", "methods"):
+                            if isinstance(payload.get(key), list):
+                                raw_list = payload[key]
+                                break
+                    elif isinstance(payload, list):
+                        raw_list = payload
+
+            options = []
+            for entry in (raw_list or []):
+                if isinstance(entry, str):
+                    options.append({"id": entry, "label": entry})
+                    continue
+                method_id = (
+                    entry.get("id") or entry.get("method") or entry.get("value")
+                    or entry.get("code") or entry.get("type") or entry.get("paymentMethod")
+                )
+                label = (
+                    entry.get("displayName") or entry.get("name") or entry.get("label")
+                    or entry.get("title") or method_id
+                )
+                if method_id:
+                    options.append({"id": method_id, "label": label})
+
+            if not options:
+                print(f"[SwiggyService] No payment options parsed from result: {structured}")
+                return {
+                    "success": False,
+                    "message": "We couldn't load the available payment methods right now. Please try again in a few minutes."
+                }
+
+            return {"success": True, "options": options}
+
+        except Exception as e:
+            print(f"[SwiggyService] Exception parsing payment options: {e}")
+            return {
+                "success": False,
+                "message": "We couldn't load the available payment methods right now. Please try again in a few minutes."
+            }
+
+    # ------------------------------------
     # Checkout
     # ------------------------------------
 
-    async def checkout(self):
+    async def checkout(self, payment_method=None):
 
         client = await self.initialize()
 
@@ -116,7 +211,9 @@ class SwiggyService:
 
         result = await client.checkout(
 
-            address_id
+            address_id,
+
+            payment_method=payment_method
 
         )
 
@@ -162,7 +259,7 @@ class SwiggyService:
                     "success": False,
                     "order_placed": False,
                     "code": "EMPTY_RESPONSE",
-                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
                 }
             
             content = getattr(result, "content", None)
@@ -174,7 +271,7 @@ class SwiggyService:
                     "success": False,
                     "order_placed": False,
                     "code": "EMPTY_RESPONSE",
-                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
                 }
             
             raw_text = content[0].text if hasattr(content[0], "text") else getattr(content[0], "text", None)
@@ -190,7 +287,7 @@ class SwiggyService:
                     "success": False,
                     "order_placed": False,
                     "code": "EMPTY_RESPONSE",
-                    "message": "Empty response from Swiggy MCP — check authentication/session validity. Couldn't reach the store, please retry."
+                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
                 }
 
             data = json.loads(raw_text)
@@ -249,13 +346,25 @@ class SwiggyService:
 
                 "code": "INVALID_RESPONSE",
 
-                "message": f"Unable to parse Swiggy checkout response: {str(e)}. Couldn't reach the store, please retry."
+                "message": "⚠️ We couldn't confirm your order with the store. Please try again in a few minutes."
 
             }
 
     # ------------------------------------
     # Error
     # ------------------------------------
+
+    # User-facing messages per error code. The raw Swiggy error (which can
+    # contain internal Report IDs like "ERR-MRBXZQHQ...") is NEVER shown to
+    # the user — it is only logged server-side. See fix for the raw-error leak.
+    _FRIENDLY_ERROR_MESSAGES = {
+        "LIMIT_EXCEEDED": "⚠️ One or more items exceed the maximum quantity allowed per order. Please reduce the quantity and try again.",
+        "OUT_OF_STOCK": "⚠️ One or more items are out of stock right now. Please try again later or pick an alternative.",
+        "PARTIAL_AVAILABILITY": "⚠️ Some items are only partially available. I can help you adjust the order.",
+        "STORE_UNAVAILABLE": "⚠️ The store is currently unavailable. Please try again in a little while.",
+        "NO_PAYMENT_METHOD": "⚠️ Please choose a payment method before placing the order.",
+        "UNKNOWN": "⚠️ We couldn't complete the checkout right now. Please try again in a few minutes.",
+    }
 
     async def _parse_error(
 
@@ -271,11 +380,16 @@ class SwiggyService:
 
             error = result.content[0].text
 
+        # Log the raw error server-side for debugging (never sent to the user).
+        print(f"[SwiggyService] Raw checkout error from Swiggy MCP: {error}")
+
         decision = await checkout_recovery.execute(
 
             error
 
         )
+
+        error_lower = error.lower()
 
         code = "UNKNOWN"
 
@@ -287,13 +401,17 @@ class SwiggyService:
 
             code = "OUT_OF_STOCK"
 
-        elif "partially available" in error.lower():
+        elif "partially available" in error_lower:
 
             code = "PARTIAL_AVAILABILITY"
 
-        elif "store is currently unavailable" in error.lower():
+        elif "store is currently unavailable" in error_lower:
 
             code = "STORE_UNAVAILABLE"
+
+        elif "payment method" in error_lower:
+
+            code = "NO_PAYMENT_METHOD"
 
         return {
 
@@ -301,7 +419,10 @@ class SwiggyService:
 
             "code": code,
 
-            "message": error,
+            # Clean, user-friendly message only. Raw error kept separately for logs.
+            "message": self._FRIENDLY_ERROR_MESSAGES.get(code, self._FRIENDLY_ERROR_MESSAGES["UNKNOWN"]),
+
+            "raw_error": error,
 
             "decision": decision
 

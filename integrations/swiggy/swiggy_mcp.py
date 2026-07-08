@@ -253,6 +253,23 @@ class SwiggyInstamart:
 
         return cart
 
+    async def get_payment_options(
+    self,
+    address_id=None
+    ):
+
+        # Payment options are address-scoped on Swiggy Instamart, so pass the
+        # same address used for the cart/checkout.
+        if address_id is None:
+            address_id = await self.get_address_id()
+
+        return await self.session.call_tool(
+            "get_payment_options",
+            {
+                "addressId": address_id
+            }
+        )
+
     async def checkout(
     self,
     address_id,

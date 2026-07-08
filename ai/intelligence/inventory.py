@@ -27,23 +27,34 @@ class Inventory:
 
         for row in self.inventory:
 
+            stock = row[2]
+            minimum = row[3]
+
             items.append({
 
                 "product": row[1],
 
-                "stock": row[2],
+                "stock": stock,
 
-                "minimum": row[3],
+                "minimum": minimum,
 
                 "unit": row[4],
 
                 "status":
 
-                    "LOW"
+                    "UNKNOWN"
 
-                    if row[2] <= row[3]
+                    if minimum is None
 
-                    else "HEALTHY"
+                    else (
+
+                        "LOW"
+
+                        if stock <= minimum
+
+                        else "HEALTHY"
+
+                    )
 
             })
 
@@ -79,23 +90,22 @@ class Inventory:
 
     def health_score(self):
 
-        if not self.inventory:
+        # Items with no minimum configured are unknowable, not healthy —
+        # excluded from both numerator and denominator so missing config
+        # can't quietly inflate the score. See security fix H-1/H-2 follow-up.
+        trackable = [row for row in self.inventory if row[3] is not None]
+
+        if not trackable:
 
             return 0
 
-        healthy = 0
-
-        for row in self.inventory:
-
-            if row[2] > row[3]:
-
-                healthy += 1
+        healthy = sum(1 for row in trackable if row[2] > row[3])
 
         return round(
 
             healthy /
 
-            len(self.inventory) * 100,
+            len(trackable) * 100,
 
             1
 

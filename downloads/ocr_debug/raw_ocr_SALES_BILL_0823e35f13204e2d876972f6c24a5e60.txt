@@ -1,0 +1,43 @@
+Sunrise Foods Pvt Ltd
+Palm Court; Delni; Gujarat 856604
+RECEIP T
+Name
+Pocja Iyer
+Inv0 Ce
+INV-2026-0423
+Table:
+Dale
+12/02/2026
+Item
+Price
+Qty
+Total
+Masala Dosa
+{499
+21996
+Masala Dosa
+2499
+2998
+Paneer Butter Masala
+<399
+8798
+Paneer Butter Masala
+{99
+2594
+Cold Coffee
+780
+2480
+Masala Dosa
+{80
+<320
+Sub-Total:
+25,186.00
+CGST:
+SGST: 2.5% <129.65
+SGST:
+SGST: 2.59 ?129.65
+Mode: card
+Total: ?5,445.30
+GSTIN; 30xicti55o858z5
+THANK YOU: ViSIT AGAIN;
+THANK YOU

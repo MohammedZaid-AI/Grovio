@@ -39,7 +39,10 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 from backend.app import app
 
-client = TestClient(app)
+# https base_url: the session cookie is Secure (see security fix M-1), so a
+# plain http TestClient would never receive it back on subsequent requests.
+# This matches real deployments, which run behind HTTPS (see CLAUDE.md).
+client = TestClient(app, base_url="https://testserver")
 
 print("\n=============================================")
 print("RUNNING GROVIO ADMIN DASHBOARD INTEGRATION TESTS")
@@ -278,25 +281,48 @@ def run_tests():
     assert resp.status_code == 401, f"Expected 401, got {resp.status_code}"
     print("  - Access blocked post-logout [OK]")
 
-    # 5. Verify WhatsApp Webhook Image Redirection
-    print("\nTest F: Verifying WhatsApp Webhook Image Redirection...")
+    # 5. Verify WhatsApp Webhook: signature verification + image redirection
+    print("\nTest F: Verifying WhatsApp Webhook Signature Verification & Image Redirection...")
     old_token = os.environ.get("TWILIO_AUTH_TOKEN")
-    if "TWILIO_AUTH_TOKEN" in os.environ:
-        del os.environ["TWILIO_AUTH_TOKEN"]
+
+    webhook_data = {
+        "NumMedia": "1",
+        "MediaUrl0": "http://example.com/invoice.jpg",
+        "MediaContentType0": "image/jpeg",
+        "From": "+1234567890"
+    }
+
     try:
-        resp = client.post("/webhook", data={
-            "NumMedia": "1",
-            "MediaUrl0": "http://example.com/invoice.jpg",
-            "MediaContentType0": "image/jpeg",
-            "From": "+1234567890"
-        })
+        # 5a. SECURITY (M-2): missing TWILIO_AUTH_TOKEN must fail CLOSED (500),
+        # never silently skip verification and process the request anyway.
+        if "TWILIO_AUTH_TOKEN" in os.environ:
+            del os.environ["TWILIO_AUTH_TOKEN"]
+        resp = client.post("/webhook", data=webhook_data)
+        assert resp.status_code == 500, f"Expected 500 (fail closed), got {resp.status_code}"
+        print("  - Missing TWILIO_AUTH_TOKEN rejects webhook with 500 (fail closed) [OK]")
+
+        # 5b. A request with an INVALID signature must be rejected (403).
+        os.environ["TWILIO_AUTH_TOKEN"] = "test-twilio-auth-token"
+        resp = client.post("/webhook", data=webhook_data, headers={"X-Twilio-Signature": "not-a-real-signature"})
+        assert resp.status_code == 403, f"Expected 403, got {resp.status_code}"
+        print("  - Invalid Twilio signature rejected with 403 [OK]")
+
+        # 5c. A request with a CORRECTLY signed payload must still succeed end-to-end.
+        from twilio.request_validator import RequestValidator
+        validator = RequestValidator(os.environ["TWILIO_AUTH_TOKEN"])
+        webhook_url = "http://testserver/webhook"  # matches routes.py's url construction for this TestClient
+        valid_signature = validator.compute_signature(webhook_url, webhook_data)
+
+        resp = client.post("/webhook", data=webhook_data, headers={"X-Twilio-Signature": valid_signature})
         assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
         assert "Grovio Document Upload" in resp.text, "Expected dashboard redirect info in reply"
         assert "/admin" in resp.text, "Expected dashboard URL in redirect reply"
-        print("  - WhatsApp incoming media redirected to dashboard URL [OK]")
+        print("  - Correctly signed request: WhatsApp media redirected to dashboard URL [OK]")
     finally:
         if old_token:
             os.environ["TWILIO_AUTH_TOKEN"] = old_token
+        elif "TWILIO_AUTH_TOKEN" in os.environ:
+            del os.environ["TWILIO_AUTH_TOKEN"]
 
     # 6. Verify Self-Correcting LLM Extraction & Duplicate Items
     print("\nTest G: Verifying Self-Correcting LLM Extraction & Duplicate Items...")

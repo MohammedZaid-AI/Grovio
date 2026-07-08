@@ -10,7 +10,10 @@ from ai.agents.auto_order_agent import AutoOrderAgent
 from ai.agents.receive_order_agent import ReceiveOrderAgent
 from ai.agents.restaurant_memory_agent import RestaurantMemoryAgent
 from ai.agents.inventory_query_agent import InventoryQueryAgent
-from ai.agents.inventory_manager_agent import InventoryManagerAgent
+# InventoryManagerAgent is intentionally NOT imported/registered here.
+# It mutates inventory and must never be reachable via the LLM router.
+# The only entrypoints are the admin-gated regex path in backend/chat.py
+# and the JWT-protected dashboard. See security fix H-1.
 
 class AgentRegistry:
 
@@ -45,8 +48,6 @@ class AgentRegistry:
             "restaurant_memory": RestaurantMemoryAgent(),
 
             "inventory_query": InventoryQueryAgent(),
-
-            "inventory_manager": InventoryManagerAgent(),
 
         }
 

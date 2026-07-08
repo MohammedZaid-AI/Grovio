@@ -32,7 +32,14 @@ def init_db():
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_invoices(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT,\n\n        invoice_number TEXT,\n\n        invoice_date TEXT,\n\n        total_amount REAL,\n\n        created_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_items(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        invoice_id INTEGER,\n\n        product TEXT,\n\n        quantity REAL,\n\n        unit TEXT,\n\n        unit_price REAL,\n\n        total REAL,\n\n        FOREIGN KEY(invoice_id)\n        REFERENCES purchase_invoices(id)\n\n    )\n    ')
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS product_price_history(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product TEXT,\n\n        supplier TEXT,\n\n        price REAL,\n\n        purchase_date TEXT\n\n    )\n    ')
-        cursor.execute('\n    CREATE TABLE IF NOT EXISTS inventory(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT UNIQUE,\n\n        current_stock REAL,\n\n        minimum_stock REAL,\n\n        unit TEXT,\n\n        updated_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
+        cursor.execute('\n    CREATE TABLE IF NOT EXISTS inventory(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        product_name TEXT UNIQUE,\n\n        current_stock REAL,\n\n        minimum_stock REAL,\n\n        unit TEXT,\n\n        is_active INTEGER DEFAULT 1,\n\n        updated_at TIMESTAMP\n        DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ')
+
+        # Safe schema migration for inventory table
+        cursor.execute("PRAGMA table_info(inventory)")
+        inv_columns = [row[1] for row in cursor.fetchall()]
+        if 'is_active' not in inv_columns:
+            cursor.execute("ALTER TABLE inventory ADD COLUMN is_active INTEGER DEFAULT 1")
+
         cursor.execute("\n    CREATE TABLE IF NOT EXISTS purchase_orders(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        supplier TEXT NOT NULL,\n\n        status TEXT DEFAULT 'DRAFT',\n\n        total_amount REAL DEFAULT 0,\n\n        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n\n    )\n    ")
         cursor.execute('\n    CREATE TABLE IF NOT EXISTS purchase_order_items(\n\n        id INTEGER PRIMARY KEY AUTOINCREMENT,\n\n        purchase_order_id INTEGER,\n\n        product TEXT,\n\n        quantity REAL,\n\n        unit TEXT,\n\n        estimated_price REAL,\n\n        subtotal REAL,\n\n        FOREIGN KEY(purchase_order_id)\n            REFERENCES purchase_orders(id)\n\n    )\n    ')
 
@@ -445,7 +452,7 @@ def update_inventory(product_name, quantity_change):
 def get_inventory():
     conn = get_connection()
     try:
-        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        ORDER BY product_name\n        ').fetchall()
+        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE is_active = 1\n\n        ORDER BY product_name\n        ').fetchall()
         return rows
     finally:
         conn.close()
@@ -461,7 +468,7 @@ def get_product_inventory(product_name):
 def get_low_stock_items():
     conn = get_connection()
     try:
-        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE minimum_stock > 0 AND current_stock <= minimum_stock\n        ').fetchall()
+        rows = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE is_active = 1 AND minimum_stock > 0 AND current_stock <= minimum_stock\n        ').fetchall()
         return rows
     finally:
         conn.close()
@@ -506,11 +513,9 @@ def delete_inventory(product_name):
     """Soft-delete an inventory item (mark as inactive, preserve history)."""
     conn = get_connection()
     try:
-        # Set current_stock to 0 and mark as deleted (or could add is_active column)
-        # For now, we'll just set stock to 0
         conn.execute('''
         UPDATE inventory
-        SET current_stock = 0, updated_at = CURRENT_TIMESTAMP
+        SET is_active = 0, updated_at = CURRENT_TIMESTAMP
         WHERE product_name = ?
         ''', (product_name,))
         conn.commit()
