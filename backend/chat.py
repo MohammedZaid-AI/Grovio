@@ -23,6 +23,20 @@ UNAUTHORIZED_ACTION_MESSAGE = (
 )
 
 
+# ----------------------------------------------------------------------
+# Payment mode (MVP product decision)
+# ----------------------------------------------------------------------
+# For the MVP every order is placed as Cash on Delivery: the user is never
+# asked how they want to pay. The online-payment machinery (get_payment_options,
+# the `payment_selection` stage, UPI intent / QR handling and the parser's
+# payment fields) is intentionally KEPT INTACT and merely disabled behind this
+# flag — flip it back to True to re-enable the payment menu with no other change.
+PAYMENT_SELECTION_ENABLED = False
+
+# The Swiggy paymentMethod GROUP value for Cash on Delivery.
+COD_PAYMENT_METHOD = "Cash"
+
+
 def _is_inventory_command(message: str) -> bool:
     """Detect if message is an inventory SET/ADD/REMOVE command."""
     msg_lower = message.lower().strip()
@@ -432,31 +446,51 @@ async def process_message(
 
             shopping_session.advance_lifecycle(phone, "awaiting_confirmation")
 
-            # Swiggy requires an explicit payment method — never default one.
-            # Try to fetch the live options and let the user choose.
-            payment_result = await service.get_payment_options()
+            # ---- Online payments (disabled for MVP; see PAYMENT_SELECTION_ENABLED)
+            if PAYMENT_SELECTION_ENABLED:
 
-            if payment_result.get("success") and payment_result.get("options"):
+                # Swiggy requires an explicit payment method — never default one.
+                # Try to fetch the live options and let the user choose.
+                payment_result = await service.get_payment_options()
 
-                options = payment_result["options"]
+                if payment_result.get("success") and payment_result.get("options"):
 
-                session = shopping_session.get(phone)
-                if session is not None:
-                    session["payment_options"] = options
+                    options = payment_result["options"]
 
-                shopping_session.set_stage(phone, "payment_selection")
+                    session = shopping_session.get(phone)
+                    if session is not None:
+                        session["payment_options"] = options
 
-                return _format_payment_options(options)
+                    shopping_session.set_stage(phone, "payment_selection")
 
-            # Fallback: payment options are unavailable for this account
-            # (Swiggy-side whitelist / kill switch). Offer Cash on Delivery
-            # rather than dead-ending the order, but make it explicit.
-            shopping_session.set_stage(phone, "cod_confirm")
+                    return _format_payment_options(options)
 
-            return (
-                "💵 *Proceeding with Cash on Delivery* (online payment options are "
-                "currently unavailable).\n\n"
-                "Reply YES to confirm and place the order, or NO to cancel."
+                # Fallback: payment options are unavailable for this account
+                # (Swiggy-side whitelist / kill switch). Offer Cash on Delivery
+                # rather than dead-ending the order, but make it explicit.
+                shopping_session.set_stage(phone, "cod_confirm")
+
+                return (
+                    "💵 *Proceeding with Cash on Delivery* (online payment options are "
+                    "currently unavailable).\n\n"
+                    "Reply YES to confirm and place the order, or NO to cancel."
+                )
+
+            # ---- MVP: Cash on Delivery only. The user already confirmed the
+            # cart with YES, so place the order now — no payment menu, no extra
+            # confirmation step.
+
+            # Duplicate-checkout prevention (Problem 6): a second 'yes' must not
+            # place a second order.
+            if not shopping_session.begin_checkout(phone):
+                return "⏳ Your order is already being placed. Please hold on."
+
+            shopping_session.advance_lifecycle(phone, "payment_processing")
+
+            result = await _checkout_with_revalidation(
+                service,
+                shopping_session.selected(phone),
+                payment_method=COD_PAYMENT_METHOD,
             )
 
         # ----------------------------------------------
@@ -678,17 +712,40 @@ async def process_message(
 
             if result.get("success"):
 
-                return (
+                # Name the method actually used. In the MVP this is always Cash
+                # on Delivery; if online payments are re-enabled the confirmation
+                # reflects the real method instead of hardcoding COD.
+                payment = result.get("payment")
+                if not payment and not PAYMENT_SELECTION_ENABLED:
+                    payment = COD_PAYMENT_METHOD
 
-                    "✅ Order placed successfully!\n\n"
+                if str(payment).lower() in ("cash", "cod"):
+                    placed = "Your grocery order has been placed successfully using Cash on Delivery."
+                elif payment:
+                    placed = f"Your grocery order has been placed successfully using {payment}."
+                else:
+                    placed = "Your grocery order has been placed successfully."
 
-                    f"Order ID: {result.get('order_id')}\n"
+                lines = [
+                    "✅ *Order Confirmed!*",
+                    "",
+                    placed,
+                    "",
+                    f"Order ID: {result.get('order_id')}",
+                ]
 
-                    f"Status: {result.get('status')}\n"
+                total = result.get("total")
+                if total:
+                    lines.append(f"Total: ₹{total}")
 
-                    f"Total: ₹{result.get('total')}"
+                lines += [
+                    "",
+                    "The store will process your order shortly.",
+                    "",
+                    "Thank you!",
+                ]
 
-                )
+                return "\n".join(lines)
 
             else:
 

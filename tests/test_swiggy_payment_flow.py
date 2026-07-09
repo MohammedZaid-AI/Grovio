@@ -117,6 +117,14 @@ print("=" * 78)
 
 from backend.chat import process_message
 from ai.shopping.shopping_session import shopping_session
+import backend.chat as chat_module
+
+# The MVP places every order as Cash on Delivery and never shows a payment menu
+# (backend.chat.PAYMENT_SELECTION_ENABLED = False). The online-payment machinery
+# is kept intact for a future release, so these scenarios enable it explicitly to
+# keep that path under regression test. MVP (COD-only) behaviour is covered by
+# tests/test_cod_only_checkout.py.
+chat_module.PAYMENT_SELECTION_ENABLED = True
 
 
 def _seed_checkout_session(phone):
@@ -169,7 +177,7 @@ with patch.object(SwiggyService, "build_cart", fake_build_cart), \
     check("selecting UPI app -> checkout(paymentMethod='UPI', intentApp='gpay://upi/')",
           len(checkout_calls) == 1 and checkout_calls[0]["payment_method"] == "UPI"
           and checkout_calls[0]["intent_app"] == "gpay://upi/")
-    check("order confirmation returned", "Order placed successfully" in r2)
+    check("order confirmation returned", "Order Confirmed" in r2)
 
 
 # ---- Scenario B: options unavailable -> COD fallback, user confirms ----
@@ -192,7 +200,7 @@ with patch.object(SwiggyService, "build_cart", fake_build_cart), \
     r2 = asyncio.run(process_message(phone_b, "yes"))
     check("confirming -> checkout(paymentMethod='Cash')",
           len(checkout_calls) == 1 and checkout_calls[0]["payment_method"] == "Cash")
-    check("order confirmation returned", "Order placed successfully" in r2)
+    check("order confirmation returned", "Order Confirmed" in r2)
 
 
 # ---- Scenario C: COD fallback, user declines ----

@@ -272,7 +272,7 @@ with patch.object(SwiggyService, "build_cart", fake_build), \
      patch("ai.memory.memory_trainer.memory_trainer.train", lambda *a, **k: None):
     resp = asyncio.run(chat.process_message(PH, "yes"))
 check("COD confirm 'yes' places the order exactly once",
-      "Order placed successfully" in resp and placed["n"] == 1)
+      "Order Confirmed" in resp and placed["n"] == 1)
 check("session ends after a successful order (no lingering state)",
       not shopping_session.has_session(PH))
 
