@@ -1,220 +1,193 @@
 import json
-from ai.memory.restaurant_memory import restaurant_memory
+import re
+
 from core.llm import llm
-from core.config import Config
+from ai.memory.restaurant_memory import restaurant_memory
 
 
-PRODUCT_SELECTION_PROMPT = """
-You are Grovio's Product Selection AI.
+# The ONLY component that makes preference decisions. It reasons semantically
+# over brand, category, pack size, price, requested quantity, availability,
+# popularity and restaurant memory. It understands that "coke" means
+# "Coca-Cola" through meaning, NOT through alias tables or string matching.
+SEMANTIC_RANKING_PROMPT = """
+You are Grovio's Product Selection intelligence — the single decision engine
+for choosing which product best fulfils a restaurant's grocery request.
 
-The user requested one grocery item.
+You receive:
+1. requested_item        — what the user asked for (name + quantity).
+2. restaurant_memory     — learned preferences per category (preferred brand,
+                           preferred pack size, preferred supplier, favourites,
+                           previously rejected products).
+3. candidates            — the products returned by the store, each with an
+                           index, name, pack_size, price and availability.
 
-You will receive:
+HOW TO DECIDE (reason like a restaurant procurement head):
+- Understand the request SEMANTICALLY. "Coke" means Coca-Cola. "Curd" means
+  yoghurt. Infer brand, category and intent from meaning — never from a fixed
+  alias list and never from raw string overlap.
+- Weigh ALL of: semantic match to the request, brand, category, restaurant
+  history / preferred brand for this category, preferred pack size, requested
+  quantity vs pack size, price, popularity and availability.
+- Prefer the restaurant's learned preference for the category WHEN it genuinely
+  matches the request, but the semantic meaning of the request always wins over
+  a stale preference.
+- Ignore unavailable candidates.
 
-1. Restaurant memory
-2. User's requested item
-3. Swiggy search results
+DECISION:
+- If exactly one candidate is clearly the best fulfilment of the request,
+  choose action "auto_select" and give its index.
+- If two or more candidates are genuinely, comparably good (a real tie the
+  owner would want to resolve), choose action "ask_user".
+- Confidence is your own 0-100 certainty that the auto_select is correct.
 
-Restaurant memory contains:
-
-- Preferred brands
-- Frequently purchased products
-- Purchase frequency
-- Supplier preferences
-
-Use the restaurant memory whenever possible.
-
-If the preferred brand exists in the product list,
-prefer that product.
-
-Only ask the user when multiple equally good choices exist.
-
-Your job is to determine whether one product is clearly the best match.
-
-If one product is clearly the intended product,
-auto select it.
-
-If multiple products look equally suitable,
-ask the user.
-
-Return ONLY JSON.
-
-Output format:
-
-{
-    "action":"auto_select",
-    "index":0,
-    "confidence":98,
-    "reason":"..."
-}
-
-or
+Return ONLY JSON in this exact shape:
 
 {
-    "action":"ask_user",
-    "confidence":65,
-    "reason":"Multiple good matches."
+  "category": "<inferred category, e.g. cola>",
+  "ranked": [
+    {"index": 0, "score": 96, "reason": "..."},
+    {"index": 2, "score": 60, "reason": "..."}
+  ],
+  "decision": {
+    "action": "auto_select",
+    "index": 0,
+    "confidence": 96,
+    "reason": "..."
+  }
 }
 
-Never explain.
-
-Never use markdown.
-
-Return JSON only.
+Never explain outside the JSON. Never use markdown. Return JSON only.
 """
 
 
 class ProductSelectionAgent:
+    """
+    Single-engine semantic product selector.
 
-    def extract_brand(self, product_name):
-        import re
-        tokens = product_name.split()
-        brand = "Unknown"
-        if tokens:
-            for token in tokens:
-                if re.search(r"\d", token):
-                    continue
-                if token.lower() in [
-                    "kg", "g", "ml", "l", "ltr", "ltrs", "litre", "litres", 
-                    "pc", "pcs", "pack", "packs", "no", "no.", "size", "wt", "vol"
-                ]:
-                    continue
-                brand = token
-                break
-            if brand == "Unknown" and tokens:
-                brand = tokens[0]
-        return brand
+    The LLM is the ONLY component that makes a preference decision. The code
+    that follows performs BUSINESS VALIDATION ONLY: it may reject an impossible
+    choice (an out-of-range index or an unavailable product) but it must NEVER
+    override a valid semantic decision because "another product also looks
+    good". That second-guessing rule engine has been removed.
+    """
 
-    async def execute(
+    async def execute(self, query, products):
 
-        self,
-
-        query,
-
-        products
-
-    ):
-
-        formatted = []
-
-        for i, product in enumerate(products):
-
-            variant = product["variations"][0]
-
-            formatted.append(
-
-                {
-
-                    "index": i,
-
-                    "name": product["displayName"],
-
-                    "quantity": variant["quantityDescription"],
-
-                    "price": variant["price"]["offerPrice"]
-
-                }
-
-            )
-
-        memory = restaurant_memory.get()
+        candidates = self._normalize(products)
 
         response = llm.chat(
-
-            system=PRODUCT_SELECTION_PROMPT,
-
+            system=SEMANTIC_RANKING_PROMPT,
             user=json.dumps(
-
                 {
-
-                    "restaurant_memory": memory,
-
                     "requested_item": query,
-
-                    "products": formatted
-
+                    "restaurant_memory": restaurant_memory.summary(),
+                    "candidates": candidates,
                 },
-
-                indent=2
-
+                indent=2,
             ),
-
-            temperature=0
-
+            temperature=0,
         )
 
+        decision = self._parse(response)
+        decision = self._validate(decision, candidates)
+
+        print(
+            f"\n🧠 [Product Selection] '{query}' -> {decision.get('action')} "
+            f"(index={decision.get('index')}, category={decision.get('category')}, "
+            f"confidence={decision.get('confidence')})\n"
+        )
+
+        return decision
+
+    # ------------------------------------------------------------------
+    # Candidate retrieval / normalization
+    # ------------------------------------------------------------------
+    def _normalize(self, products):
+        candidates = []
+        for i, product in enumerate(products):
+            variants = product.get("variations") or [{}]
+            variant = variants[0]
+            price = None
+            try:
+                price = variant["price"]["offerPrice"]
+            except Exception:
+                price = variant.get("price")
+            available = product.get("available")
+            if available is None:
+                available = variant.get("inStock", True)
+            candidates.append(
+                {
+                    "index": i,
+                    "name": product.get("displayName"),
+                    "pack_size": variant.get("quantityDescription"),
+                    "price": price,
+                    "available": available,
+                }
+            )
+        return candidates
+
+    # ------------------------------------------------------------------
+    # Parse the model's JSON (tolerant of a flat or nested shape)
+    # ------------------------------------------------------------------
+    def _parse(self, response):
         try:
-
-            import re
-            json_match = re.search(r"({.*})|(\[.*\])", response, re.DOTALL)
-            clean_response = json_match.group(0) if json_match else response
-            decision = json.loads(clean_response)
-
+            match = re.search(r"\{.*\}", response, re.DOTALL)
+            data = json.loads(match.group(0) if match else response)
         except Exception:
+            return {"action": "ask_user", "confidence": 0,
+                    "reason": "Could not parse the ranking response."}
 
-            decision = {
+        decision = data.get("decision", data)
+        if not isinstance(decision, dict):
+            return {"action": "ask_user", "confidence": 0,
+                    "reason": "Malformed ranking response."}
+        decision.setdefault("category", data.get("category"))
+        decision.setdefault("ranked", data.get("ranked"))
+        return decision
 
+    # ------------------------------------------------------------------
+    # Business validation — reject IMPOSSIBLE choices only
+    # ------------------------------------------------------------------
+    def _validate(self, decision, candidates):
+        action = decision.get("action")
+
+        if action != "auto_select":
+            decision["action"] = "ask_user"
+            return decision
+
+        index = decision.get("index")
+
+        # Impossible: missing / out-of-range index.
+        if not isinstance(index, int) or index < 0 or index >= len(candidates):
+            return {
                 "action": "ask_user",
-
-                "confidence": 0
-
+                "confidence": decision.get("confidence", 0),
+                "reason": "The chosen product index is out of range.",
+                "category": decision.get("category"),
             }
 
-        # Apply conservative post-processing validation
-        original_decision = decision.copy()
-        threshold = getattr(Config, "AUTO_SELECT_CONFIDENCE_THRESHOLD", 98)
+        # Impossible: chosen product is unavailable. Fall through to the next
+        # available candidate in the model's own ranked order (feasibility, not
+        # a preference override); otherwise defer to the user.
+        if candidates[index].get("available") is False:
+            for r in (decision.get("ranked") or []):
+                ri = r.get("index")
+                if (isinstance(ri, int) and 0 <= ri < len(candidates)
+                        and candidates[ri].get("available") is not False):
+                    decision["index"] = ri
+                    decision["reason"] = (
+                        "Top pick unavailable; selected the next available "
+                        "ranked candidate."
+                    )
+                    return decision
+            return {
+                "action": "ask_user",
+                "confidence": decision.get("confidence", 0),
+                "reason": "The preferred product is currently unavailable.",
+                "category": decision.get("category"),
+            }
 
-        if decision.get("action") == "auto_select":
-            selected_index = decision.get("index", 0)
-            confidence = decision.get("confidence", 0)
-
-            if selected_index < 0 or selected_index >= len(products):
-                decision = {
-                    "action": "ask_user",
-                    "confidence": 0,
-                    "reason": "AI selected index out of range."
-                }
-            elif confidence < threshold:
-                decision = {
-                    "action": "ask_user",
-                    "confidence": confidence,
-                    "reason": f"Confidence {confidence} is below the threshold of {threshold}."
-                }
-            elif len(products) > 1:
-                # Multiple candidates: check for dominant historical preference
-                preferred_brands = list(memory.get("preferred_brands", {}).values())
-                favorite_products = memory.get("favorite_products", {})
-
-                selected_product = products[selected_index]
-                selected_brand = self.extract_brand(selected_product["displayName"])
-
-                has_brand_pref = selected_brand in preferred_brands and selected_brand != "Unknown"
-                has_favorite_pref = selected_product["displayName"] in favorite_products and favorite_products[selected_product["displayName"]] > 0
-
-                has_saved_preference = has_brand_pref or has_favorite_pref
-
-                # Check if other candidates also have saved preferences
-                other_has_pref = False
-                for idx, prod in enumerate(products):
-                    if idx == selected_index:
-                        continue
-                    prod_brand = self.extract_brand(prod["displayName"])
-                    if (prod_brand in preferred_brands and prod_brand != "Unknown") or (prod["displayName"] in favorite_products and favorite_products[prod["displayName"]] > 0):
-                        other_has_pref = True
-                        break
-
-                if not has_saved_preference or other_has_pref:
-                    decision = {
-                        "action": "ask_user",
-                        "confidence": confidence,
-                        "reason": f"Multiple candidates exist without a dominant preference (has_saved_preference={has_saved_preference}, other_has_pref={other_has_pref})."
-                    }
-
-        # Print before/after decision log for user review
-        print(f"\n🧠 [Product Selection] Query: '{query}'")
-        print(f"🤖 LLM Decision: {original_decision}")
-        print(f"🔒 Final Decision (Threshold: {threshold}): {decision}\n")
-
+        # Valid, feasible auto_select — pass the model's decision through as-is.
         return decision
 
 

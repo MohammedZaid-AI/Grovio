@@ -49,22 +49,31 @@ async def main():
     # 2. get_payment_options (the previously-missing step)
     payment = await service.get_payment_options()
     print("\nget_payment_options ->", payment)
-    if not payment.get("success"):
-        print("Could not load payment options:", payment.get("message"))
-        return
 
-    options = payment["options"]
-    print("\nChoose payment method:")
-    for i, opt in enumerate(options, 1):
-        print(f"  {i}. {opt['label']}  (id={opt['id']})")
+    if payment.get("success") and payment.get("options"):
+        options = payment["options"]
+        print("\nChoose payment method:")
+        for i, opt in enumerate(options, 1):
+            print(f"  {i}. {opt['label']}  "
+                  f"(paymentMethod={opt['paymentMethod']}, intentApp={opt.get('intentApp')})")
+        choice = int(input("\nSelect number: ").strip())
+        method = options[choice - 1]
+        print(f"Selected: {method['label']}")
 
-    # 3. user selects
-    choice = int(input("\nSelect number: ").strip())
-    method = options[choice - 1]
-    print(f"Selected: {method['label']} (id={method['id']})")
-
-    # 4. checkout WITH the selected paymentMethod
-    result = await service.checkout(payment_method=method["id"])
+        # 4. checkout WITH the selected method (UPI needs intentApp)
+        result = await service.checkout(
+            payment_method=method["paymentMethod"],
+            intent_app=method.get("intentApp"),
+            generate_upi_qr=method.get("generateUPIQR", False),
+        )
+    else:
+        # Fallback: options unavailable (Swiggy whitelist) -> Cash on Delivery.
+        print("\nPayment options unavailable — falling back to Cash on Delivery.")
+        confirm = input("Place order with Cash on Delivery? (yes/no): ").strip().lower()
+        if confirm != "yes":
+            print("Cancelled.")
+            return
+        result = await service.checkout(payment_method="Cash")
     print("\n=== CHECKOUT RESULT ===")
     print(result)
 

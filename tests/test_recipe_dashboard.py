@@ -20,7 +20,10 @@ db.init_db()
 from fastapi.testclient import TestClient
 from backend.app import app
 
-client = TestClient(app)
+# https base_url: the session cookie is Secure (security fix M-1), so a plain
+# http TestClient never sends it back and authenticated requests would 401.
+# Matches the real HTTPS deployment.
+client = TestClient(app, base_url="https://testserver")
 
 print("\n=============================================")
 print("RUNNING GROVIO ADMIN RECIPE INTEGRATION TESTS")

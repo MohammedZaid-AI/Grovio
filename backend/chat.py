@@ -4,7 +4,7 @@ import re
 from ai.langgraph.graph import graph
 from ai.conversation.session_memory import memory
 
-from ai.shopping.shopping_session import shopping_session
+from ai.shopping.shopping_session import shopping_session, _format_candidates
 from ai.shopping.orchestrator import ShoppingOrchestrator
 
 
@@ -59,6 +59,7 @@ def _format_payment_options(options, prefix=""):
 
 def get_cart_summary(phone):
     shopping_session.set_stage(phone, "checkout")
+    shopping_session.advance_lifecycle(phone, "cart_ready")
     selected = shopping_session.selected(phone)
     total = 0
     reply = []
@@ -88,6 +89,89 @@ def get_cart_summary(phone):
         "Reply YES to place the order."
     )
     return "\n".join(reply)
+
+
+# ----------------------------------------------------------------------
+# Checkout revalidation (persistent-session safety net)
+# ----------------------------------------------------------------------
+def _is_cart_expired(result):
+    """Classify a checkout failure as a cart/session expiry (error-message
+    classification only — never product logic)."""
+    if not isinstance(result, dict):
+        return False
+    text = f"{result.get('raw_error', '')} {result.get('message', '')}".lower()
+    return any(s in text for s in ("cart not found", "session expired",
+                                   "cart expired", "no cart", "cart is empty"))
+
+
+async def _checkout_with_revalidation(service, selected, **checkout_kwargs):
+    """The persistent MCP session should still hold the cart, so we checkout
+    directly (no rebuild between messages). Only if Swiggy reports the cart
+    expired do we rebuild once and retry — production-safe recovery."""
+    result = await service.checkout(**checkout_kwargs)
+    if _is_cart_expired(result):
+        print("[Checkout] Cart reported expired — rebuilding once and retrying.")
+        await service.build_cart(selected)
+        result = await service.checkout(**checkout_kwargs)
+    return result
+
+
+# ----------------------------------------------------------------------
+# Conversation recovery (Problems 4 & 7)
+# ----------------------------------------------------------------------
+def _human_step(rec):
+    stage = rec.get("stage")
+    if stage == "selecting":
+        item = rec["items"][rec["current"]]["name"] if rec["current"] < len(rec["items"]) else "an item"
+        return f"choosing *{item}*"
+    if stage == "checkout":
+        return "reviewing your cart"
+    if stage == "payment_selection":
+        return "selecting a payment method"
+    if stage == "cod_confirm":
+        return "confirming Cash on Delivery"
+    if stage == "planning":
+        return "about to start shopping"
+    return "shopping"
+
+
+def _resume_prompt(phone):
+    rec = shopping_session.get(phone)
+    total = len(rec["items"]) if rec.get("items") else 0
+    pos = min(rec["current"] + 1, total) if total else 0
+    where = _human_step(rec)
+    tail = f" (item {pos} of {total})" if total else ""
+    return (
+        f"👋 Welcome back! You were {where}{tail}.\n\n"
+        "Reply *CONTINUE* to pick up where you left off, or *CANCEL* to discard your cart."
+    )
+
+
+def _render_current_step(phone):
+    """Re-render the current step's prompt from STORED state only (no new
+    Swiggy/LLM calls), so resume is instant and side-effect free."""
+    rec = shopping_session.get(phone)
+    stage = rec.get("stage")
+
+    if stage == "selecting" and rec.get("options"):
+        item = rec["items"][rec["current"]]["name"] if rec["current"] < len(rec["items"]) else ""
+        return _format_candidates(item, rec["options"])
+
+    if stage == "payment_selection" and rec.get("payment_options"):
+        return _format_payment_options(rec["payment_options"])
+
+    if stage == "cod_confirm":
+        return (
+            "💵 *Proceeding with Cash on Delivery* (online payment options are "
+            "currently unavailable).\n\n"
+            "Reply YES to confirm and place the order, or NO to cancel."
+        )
+
+    if stage == "planning":
+        return "Reply YES to begin shopping."
+
+    # checkout / anything else -> show the cart
+    return get_cart_summary(phone)
 
 
 async def process_message(
@@ -217,6 +301,35 @@ async def process_message(
 
     if shopping_session.has_session(phone):
 
+        # ----------------------------------------------
+        # SESSION EXPIRY + CONVERSATION RECOVERY (Problems 4 & 7)
+        # ----------------------------------------------
+        if shopping_session.is_expired(phone):
+            shopping_session.end(phone)
+            return (
+                "⌛ Your shopping session expired due to inactivity. "
+                "Send 'order groceries' to start a new one."
+            )
+
+        # Reply to a pending resume prompt.
+        if shopping_session.is_awaiting_resume(phone):
+            reply = message.strip().lower()
+            if reply in ("continue", "resume", "yes", "y"):
+                shopping_session.set_awaiting_resume(phone, False)
+                shopping_session.touch(phone)
+                return _render_current_step(phone)
+            if reply in ("cancel", "no", "stop", "discard"):
+                shopping_session.end(phone)
+                return "🗑️ Your cart was discarded. Send 'order groceries' to start again."
+            return _resume_prompt(phone)
+
+        # Long idle gap -> confirm before continuing (never auto-restart).
+        if shopping_session.should_offer_resume(phone):
+            shopping_session.set_awaiting_resume(phone, True)
+            return _resume_prompt(phone)
+
+        shopping_session.touch(phone)
+
         stage = shopping_session.get_stage(phone)
 
         # ----------------------------------------------
@@ -257,15 +370,18 @@ async def process_message(
 
         elif stage == "selecting":
 
+            option_count = len(shopping_session.get(phone).get("options", []))
+            option_count = min(option_count, 5)
+
             if not message.isdigit():
 
-                return "Reply with a number between 1 and 5."
+                return f"Reply with a number between 1 and {option_count}."
 
             choice = int(message)
 
-            if choice < 1 or choice > 5:
+            if choice < 1 or choice > option_count:
 
-                return "Reply with a number between 1 and 5."
+                return f"Reply with a number between 1 and {option_count}."
 
             shopping_session.select(
 
@@ -303,34 +419,45 @@ async def process_message(
 
                 return "Reply YES to place the order."
 
-            service = ShoppingOrchestrator().service
+            # ONE persistent Swiggy session for this conversation.
+            service = shopping_session.get_service(phone)
 
+            # Build the cart ONCE here; the persistent session carries it
+            # through payment and checkout (no rebuild between messages).
             await service.build_cart(
 
                 shopping_session.selected(phone)
 
             )
 
+            shopping_session.advance_lifecycle(phone, "awaiting_confirmation")
+
             # Swiggy requires an explicit payment method — never default one.
-            # Fetch the options and hand the choice to the user before checkout.
+            # Try to fetch the live options and let the user choose.
             payment_result = await service.get_payment_options()
 
-            if not payment_result.get("success"):
+            if payment_result.get("success") and payment_result.get("options"):
 
-                return payment_result.get(
-                    "message",
-                    "⚠️ We couldn't load payment methods right now. Please try again in a few minutes."
-                )
+                options = payment_result["options"]
 
-            options = payment_result["options"]
+                session = shopping_session.get(phone)
+                if session is not None:
+                    session["payment_options"] = options
 
-            session = shopping_session.get(phone)
-            if session is not None:
-                session["payment_options"] = options
+                shopping_session.set_stage(phone, "payment_selection")
 
-            shopping_session.set_stage(phone, "payment_selection")
+                return _format_payment_options(options)
 
-            return _format_payment_options(options)
+            # Fallback: payment options are unavailable for this account
+            # (Swiggy-side whitelist / kill switch). Offer Cash on Delivery
+            # rather than dead-ending the order, but make it explicit.
+            shopping_session.set_stage(phone, "cod_confirm")
+
+            return (
+                "💵 *Proceeding with Cash on Delivery* (online payment options are "
+                "currently unavailable).\n\n"
+                "Reply YES to confirm and place the order, or NO to cancel."
+            )
 
         # ----------------------------------------------
         # PAYMENT SELECTION
@@ -360,12 +487,51 @@ async def process_message(
 
             selected_method = options[choice - 1]
 
-            service = ShoppingOrchestrator().service
+            # Duplicate-checkout prevention (Problem 6): a second confirmation
+            # (e.g. a double 'yes') must not place a second order.
+            if not shopping_session.begin_checkout(phone):
+                return "⏳ Your order is already being placed. Please hold on."
 
-            result = await service.checkout(
+            shopping_session.advance_lifecycle(phone, "payment_processing")
 
-                payment_method=selected_method["id"]
+            service = shopping_session.get_service(phone)
 
+            # Persistent session already holds the cart — checkout directly and
+            # only rebuild if Swiggy reports the cart expired.
+            result = await _checkout_with_revalidation(
+                service,
+                shopping_session.selected(phone),
+                payment_method=selected_method.get("paymentMethod"),
+                intent_app=selected_method.get("intentApp"),
+                generate_upi_qr=selected_method.get("generateUPIQR", False),
+            )
+
+        # ----------------------------------------------
+        # CASH ON DELIVERY CONFIRMATION (fallback)
+        # ----------------------------------------------
+
+        elif stage == "cod_confirm":
+
+            if message.lower() != "yes":
+
+                shopping_session.end(phone)
+
+                return "❌ Order cancelled."
+
+            # Duplicate-checkout prevention (Problem 6).
+            if not shopping_session.begin_checkout(phone):
+                return "⏳ Your order is already being placed. Please hold on."
+
+            shopping_session.advance_lifecycle(phone, "payment_processing")
+
+            service = shopping_session.get_service(phone)
+
+            # Persistent session already holds the cart — checkout directly and
+            # only rebuild if Swiggy reports the cart expired.
+            result = await _checkout_with_revalidation(
+                service,
+                shopping_session.selected(phone),
+                payment_method="Cash",
             )
 
         # ----------------------------------------------
@@ -380,7 +546,7 @@ async def process_message(
 
             recovery_type = session.get("recovery_type") if session else None
 
-            service = ShoppingOrchestrator().service
+            service = shopping_session.get_service(phone)
 
             orchestrator = ShoppingOrchestrator()
 
@@ -466,6 +632,9 @@ async def process_message(
 
         if result and (result.get("order_placed") or result.get("success")):
 
+            # Lifecycle: order placed (Problem 6).
+            shopping_session.advance_lifecycle(phone, "order_placed")
+
             try:
                 from db import save_swiggy_order
                 import time
@@ -501,6 +670,9 @@ async def process_message(
                 shopping_session.selected(phone)
 
             )
+
+            # Lifecycle: memory learned from the completed order (Problem 6).
+            shopping_session.advance_lifecycle(phone, "memory_updated")
 
             shopping_session.end(phone)
 

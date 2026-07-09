@@ -1,4 +1,5 @@
 import json
+import re
 
 from integrations.swiggy.swiggy_mcp import SwiggyInstamart
 from ai.agents.checkout_recovery_agent import checkout_recovery
@@ -80,27 +81,39 @@ class SwiggyService:
 
         for item in items:
 
-            payload.append(
+            entry = {
+                "spinId": item["spinId"],
+                "quantity": item["quantity"],
+            }
 
-                {
+            # Swiggy's update_cart requires skuId per item; omitting it makes the
+            # add silently fail and leaves the cart empty (-> "cart not found"
+            # at checkout).
+            sku = item.get("skuId")
+            if sku:
+                entry["skuId"] = sku
 
-                    "spinId": item["spinId"],
-
-                    "quantity": item["quantity"]
-
-                }
-
-            )
+            payload.append(entry)
 
         await client.clear_cart()
 
-        await client.update_cart(
+        result = await client.update_cart(
 
             address_id,
 
             payload
 
         )
+
+        # Surface add-to-cart failures instead of swallowing them: a failed
+        # update_cart is why checkout later reports an empty/expired cart.
+        if getattr(result, "isError", False):
+            text = None
+            content = getattr(result, "content", None)
+            if content and getattr(content[0], "text", None):
+                text = content[0].text
+            print(f"[SwiggyService] update_cart FAILED (items not added): {text!r} "
+                  f"payload={payload}")
 
         return await client.get_cart()
 
@@ -132,59 +145,99 @@ class SwiggyService:
         return self._parse_payment_options(result)
 
     def _parse_payment_options(self, result):
-        """Normalize the Swiggy get_payment_options response into a simple list.
+        """Normalize the Swiggy get_payment_options response into a rich list.
 
-        Returns:
-            {"success": True, "options": [{"id": <method value>, "label": <text>}, ...]}
-            or a friendly error dict on failure.
+        Each option carries everything checkout() needs:
+            {
+              "label": <human text>,
+              "paymentMethod": "UPI" | "Cash" | ...,   # the GROUP value
+              "intentApp": <upi app id> or None,        # only for UPI apps
+              "generateUPIQR": bool,                    # only for desktop QR
+            }
 
-        Defensive: the exact Swiggy schema for payment options is not fixed, so
-        we look for the list under several common keys and extract an id/label
-        from several common field names.
+        Per the Swiggy schema, the response exposes:
+          - platforms.mobile.methods[]  -> UPI apps (id -> intentApp, group "UPI")
+          - platforms.desktop.methods[] -> desktop scan-QR (generateUPIQR, group "UPI")
+          - cod                          -> Cash on Delivery (group "Cash")
+          - allMethods[]                 -> flat fallback list
+        Returns {"success": True, "options": [...]} or a friendly error dict.
         """
         try:
-            structured = getattr(result, "structuredContent", None) or {}
+            data = getattr(result, "structuredContent", None) or {}
 
-            raw_list = None
-            for key in ("paymentOptions", "payment_options", "paymentMethods",
-                        "payment_methods", "options", "methods"):
-                if isinstance(structured.get(key), list):
-                    raw_list = structured[key]
-                    break
-
-            # Fallback: parse the JSON text payload.
-            if raw_list is None:
+            # Fall back to the JSON text payload if structuredContent is empty.
+            if not data:
                 content = getattr(result, "content", None)
                 if content and getattr(content[0], "text", None):
-                    data = json.loads(content[0].text)
-                    payload = data.get("data", data) if isinstance(data, dict) else data
-                    if isinstance(payload, dict):
-                        for key in ("paymentOptions", "payment_options", "paymentMethods",
-                                    "payment_methods", "options", "methods"):
-                            if isinstance(payload.get(key), list):
-                                raw_list = payload[key]
-                                break
-                    elif isinstance(payload, list):
-                        raw_list = payload
+                    parsed = json.loads(content[0].text)
+                    data = parsed if isinstance(parsed, dict) else {}
+
+            # The real payload may be wrapped under a "data" key.
+            if isinstance(data.get("data"), dict):
+                data = data["data"]
 
             options = []
-            for entry in (raw_list or []):
-                if isinstance(entry, str):
-                    options.append({"id": entry, "label": entry})
-                    continue
-                method_id = (
-                    entry.get("id") or entry.get("method") or entry.get("value")
-                    or entry.get("code") or entry.get("type") or entry.get("paymentMethod")
-                )
-                label = (
-                    entry.get("displayName") or entry.get("name") or entry.get("label")
-                    or entry.get("title") or method_id
-                )
-                if method_id:
-                    options.append({"id": method_id, "label": label})
+
+            platforms = data.get("platforms") or {}
+
+            # UPI mobile apps
+            for m in ((platforms.get("mobile") or {}).get("methods") or []):
+                app_id = m.get("id")
+                label = m.get("displayName") or m.get("name") or m.get("label") or app_id
+                if app_id:
+                    options.append({
+                        "label": label,
+                        "paymentMethod": "UPI",
+                        "intentApp": app_id,
+                        "generateUPIQR": False,
+                    })
+
+            # Desktop scan-QR (UPI)
+            for m in ((platforms.get("desktop") or {}).get("methods") or []):
+                label = m.get("displayName") or m.get("name") or m.get("label") or "Scan QR to pay (UPI)"
+                options.append({
+                    "label": label,
+                    "paymentMethod": "UPI",
+                    "intentApp": None,
+                    "generateUPIQR": True,
+                })
+
+            # Cash on Delivery
+            cod = data.get("cod")
+            if cod:
+                label = "Cash on Delivery"
+                if isinstance(cod, dict):
+                    label = cod.get("displayName") or cod.get("label") or label
+                options.append({
+                    "label": label,
+                    "paymentMethod": "Cash",
+                    "intentApp": None,
+                    "generateUPIQR": False,
+                })
+
+            # Flat fallback list (allMethods / options / methods)
+            if not options:
+                flat = None
+                for key in ("allMethods", "paymentOptions", "options", "methods"):
+                    if isinstance(data.get(key), list):
+                        flat = data[key]
+                        break
+                for m in (flat or []):
+                    if isinstance(m, str):
+                        options.append({"label": m, "paymentMethod": m, "intentApp": None, "generateUPIQR": False})
+                        continue
+                    group = m.get("paymentMethod") or m.get("group") or m.get("type") or m.get("id")
+                    label = m.get("displayName") or m.get("name") or m.get("label") or group
+                    if group:
+                        options.append({
+                            "label": label,
+                            "paymentMethod": group,
+                            "intentApp": m.get("intentApp") or (m.get("id") if str(group).upper() == "UPI" else None),
+                            "generateUPIQR": bool(m.get("generateUPIQR")),
+                        })
 
             if not options:
-                print(f"[SwiggyService] No payment options parsed from result: {structured}")
+                print(f"[SwiggyService] No payment options parsed from result: {data}")
                 return {
                     "success": False,
                     "message": "We couldn't load the available payment methods right now. Please try again in a few minutes."
@@ -203,7 +256,7 @@ class SwiggyService:
     # Checkout
     # ------------------------------------
 
-    async def checkout(self, payment_method=None):
+    async def checkout(self, payment_method=None, intent_app=None, generate_upi_qr=False):
 
         client = await self.initialize()
 
@@ -213,7 +266,11 @@ class SwiggyService:
 
             address_id,
 
-            payment_method=payment_method
+            payment_method=payment_method,
+
+            intent_app=intent_app,
+
+            generate_upi_qr=generate_upi_qr
 
         )
 
@@ -243,111 +300,135 @@ class SwiggyService:
     # Success
     # ------------------------------------
 
-    def _parse_success(
+    # Candidate key names per field — Swiggy's payload is camelCase, but we stay
+    # tolerant of snake_case / alternates so a minor schema change won't break us.
+    _FIELD_KEYS = {
+        "order_id": ("orderId", "order_id", "id"),
+        "status": ("status", "orderStatus"),
+        "payment": ("paymentMethod", "payment_method", "payment"),
+        "total": ("cartTotal", "orderTotal", "grandTotal", "total", "amount"),
+        "bridge_url": ("bridgeUrl", "bridge_url"),
+        "upi_intent_url": ("upiIntentUrl", "upi_intent_url", "intentUrl"),
+        "paas_id": ("paasId", "paas_id"),
+        "transaction_id": ("transactionId", "transaction_id", "txnId"),
+        "redirect_url": ("redirectUrl", "redirect_url"),
+        "qr": ("QR", "qr", "qrCode", "qrString", "qr_code"),
+    }
 
-        self,
+    def _result_text(self, result):
+        """Best-effort human-readable text from an MCP result (or None)."""
+        content = getattr(result, "content", None)
+        if content and getattr(content[0], "text", None):
+            return content[0].text
+        return None
 
-        result
+    def _extract_order_fields(self, data):
+        """Pull the known order fields out of a dict, looking at both the top
+        level and a nested `data` object (Swiggy wraps the order under `data`)."""
+        sources = [data]
+        inner = data.get("data") if isinstance(data.get("data"), dict) else None
+        if inner:
+            sources.append(inner)
 
-    ):
+        def pick(keys):
+            for src in sources:
+                for k in keys:
+                    v = src.get(k)
+                    if v not in (None, ""):
+                        return v
+            return None
 
+        return {field: pick(keys) for field, keys in self._FIELD_KEYS.items()}
+
+    def _extract_from_text(self, text):
+        """Regex fallback for a human-readable success message / widget notice.
+        Anything not found stays None — we never raise here."""
+        text = text or ""
+
+        def find(pattern):
+            m = re.search(pattern, text, re.IGNORECASE)
+            return m.group(1).strip() if m else None
+
+        return {
+            "order_id": find(r"order\s*id[\s:#\-]*([A-Za-z0-9\-]+)"),
+            "status": find(r"status[\s:#\-]*([A-Za-z_]+)"),
+            "payment": find(r"payment(?:\s*method)?[\s:#\-]*([A-Za-z ]+?)(?:\.|,|\n|$)"),
+            "total": find(r"(?:total|amount)[\s:₹rs\.]*([0-9]+(?:\.[0-9]+)?)"),
+            "bridge_url": find(r"(https?://\S*bridge\S*)"),
+            "upi_intent_url": find(r"(upi://\S+)"),
+            "paas_id": None,
+            "transaction_id": find(r"transaction\s*id[\s:#\-]*([A-Za-z0-9\-]+)"),
+            "redirect_url": find(r"(https?://\S+)"),
+            "qr": None,
+        }
+
+    def _success_payload(self, fields, message, clean):
+        """Build the success dict. order_placed is ALWAYS True here: _parse_success
+        is only ever called when the MCP checkout did NOT error (order confirmed),
+        so the shopping session must be closed regardless of how parseable the
+        body was. `clean` distinguishes a fully-parsed order (success=True) from a
+        confirmed-but-unparsed one (success=False -> 'submitted' message)."""
+        payload = {
+            "success": bool(clean),
+            "order_placed": True,
+            "message": message or "Order placed successfully.",
+        }
+        payload.update(fields)
+        if not payload.get("status"):
+            payload["status"] = "CONFIRMED"
+        return payload
+
+    def _parse_success(self, result):
+        # NOTE: checkout() only calls this when result.isError is False, i.e. the
+        # order is already CONFIRMED. This method therefore NEVER throws and always
+        # reports order_placed=True so the conversation state is cleaned up.
         try:
-            # Safety guards for empty or malformed result
             if result is None:
-                print("❌ Swiggy MCP checkout result is None.")
+                print("[SwiggyService] checkout result is None.")
                 return {
                     "success": False,
                     "order_placed": False,
                     "code": "EMPTY_RESPONSE",
-                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
-                }
-            
-            content = getattr(result, "content", None)
-            if not content:
-                print(f"❌ Swiggy MCP checkout result has no content. Result: {result}")
-                if hasattr(result, "structuredContent") and result.structuredContent:
-                    print(f"Structured content: {result.structuredContent}")
-                return {
-                    "success": False,
-                    "order_placed": False,
-                    "code": "EMPTY_RESPONSE",
-                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
-                }
-            
-            raw_text = content[0].text if hasattr(content[0], "text") else getattr(content[0], "text", None)
-            
-            print(f"🔍 Swiggy MCP raw text response: {raw_text}")
-            
-            if raw_text is None or (isinstance(raw_text, str) and not raw_text.strip()):
-                print("❌ Swiggy MCP checkout response text is empty or whitespace-only!")
-                print(f"Raw Result: {result}")
-                if hasattr(result, "structuredContent") and result.structuredContent:
-                    print(f"Structured content: {result.structuredContent}")
-                return {
-                    "success": False,
-                    "order_placed": False,
-                    "code": "EMPTY_RESPONSE",
-                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes."
+                    "message": "⚠️ We couldn't reach the store to place your order. Please try again in a few minutes.",
                 }
 
-            data = json.loads(raw_text)
+            structured = getattr(result, "structuredContent", None)
+            text = self._result_text(result)
 
-            return {
+            # 1. structuredContent is authoritative — use it directly and do NOT
+            #    json.loads the human-readable text (that was the parse bug).
+            if isinstance(structured, dict) and structured:
+                fields = self._extract_order_fields(structured)
+                return self._success_payload(fields, structured.get("message"), clean=True)
 
-                "success": True,
+            # 2. No structuredContent: only attempt json.loads if the text really
+            #    looks like JSON (starts with '{' or '[').
+            if text and text.lstrip()[:1] in ("{", "["):
+                try:
+                    data = json.loads(text)
+                    if isinstance(data, dict):
+                        fields = self._extract_order_fields(data)
+                        return self._success_payload(fields, data.get("message"), clean=True)
+                except Exception as e:
+                    print(f"[SwiggyService] text looked like JSON but did not parse: {e}")
 
-                "order_placed": True,
-
-                "order_id": data["data"].get(
-
-                    "orderId"
-
-                ),
-
-                "status": data["data"].get(
-
-                    "status"
-
-                ),
-
-                "payment": data["data"].get(
-
-                    "paymentMethod"
-
-                ),
-
-                "total": data["data"].get(
-
-                    "cartTotal"
-
-                ),
-
-                "message": data.get(
-
-                    "message",
-
-                    "Order placed successfully."
-
-                )
-
-            }
+            # 3. Human-readable message / widget notice: regex/text fallback. The
+            #    order is placed (isError was False); success reflects whether we
+            #    could recover concrete details.
+            fields = self._extract_from_text(text)
+            clean = bool(fields.get("order_id") or fields.get("status"))
+            return self._success_payload(fields, (text.strip() if text else None), clean=clean)
 
         except Exception as e:
-            print(f"❌ Exception in _parse_success parsing Swiggy checkout response: {e}")
-            print(f"Raw Result: {result}")
-            if result and hasattr(result, "content") and result.content:
-                print(f"Raw Content[0].text: {result.content[0].text if hasattr(result.content[0], 'text') else getattr(result.content[0], 'text', None)}")
-
+            # Never throw: the order was accepted. Report it placed so the session
+            # is closed (prevents the stale "reply with a number" state).
+            print(f"[SwiggyService] _parse_success unexpected error: {e}")
             return {
-
                 "success": False,
-
-                "order_placed": False,  # Set to False so the session is NOT marked as checked out / ended
-
-                "code": "INVALID_RESPONSE",
-
-                "message": "⚠️ We couldn't confirm your order with the store. Please try again in a few minutes."
-
+                "order_placed": True,
+                "status": "CONFIRMED",
+                "order_id": None,
+                "message": "Order placed successfully.",
             }
 
     # ------------------------------------

@@ -1,6 +1,49 @@
 import asyncio
+import json
+import os
 from mcp_use import MCPClient
 from pathlib import Path
+
+# Temporary, gated instrumentation (Swiggy cart investigation).
+# Off by default; enable live with  SWIGGY_MCP_DEBUG=1  to capture the full
+# request/response + store context of every MCP call. Pure logging — no
+# behaviour change.
+SWIGGY_MCP_DEBUG = os.getenv("SWIGGY_MCP_DEBUG", "0") not in ("0", "", "false", "False")
+
+# Store/merchant identifiers we want to trace through the flow. If search
+# returns any of these at the top level and update_cart drops them, this is the
+# lost-context bug.
+_CONTEXT_KEYS = (
+    "storeid", "store_id", "merchantid", "merchant_id", "outletid", "outlet_id",
+    "warehouseid", "warehouse_id", "locationid", "location_id", "fulfillmentid",
+    "catalogid", "inventoryid", "storestatus", "store_status", "isopen", "closed",
+)
+
+
+def _mcp_dump(obj):
+    try:
+        return json.dumps(obj, indent=2, default=str)[:6000]
+    except Exception:
+        return repr(obj)[:6000]
+
+
+def _scan_context(obj, depth=0):
+    """Recursively collect any store/merchant/outlet-like identifiers so we can
+    see, per call, what store context the response actually carries."""
+    found = {}
+    if depth > 5:
+        return found
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if k.lower() in _CONTEXT_KEYS and not isinstance(v, (dict, list)):
+                found[k] = v
+            for sk, sv in _scan_context(v, depth + 1).items():
+                found.setdefault(sk, sv)
+    elif isinstance(obj, list) and obj:
+        for sk, sv in _scan_context(obj[0], depth + 1).items():
+            found.setdefault(sk, sv)
+    return found
+
 
 class SwiggyInstamart:
 
@@ -19,8 +62,27 @@ class SwiggyInstamart:
         self.session = sessions["instamart"]
         return self
 
+    async def _call_tool(self, name, args):
+        """Single choke-point for every MCP tool call so the whole request/
+        response sequence + store context can be traced in one place."""
+        if SWIGGY_MCP_DEBUG:
+            print(f"\n[MCP -> ] {name}")
+            print(f"          request  = {_mcp_dump(args)}")
+        result = await self.session.call_tool(name, args)
+        if SWIGGY_MCP_DEBUG:
+            sc = getattr(result, "structuredContent", None)
+            ctx = _scan_context(sc)
+            print(f"[MCP <- ] {name}  isError={getattr(result, 'isError', None)}")
+            if ctx:
+                print(f"          context  = {ctx}")
+            content = getattr(result, "content", None)
+            if content and getattr(content[0], "text", None):
+                print(f"          text     = {content[0].text[:2000]}")
+            print(f"          struct   = {_mcp_dump(sc)}")
+        return result
+
     async def get_default_address(self):
-        return await self.session.call_tool(
+        return await self._call_tool(
             "get_addresses",
             {}
         )
@@ -47,7 +109,7 @@ class SwiggyInstamart:
         query
     ):
 
-        return await self.session.call_tool(
+        return await self._call_tool(
             "search_products",
             {
                 "addressId": address_id,
@@ -57,14 +119,14 @@ class SwiggyInstamart:
 
     async def clear_cart(self):
 
-        return await self.session.call_tool(
+        return await self._call_tool(
             "clear_cart",
             {}
         )
 
     async def get_cart(self):
 
-        return await self.session.call_tool(
+        return await self._call_tool(
             "get_cart",
             {}
         )
@@ -75,7 +137,7 @@ class SwiggyInstamart:
         items
     ):
 
-        return await self.session.call_tool(
+        return await self._call_tool(
             "update_cart",
             {
                 "selectedAddressId": address_id,
@@ -263,7 +325,7 @@ class SwiggyInstamart:
         if address_id is None:
             address_id = await self.get_address_id()
 
-        return await self.session.call_tool(
+        return await self._call_tool(
             "get_payment_options",
             {
                 "addressId": address_id
@@ -273,17 +335,27 @@ class SwiggyInstamart:
     async def checkout(
     self,
     address_id,
-    payment_method=None
+    payment_method=None,
+    intent_app=None,
+    generate_upi_qr=False
     ):
 
         payload = {
         "addressId": address_id
         }
 
+        # paymentMethod is a GROUP value ("UPI", "Cash"/"COD", "SwiggyPay").
+        # For a UPI app, pass paymentMethod="UPI" + intentApp=<app id>.
         if payment_method:
             payload["paymentMethod"] = payment_method
 
-        return await self.session.call_tool(
+        if intent_app:
+            payload["intentApp"] = intent_app
+
+        if generate_upi_qr:
+            payload["generateUPIQR"] = True
+
+        return await self._call_tool(
             "checkout",
             payload
         )
