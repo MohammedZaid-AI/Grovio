@@ -2,19 +2,33 @@
     "categories": {
         "cola": {
             "brand_counts": {
-                "Coca-Cola": 1
+                "Coca-Cola": 2
             },
             "pack_counts": {
-                "750 ml x 12": 1
+                "750 ml x 12": 1,
+                "1.25 ltr": 2,
+                "1 Combo": 1
             },
             "supplier_counts": {},
             "favorite_products": {
-                "Coca-Cola Soft Drink Bottle": 1
+                "Coca-Cola Soft Drink Bottle": 4,
+                "Coke & Bingo Chilli Potato Combo": 2
             },
-            "rejected": [],
-            "overrides": [],
-            "purchase_count": 1,
-            "last_purchased_at": "2026-07-09T01:41:02.837542+00:00"
+            "rejected": [
+                "Coca-Cola Soft Drink Bottle"
+            ],
+            "overrides": [
+                {
+                    "suggested": "Coca-Cola Soft Drink Bottle",
+                    "chosen": "Coca-Cola Soft Drink Bottle"
+                },
+                {
+                    "suggested": "Coca-Cola Soft Drink Bottle",
+                    "chosen": "Coke & Bingo Chilli Potato Combo"
+                }
+            ],
+            "purchase_count": 2,
+            "last_purchased_at": "2026-07-09T08:12:07.484240+00:00"
         },
         "ice cream": {
             "brand_counts": {
@@ -31,6 +45,22 @@
             "overrides": [],
             "purchase_count": 1,
             "last_purchased_at": "2026-07-09T01:41:02.838518+00:00"
+        },
+        "combo": {
+            "brand_counts": {
+                "Coca-Cola": 1
+            },
+            "pack_counts": {
+                "1 Combo": 1
+            },
+            "supplier_counts": {},
+            "favorite_products": {
+                "Coke & Bingo Chilli Potato Combo": 1
+            },
+            "rejected": [],
+            "overrides": [],
+            "purchase_count": 1,
+            "last_purchased_at": "2026-07-09T09:16:57.196521+00:00"
         }
     }
 }

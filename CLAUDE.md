@@ -112,7 +112,6 @@ Grovio/
 │   │   ├── tool_registry.py       # Tool discovery
 │   │   └── tool_executor.py       # Tool execution
 │   ├── intelligence/
-│   │   ├── product_matcher.py     # Product alias & fuzzy matching
 │   │   ├── price_tracker.py       # Price history analysis
 │   │   ├── supplier_memory.py     # Supplier performance tracking
 │   │   ├── procurement_memory.py  # Procurement patterns
@@ -298,48 +297,52 @@ python tests/test_address.py
 | `AUTO_SELECT_CONFIDENCE_THRESHOLD` | Product match confidence % | `98` |
 | `JWT_SECRET` | JWT signing key (≥32 bytes) | `c673...` |
 | `DASHBOARD_PASSWORD` | Admin dashboard password | `Zaid@017` |
+| `TWILIO_WHATSAPP_FROM` | Twilio WhatsApp sender for REST replies | `whatsapp:+14155238886` |
+| `AUTHORIZED_PHONES` | Allowlist of user phones (fail-closed) | `+91...,+91...` |
+| `INVENTORY_ADMIN_PHONES` | Allowlist of inventory-admin phones (fail-closed) | `+91...` |
+| `SWIGGY_MCP_DEBUG` | Verbose MCP request/response logging (default off) | `0` |
+| `DEBUG` | Gate debug artifacts / final-output logging (default off) | `0` |
 
 **Critical**: `JWT_SECRET` must be at least 32 bytes. The app fails to start if missing or too weak.
+
+**Required for WhatsApp replies (v1.0)**: `TWILIO_WHATSAPP_FROM` must be set alongside `TWILIO_ACCOUNT_SID`/`TWILIO_AUTH_TOKEN`. Replies are now delivered via the Twilio **REST API** from a background worker (not the webhook's TwiML) — a missing sender makes sends fail (logged, never silent).
 
 ---
 
 ## Architecture
 
-### Request Flow
+### Request Flow (Async delivery — v1.0)
+
+Reply delivery is **decoupled from the webhook** so a slow LLM (Groq 429 → ~13s
+retry) + LangGraph/MCP/OCR can no longer exceed Twilio's ~15s webhook timeout
+and cause silently-dropped replies. See `backend/whatsapp_worker.py`.
 
 ```
 User Message (WhatsApp)
     ↓
-Twilio Webhook POST /webhook
-    ↓
-backend/routes.py::webhook()
-    ├─ Validate Twilio signature
-    ├─ Extract message & phone
-    ↓
-ConversationEngine.process()
-    ├─ Load/create user memory
-    ├─ Check for pending document confirmation
-    ├─ Process message via backend.chat
-    ↓
-backend/chat.py::process_message()
-    ├─ Route to appropriate handler
-    ├─ Execute AutoOrderAgent, etc.
-    ↓
-LangGraph Supervisor
-    ├─ Select agents based on intent
-    ├─ Execute in parallel/sequence
-    ├─ Aggregate results
-    ↓
-Response
-    ├─ Format reply
-    ├─ Chunk if >1500 chars
-    ├─ Save to session history
-    ├─ Update memory
-    ↓
-Twilio MessagingResponse (XML)
+Twilio Webhook POST /webhook            (backend/routes.py::webhook)
+    ├─ Validate Twilio signature (fail-closed)
+    ├─ Persist inbound (db.whatsapp_inbound, deduped by MessageSid)
+    ├─ Wake the per-phone worker
+    └─ Return EMPTY 200 in ~ms          (media → instant dashboard redirect)
+         │
+         ▼ (background)
+Per-phone async worker                  (backend/whatsapp_worker.py)
+    ├─ ConversationEngine.process()      ← SAME engine (memory, chat, LangGraph)
+    │     └─ backend/chat.py → agents/tools → response
+    ├─ Persist reply parts + mark inbound DONE (one txn; chunk ≤1500)
+    └─ Send each part via Twilio REST API (whatsapp/twilio.py::send_whatsapp)
+          ├─ retry w/ backoff on transient errors (5xx / network / 429)
+          └─ classify_send_error: permanent (63038, auth, invalid sender/
+             recipient, 4xx) → FAIL immediately, record error_code
     ↓
 User (WhatsApp)
 ```
+
+**Reliability guarantees:** dedup by MessageSid, per-phone ordering, restart
+recovery (`recover_pending()` on startup re-sends pending outbound; interrupted
+inbound is FAILED, not blindly reprocessed), and no silently-dropped replies.
+Long responses still use the existing chunker + "continue" mechanism.
 
 ### Data Flow
 
@@ -540,6 +543,11 @@ product_consumption table (auto-calculated)
 - `pending_inventory_deductions` - Approval workflow
 - `pending_documents` - Document confirmation queue
 
+**WhatsApp Async Delivery Tables (v1.0)**:
+- `whatsapp_inbound` - Queued incoming messages (`message_sid` UNIQUE for dedup, `status`: PENDING→PROCESSING→DONE/FAILED)
+- `whatsapp_outbound` - Reply parts to send (`part_index` ordering, `status`: PENDING→SENT/FAILED, `provider_sid`, `error_code`)
+- Helpers in `db.py`: `enqueue_inbound_message`, `claim_next_inbound`, `save_reply_and_finish`, `get_pending_outbound`, `mark_outbound_sent/failed`, `has_pending_work`, `get_phones_with_pending_work`, `reset_interrupted_inbound`.
+
 ### ORM / Data Access
 - **No ORM** - Direct SQLite3 via Python's built-in `sqlite3` module
 - **Connection Pooling**: Single `get_connection()` function (no pooling)
@@ -659,12 +667,17 @@ product_consumption table (auto-calculated)
 - **Supplier Memory** (`db::supplier_reliability`): Performance tracking
 
 ### Vector Databases / Embeddings
-**Not Used** - Lightweight embeddings or similarity matching, no vector DBs.
+**Not Used** - No vector DBs.
 
-**Similarity Matching** (`ai/intelligence/product_matcher.py`):
-- Uses `difflib.SequenceMatcher` for fuzzy product matching
-- Brand aliases (e.g., "coke" → "coca-cola")
-- Confidence-based auto-selection
+**Product Selection (v1.0 — single AI decision engine)**:
+- `ai/agents/product_selection_agent.py` ranks candidates via the LLM (semantic
+  understanding). Business validation only rejects impossible choices
+  (out-of-range/unavailable) — there is **no** confidence-threshold override.
+- Category-based preferences in `ai/memory/restaurant_memory.py` (counts-derived
+  favorites, override/rejection learning) — **no** hardcoded aliases, string
+  matching, or rule engine.
+- The old `ai/intelligence/product_matcher.py` (difflib/alias matching) and
+  `ai/intelligence/learning_engine.py` were **removed** in this refactor.
 
 ### Agents Summary
 **20+ specialized agents** covering:
@@ -781,7 +794,7 @@ Each inherits from a base class, uses LLM for reasoning, accesses tools & DB.
 ### Do's
 - Use existing tool infrastructure (don't duplicate)
 - Leverage RestaurantMemory for business stats (don't re-query DB)
-- Check ProductMatcher for product matching (don't reinvent)
+- Product selection is one AI decision engine (`product_selection_agent.py`) + category memory (`restaurant_memory.py`) — do NOT reintroduce aliases, string matching, or a rule engine that overrides the LLM
 - Keep agents focused on one domain
 - Write response templates for common flows
 
@@ -874,6 +887,23 @@ python whatsapp/scripts/create_db.py
 - ✅ Recipe Manager UI (implemented in 3e658f6)
 - ✅ Admin Dashboard authentication (implemented in 9fe353f)
 
+### v1.0 Changes (commits `c4818f0`, `48f430c` — 2026-07-09)
+- ✅ **Security audit** — H-1/H-2 authz (fail-closed allowlists in `core/authz.py`), M-1..M-4 (secure cookie, fail-closed webhook, content-type-derived upload ext, login rate-limit + constant-time compare), L-1..L-3 (generic errors, no raw-exception/Report-ID leaks, DEBUG-gated artifacts).
+- ✅ **Async WhatsApp delivery** — webhook enqueues + returns instant 200; per-phone worker (`backend/whatsapp_worker.py`) processes via the same engine and sends via Twilio REST (`whatsapp/twilio.py`). Fixes lost replies caused by Twilio's ~15s webhook timeout during Groq 429 retries.
+- ✅ **Twilio retry classification** — `classify_send_error`: permanent errors (63038 daily limit, auth, invalid sender/recipient, 4xx) fail immediately with `error_code` recorded; transient (5xx/429/network) retry with backoff.
+- ✅ **Swiggy checkout** — cart now sends `skuId` (empty-cart bug); `_parse_success` uses `structuredContent` first (fixes "Expecting value" JSON crash), never throws, always reports `order_placed` on a confirmed order so the shopping session is cleaned up.
+- ✅ **Cash on Delivery only (MVP product decision)** — the payment menu is removed from the conversation: confirming the cart with "yes" places the order immediately with `paymentMethod="Cash"`. The online-payment machinery (`get_payment_options`, `payment_selection`/`cod_confirm` stages, UPI intent / QR, and all parser payment fields) is **kept intact** and gated behind `backend/chat.py::PAYMENT_SELECTION_ENABLED = False`. Flip that single flag to `True` to restore UPI/QR selection — `tests/test_swiggy_payment_flow.py` keeps that path under regression test. MVP behaviour is covered by `tests/test_cod_only_checkout.py`.
+- ✅ **Shopping intelligence refactor** — single AI decision engine + category memory; removed `product_matcher.py` and `learning_engine.py`; persistent MCP session, lifecycle, resume/expiry, override learning, duplicate-checkout guard.
+- ✅ **Diagnostics (permanent):** `scripts/inspect_swiggy_cart.py`, `scripts/investigate_swiggy_cart.py`; gated MCP tracing via `SWIGGY_MCP_DEBUG`.
+- ✅ **Tests added:** `test_whatsapp_async_delivery` (47), `test_swiggy_parser` (38), `test_shopping_session_v2` (26), `test_shopping_intelligence` (19), `test_sat_probes` (SAT).
+
+### Known Issues (from SAT, 2026-07-09 — not yet fixed)
+- ⚠️ **BUG-1 (Medium):** no "cancel" escape during product `selecting`/`checkout`/`payment_selection` — user is re-prompted for a number until idle-expiry. Add a global cancel guard at the top of the `has_session` block in `backend/chat.py`.
+- ⚠️ **BUG-2 (Medium/UX):** shopping is fully modal — off-topic messages mid-flow are rejected with a re-prompt (no corruption, but no interruption/resume).
+- ⚠️ **BUG-3 (Low, latent):** `split_message` doesn't hard-split an unbroken >limit token (not reachable live — upstream chunker caps at 1200).
+- ⚠️ **BUG-4 (Low):** inventory unit change ignores `confirm_unit_change` (applied silently).
+- ⚠️ **Coverage gap:** Purchase Orders / Reports have no automated tests. Live SAT (shopping/checkout/OCR/perf) must run in an environment with Groq/Swiggy/Twilio reachable.
+
 ---
 
 ## Important Files
@@ -888,7 +918,9 @@ python whatsapp/scripts/create_db.py
 | `ai/langgraph/graph.py` | Agent orchestration (supervisor pattern) | 100 |
 | `ai/agents/ai_coo.py` | AI agent pattern (SOLID example) | ~200 |
 | `ai/invoice/processor.py` | Data pipeline pattern | ~70 |
-| `ai/intelligence/product_matcher.py` | Business logic (product matching) | ~150 |
+| `ai/agents/product_selection_agent.py` | Single AI decision engine (product ranking) | ~150 |
+| `ai/services/swiggy_service.py` | High-level Swiggy wrapper (cart/payment/checkout parse) | ~490 |
+| `backend/whatsapp_worker.py` | Async reply worker (queue → engine → Twilio REST) | ~230 |
 | `ai/intelligence/memory.py` | Analytics & reporting (RestaurantMemory) | 300+ |
 | `integrations/swiggy/swiggy_mcp.py` | External API integration (MCP client) | ~250 |
 | `.env` | Secret management | - |
@@ -995,8 +1027,8 @@ python app.py  # Manual smoke test
 
 ## End of CLAUDE.md
 
-**Last Updated**: July 7, 2026  
-**Analyzed Codebase**: ~18,000 files, 15+ major components, 1600+ lines core DB module  
+**Last Updated**: July 9, 2026 (v1.0 — async WhatsApp delivery, Twilio retry classification, Swiggy checkout/parser fixes, shopping-intelligence refactor, security audit; SAT completed)  
+**Analyzed Codebase**: ~18,000 files, 15+ major components, ~1900-line core DB module  
 **Documentation Completeness**: 95% (some deployment details unknown)
 
 *This document should be updated whenever significant architecture changes occur.*
