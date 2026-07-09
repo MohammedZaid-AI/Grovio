@@ -18,7 +18,6 @@ if not JWT_SECRET:
 if len(JWT_SECRET.encode("utf-8")) < 32:
     raise RuntimeError("JWT_SECRET must be at least 32 bytes long to ensure secure HMAC-SHA256 signing.")
 
-from backend.conversation_engine import engine
 from ai.invoice.pipeline import InvoicePipeline
 
 JWT_ALGORITHM = "HS256"
@@ -198,7 +197,9 @@ async def webhook(
 
     MediaContentType0: str = Form(None),
 
-    From: str = Form("")
+    From: str = Form(""),
+
+    MessageSid: str = Form("")
 
 ):
 
@@ -250,45 +251,36 @@ async def webhook(
         return whatsapp_reply(reply)
 
     # -------------------------------------------------------
-    # Conversation Engine
+    # Async delivery (Phase 2): persist + return 200 immediately
     # -------------------------------------------------------
+    # We do NOT run the ConversationEngine here. LLM 429 retries + LangGraph +
+    # MCP can exceed Twilio's ~15s webhook timeout, which makes Twilio discard
+    # the TwiML reply (lost messages). Instead we persist the message, return an
+    # empty 200 in milliseconds, and let the background worker process it and
+    # deliver the reply via the Twilio REST API (no webhook timeout).
+    from backend.whatsapp_worker import enqueue_and_wake
 
     try:
-
-        reply = await engine.process(
-
+        inbound_id, is_new = await enqueue_and_wake(
+            message_sid=MessageSid,
             phone=From,
-
-            message=Body
-
+            body=Body,
+            num_media=NumMedia,
         )
-
-        if not reply:
-
-            reply = "Sorry, I couldn't generate a response."
-
-        parts = split_message(reply, max_length=1500)
-
-        print("\n" + "=" * 70)
-        print("Reply Sent")
-        for i, part in enumerate(parts):
-            print(f"--- Part {i+1} ---")
-            print(part)
-        print("=" * 70)
-
-        return whatsapp_reply(parts)
-
+        if not is_new:
+            print(f"↩️  Duplicate webhook ignored (MessageSid={MessageSid}, inbound_id={inbound_id})")
+        else:
+            print(f"✅ Queued inbound_id={inbound_id} for async delivery")
     except Exception as e:
+        # Never fail the webhook: log and still return 200 so Twilio doesn't
+        # spin on retries. Loss here is limited to the enqueue itself, which is
+        # logged (not silent).
+        logger.error(f"webhook enqueue failed: {e}", exc_info=True)
 
-        print("\nConversation Error\n")
-
-        print(e)
-
-        return whatsapp_reply(
-
-            "❌ Grovio encountered an unexpected error."
-
-        )
+    # Empty reply: Twilio sends nothing from the webhook now — the worker
+    # delivers via the REST API. whatsapp_reply([]) yields an empty <Response>
+    # (and keeps the DEBUG-gated final-output logging in one place).
+    return whatsapp_reply([])
 
 
 # -------------------------------------------------------
