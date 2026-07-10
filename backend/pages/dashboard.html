@@ -3,299 +3,498 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Grovio Admin Dashboard</title>
+    <title>Grovio — Restaurant Operations</title>
     <link rel="stylesheet" href="/static/css/style.css">
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📊</text></svg>">
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌿</text></svg>">
 </head>
 <body>
-    <header>
-        <div class="logo">
-            <span>Grovio</span> Admin Dashboard
+
+    <!-- ================= Top Navigation ================= -->
+    <header class="topnav">
+        <div class="brand">
+            <span class="brand-mark">G</span>
+            <span>Grovio</span>
+            <span class="brand-sub">Operations</span>
         </div>
-        <div class="user-controls">
-            <button id="logout-btn" class="btn btn-secondary">Logout</button>
+
+        <div class="org-switch" id="org-switch" title="Active restaurant">
+            <span class="org-avatar" id="org-initial">R</span>
+            <span id="org-name">My Restaurant</span>
+        </div>
+
+        <div class="nav-search">
+            <span class="search-icon">⌕</span>
+            <input type="search" id="global-search" placeholder="Search inventory, recipes, documents…" autocomplete="off" aria-label="Search">
+            <kbd>/</kbd>
+        </div>
+
+        <div class="nav-actions">
+            <button class="icon-btn" id="notif-btn" type="button" title="Items needing attention" aria-label="Notifications">
+                🔔
+                <span class="notif-dot" id="notif-count">0</span>
+            </button>
+            <div class="profile-chip">
+                <span class="profile-avatar">AD</span>
+                <span class="profile-name">Admin</span>
+            </div>
+            <button id="logout-btn" class="btn btn-secondary btn-small" type="button">Logout</button>
         </div>
     </header>
 
-        <!-- Top Navbar -->
-        <nav class="dashboard-nav">
-            <a href="#documents" class="nav-tab active" data-tab="documents">📂 Documents</a>
-            <a href="#recipes" class="nav-tab" data-tab="recipes">🍳 Recipes</a>
-            <a href="#inventory" class="nav-tab" data-tab="inventory">📦 Inventory</a>
-            <a href="#deductions" class="nav-tab" data-tab="deductions">⚖️ Deductions</a>
-        </nav>
+    <main class="shell">
 
-        <!-- Tab Section: Documents -->
-        <div id="tab-documents" class="tab-content">
-            <div class="dashboard-grid">
-                <!-- Customer Sales Bills Card -->
-                <div class="card" id="sales-bill-card">
-                    <h2>📊 Customer Sales Bills</h2>
-                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
-                        Upload customer sales bills to log sales and calculate ingredient consumption.
-                    </p>
-                    <div class="upload-zone" id="sales-bill-dropzone">
-                        <div class="loading-overlay" id="sales-bill-loading">
-                            <div class="spinner"></div>
-                            <p style="color: #fff; font-weight: 500;">Extracting document...</p>
-                        </div>
-                        <div class="upload-icon">📊</div>
-                        <p>Drag and drop sales bill here, or <span>browse</span></p>
-                        <p style="font-size: 0.75rem; margin-top: 0.5rem; opacity: 0.7;">Supports PDF, JPG, PNG (Max 10MB)</p>
-                        <input type="file" id="sales-bill-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
+        <!-- ================= Hero — AI command center ================= -->
+        <section class="hero">
+            <div class="hero-panel">
+                <div class="hero-top">
+                    <div>
+                        <div class="eyebrow">AI Operations Console</div>
+                        <h1 id="hero-greeting">Welcome back</h1>
+                        <p class="hero-sub" id="hero-date">Your agent is monitoring stock, invoices and approvals.</p>
+                    </div>
+                    <div class="ai-status">
+                        <span class="status-dot" id="ai-status-dot"></span>
+                        <span id="ai-status-text">Connecting…</span>
                     </div>
                 </div>
 
-                <!-- Supplier Invoices Card -->
-                <div class="card" id="grocery-invoice-card">
-                    <h2>📋 Grocery / Supplier Invoices</h2>
-                    <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
-                        Upload vendor invoices to log inventory updates and record ingredient purchase prices.
-                    </p>
-                    <div class="upload-zone" id="grocery-invoice-dropzone">
-                        <div class="loading-overlay" id="grocery-invoice-loading">
-                            <div class="spinner"></div>
-                            <p style="color: #fff; font-weight: 500;">Extracting document...</p>
-                        </div>
-                        <div class="upload-icon">📋</div>
-                        <p>Drag and drop supplier invoice here, or <span>browse</span></p>
-                        <p style="font-size: 0.75rem; margin-top: 0.5rem; opacity: 0.7;">Supports PDF, JPG, PNG (Max 10MB)</p>
-                        <input type="file" id="grocery-invoice-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
-                    </div>
+                <div class="cmd-strip">
+                    <a href="#inventory" class="cmd-pill">
+                        <span class="dot ok"></span> Inventory <b id="cmd-products">—</b> tracked
+                    </a>
+                    <a href="#inventory" class="cmd-pill">
+                        <span class="dot warn"></span> Needs attention <b id="cmd-attention">—</b>
+                    </a>
+                    <a href="#documents" class="cmd-pill">
+                        <span class="dot"></span> Approvals <b id="cmd-approvals">—</b> pending
+                    </a>
+                    <span class="cmd-pill">Press <b>/</b> to search</span>
                 </div>
             </div>
 
-            <h2 class="section-title">🕒 Pending Confirmations</h2>
-            <div id="pending-container" class="pending-list">
-                <div class="empty-state">
-                    <div class="empty-state-icon">📭</div>
-                    <p>No pending documents to confirm.</p>
+            <div class="summary-strip stagger">
+                <div class="stat" style="--i:1">
+                    <div class="stat-head"><span class="stat-ico">📦</span> Tracked products</div>
+                    <div class="stat-value" id="stat-products">—</div>
+                    <div class="stat-meta" id="stat-products-meta">Loading inventory…</div>
+                </div>
+                <div class="stat" style="--i:2">
+                    <div class="stat-head"><span class="stat-ico warn">⚠️</span> Low stock</div>
+                    <div class="stat-value" id="stat-low">—</div>
+                    <div class="stat-meta">Below minimum threshold</div>
+                </div>
+                <div class="stat" style="--i:3">
+                    <div class="stat-head"><span class="stat-ico bad">🛑</span> Out of stock</div>
+                    <div class="stat-value" id="stat-out">—</div>
+                    <div class="stat-meta">Needs immediate reorder</div>
+                </div>
+                <div class="stat" style="--i:4">
+                    <div class="stat-head"><span class="stat-ico ok">✅</span> Pending approvals</div>
+                    <div class="stat-value" id="stat-approvals">—</div>
+                    <div class="stat-meta">Documents &amp; deductions</div>
                 </div>
             </div>
-        </div>
+        </section>
 
-        <!-- Tab Section: Recipes -->
-        <div id="tab-recipes" class="tab-content" style="display: none;">
-            <div class="card" id="recipe-manager-card">
-                <h2>🍳 Recipe Manager</h2>
-                <p style="color: var(--text-secondary); font-size: 0.85rem; margin-bottom: 1.5rem;">
-                    Configure the ingredient mappings for your menu items. Mapped ingredients will be automatically consumed when sales bills are confirmed.
-                </p>
-                <div class="recipe-container">
-                    <!-- Recipe Form -->
-                    <div class="recipe-form-side">
-                        <h3 style="margin-bottom: 1rem; font-size: 1.1rem; color: #fff;">Add / Update Recipe</h3>
-                        <form id="recipe-form">
-                            <div class="form-group">
-                                <label for="recipe-dish-name">Dish / Menu Item Name</label>
-                                <input type="text" id="recipe-dish-name" class="form-input" placeholder="e.g. Chicken Steak" required>
-                            </div>
-                            
-                            <div class="form-group">
-                                <label style="display: flex; justify-content: space-between; align-items: center;">
-                                    <span>Ingredients Mapping</span>
-                                    <button type="button" class="btn btn-secondary btn-small" id="btn-add-ingredient-row" style="padding: 0.25rem 0.6rem; font-size: 0.75rem;">+ Add Row</button>
-                                </label>
-                                <div id="recipe-ingredients-rows" style="margin-top: 0.5rem; display: flex; flex-direction: column; gap: 0.5rem;">
-                                    <!-- Dynamic rows added here -->
+        <!-- ================= Layout: workspace + floating rail ================= -->
+        <div class="layout">
+
+            <!-- ---------- Main column ---------- -->
+            <div class="main-col">
+
+                <div class="workspace-head">
+                    <div>
+                        <div class="eyebrow">Workspace</div>
+                        <h2>Manage your operations</h2>
+                    </div>
+                    <!-- Top Navbar (hash-routed tabs) -->
+                    <nav class="dashboard-nav">
+                        <a href="#documents" class="nav-tab active" data-tab="documents">📂 Documents</a>
+                        <a href="#recipes" class="nav-tab" data-tab="recipes">🍳 Recipes</a>
+                        <a href="#inventory" class="nav-tab" data-tab="inventory">📦 Inventory</a>
+                        <a href="#deductions" class="nav-tab" data-tab="deductions">⚖️ Deductions</a>
+                    </nav>
+                </div>
+
+                <!-- Tab Section: Documents -->
+                <div id="tab-documents" class="tab-content">
+                    <div class="dashboard-grid stagger">
+                        <!-- Customer Sales Bills Card -->
+                        <div class="card" id="sales-bill-card" style="--i:1">
+                            <div class="card-head">
+                                <div>
+                                    <h2>📊 Customer Sales Bills</h2>
+                                    <p class="card-desc">Log sales and automatically calculate ingredient consumption from your recipes.</p>
                                 </div>
                             </div>
-                            
-                            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Save Recipe</button>
-                        </form>
-                    </div>
-
-                    <!-- Recipe List -->
-                    <div class="recipe-list-side">
-                        <h3 style="margin-bottom: 1rem; font-size: 1.1rem; color: #fff;">Active Recipes</h3>
-                        <div id="recipe-list-container" class="recipe-list-scroll">
-                            <!-- Dynamic list of recipes added here -->
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
-
-        <!-- Tab Section: Inventory -->
-        <div id="tab-inventory" class="tab-content" style="display: none;">
-            <div class="inventory-layout">
-                <!-- Add/Edit Product Form -->
-                <div class="card" id="inventory-form-card">
-                    <h2>📦 Add / Edit Product</h2>
-                    <form id="inventory-form">
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem;">
-                            <div class="form-group">
-                                <label for="inv-product-name">Product Name *</label>
-                                <input type="text" id="inv-product-name" class="form-input" placeholder="e.g. Paneer" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="inv-unit">Unit *</label>
-                                <select id="inv-unit" class="form-input" required>
-                                    <option value="">Select Unit</option>
-                                    <option value="kg">kg (Kilograms)</option>
-                                    <option value="L">L (Liters)</option>
-                                    <option value="pieces">pieces</option>
-                                    <option value="packets">packets</option>
-                                    <option value="box">box</option>
-                                    <option value="bottle">bottle</option>
-                                    <option value="dozen">dozen</option>
-                                    <option value="unit">unit</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label for="inv-stock">Current Stock *</label>
-                                <input type="number" id="inv-stock" class="form-input" placeholder="0.0" step="0.1" required>
-                            </div>
-                            <div class="form-group">
-                                <label for="inv-minimum">Minimum Stock *</label>
-                                <input type="number" id="inv-minimum" class="form-input" placeholder="0.0" step="0.1" required>
+                            <div class="upload-zone" id="sales-bill-dropzone">
+                                <div class="loading-overlay" id="sales-bill-loading">
+                                    <div class="spinner"></div>
+                                    <p>Extracting document…</p>
+                                </div>
+                                <div class="upload-icon">📊</div>
+                                <p>Drag and drop a sales bill here, or <span>browse</span></p>
+                                <p class="upload-hint">PDF, JPG or PNG · up to 10 MB</p>
+                                <div class="upload-cta">
+                                    <button type="button" class="btn btn-primary">Browse files</button>
+                                </div>
+                                <input type="file" id="sales-bill-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
                             </div>
                         </div>
 
-                        <div style="display: flex; gap: 1rem; margin-top: 1rem;">
-                            <button type="submit" class="btn btn-primary" id="inv-submit-btn">Save Product</button>
-                            <button type="button" class="btn btn-secondary" id="inv-clear-btn">Clear Form</button>
-                        </div>
-                    </form>
-                </div>
-
-                <!-- Current Inventory Table -->
-                <h2 class="section-title">Current Inventory</h2>
-                <div class="card" style="padding: 0;">
-                    <div class="items-container">
-                        <table class="items-table">
-                            <thead>
-                                <tr>
-                                    <th>Product Name</th>
-                                    <th>Current Stock</th>
-                                    <th>Minimum Stock</th>
-                                    <th>Unit</th>
-                                    <th>Status</th>
-                                    <th style="text-align: center;">Actions</th>
-                                </tr>
-                            </thead>
-                            <tbody id="inventory-table-body">
-                                <tr>
-                                    <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                                        Loading inventory...
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-
-                <!-- Audit Log Section -->
-                <h2 class="section-title">Recent Changes (Audit Log)</h2>
-                <div class="card" style="padding: 0;">
-                    <div class="items-container">
-                        <table class="items-table">
-                            <thead>
-                                <tr>
-                                    <th>Product</th>
-                                    <th>Action</th>
-                                    <th>Old Stock</th>
-                                    <th>New Stock</th>
-                                    <th>Source</th>
-                                    <th>Timestamp</th>
-                                </tr>
-                            </thead>
-                            <tbody id="audit-log-body">
-                                <tr>
-                                    <td colspan="6" style="text-align: center; padding: 2rem; color: var(--text-secondary);">
-                                        Loading audit log...
-                                    </td>
-                                </tr>
-                            </tbody>
-                        </table>
-                    </div>
-                </div>
-            </div>
-
-            <!-- Modals -->
-            <!-- Edit Modal -->
-            <div id="edit-modal" class="modal" style="display: none;">
-                <div class="modal-content">
-                    <div class="modal-header">
-                        <h3>Edit Stock / Adjust Inventory</h3>
-                        <button type="button" class="modal-close" id="edit-modal-close">&times;</button>
-                    </div>
-                    <div class="modal-body">
-                        <div id="edit-mode-tabs" style="display: flex; gap: 0.5rem; margin-bottom: 1.5rem;">
-                            <button type="button" class="modal-tab-btn active" data-mode="set">Set Absolute Stock</button>
-                            <button type="button" class="modal-tab-btn" data-mode="adjust">Adjust by Delta</button>
-                        </div>
-
-                        <form id="edit-form">
-                            <input type="hidden" id="edit-product-name">
-
-                            <!-- SET mode -->
-                            <div id="edit-mode-set" class="edit-mode-content">
-                                <div class="form-group">
-                                    <label for="edit-new-stock">New Stock Value</label>
-                                    <input type="number" id="edit-new-stock" class="form-input" placeholder="0.0" step="0.1">
-                                </div>
-                                <div class="form-group">
-                                    <label for="edit-new-minimum">New Minimum Stock</label>
-                                    <input type="number" id="edit-new-minimum" class="form-input" placeholder="0.0" step="0.1">
+                        <!-- Supplier Invoices Card -->
+                        <div class="card" id="grocery-invoice-card" style="--i:2">
+                            <div class="card-head">
+                                <div>
+                                    <h2>📋 Supplier Invoices</h2>
+                                    <p class="card-desc">Update inventory levels and record ingredient purchase prices from vendor invoices.</p>
                                 </div>
                             </div>
-
-                            <!-- ADJUST mode -->
-                            <div id="edit-mode-adjust" class="edit-mode-content" style="display: none;">
-                                <div class="form-group">
-                                    <label for="edit-delta-qty">Quantity to Add/Remove</label>
-                                    <input type="number" id="edit-delta-qty" class="form-input" placeholder="0.0" step="0.1">
+                            <div class="upload-zone" id="grocery-invoice-dropzone">
+                                <div class="loading-overlay" id="grocery-invoice-loading">
+                                    <div class="spinner"></div>
+                                    <p>Extracting document…</p>
                                 </div>
-                                <div class="form-group">
-                                    <label for="edit-delta-type">Action</label>
-                                    <select id="edit-delta-type" class="form-input">
-                                        <option value="add">Add (increase stock)</option>
-                                        <option value="remove">Remove (decrease stock)</option>
-                                    </select>
+                                <div class="upload-icon">📋</div>
+                                <p>Drag and drop an invoice here, or <span>browse</span></p>
+                                <p class="upload-hint">PDF, JPG or PNG · up to 10 MB</p>
+                                <div class="upload-cta">
+                                    <button type="button" class="btn btn-primary">Browse files</button>
                                 </div>
+                                <input type="file" id="grocery-invoice-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
                             </div>
+                        </div>
+                    </div>
 
-                            <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1rem;">Save Changes</button>
-                        </form>
+                    <h2 class="section-title">Pending confirmations</h2>
+                    <div id="pending-container" class="pending-list">
+                        <div class="pending-card">
+                            <div class="skel-stack">
+                                <div class="skel skel-line w-40"></div>
+                                <div class="skel skel-line sm w-70"></div>
+                                <div class="skel skel-line sm w-55"></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
-            </div>
 
-            <!-- Delete Confirmation Modal -->
-            <div id="delete-modal" class="modal" style="display: none;">
-                <div class="modal-content modal-content-small">
-                    <div class="modal-header">
-                        <h3>Confirm Delete</h3>
-                        <button type="button" class="modal-close" id="delete-modal-close">&times;</button>
+                <!-- Tab Section: Recipes -->
+                <div id="tab-recipes" class="tab-content" style="display: none;">
+                    <div class="card" id="recipe-manager-card">
+                        <div class="card-head">
+                            <div>
+                                <h2>🍳 Recipe Manager</h2>
+                                <p class="card-desc">Map each menu item to its ingredients. Mapped ingredients are consumed automatically when a sales bill is confirmed.</p>
+                            </div>
+                        </div>
+                        <div class="recipe-container">
+                            <!-- Recipe Form -->
+                            <div class="recipe-form-side">
+                                <h3>Add or update a recipe</h3>
+                                <form id="recipe-form">
+                                    <div class="form-group">
+                                        <label for="recipe-dish-name">Dish / menu item name</label>
+                                        <input type="text" id="recipe-dish-name" class="form-input" placeholder="e.g. Chicken Steak" required>
+                                    </div>
+
+                                    <div class="form-group">
+                                        <label style="display: flex; justify-content: space-between; align-items: center;">
+                                            <span>Ingredients mapping</span>
+                                            <button type="button" class="btn btn-secondary btn-small" id="btn-add-ingredient-row">+ Add row</button>
+                                        </label>
+                                        <div id="recipe-ingredients-rows" style="margin-top: 0.6rem; display: flex; flex-direction: column; gap: 0.55rem;">
+                                            <!-- Dynamic rows added here -->
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1.25rem;">Save recipe</button>
+                                </form>
+                            </div>
+
+                            <!-- Recipe List -->
+                            <div class="recipe-list-side">
+                                <h3>Active recipes</h3>
+                                <div id="recipe-list-container" class="recipe-list-scroll">
+                                    <div class="recipe-item-card">
+                                        <div class="skel-stack">
+                                            <div class="skel skel-line w-55"></div>
+                                            <div class="skel skel-line sm w-85"></div>
+                                        </div>
+                                    </div>
+                                    <div class="recipe-item-card">
+                                        <div class="skel-stack">
+                                            <div class="skel skel-line w-40"></div>
+                                            <div class="skel skel-line sm w-70"></div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                     </div>
-                    <div class="modal-body">
-                        <p id="delete-confirm-text" style="margin-bottom: 1.5rem; color: var(--text-secondary);">
-                            Are you sure you want to remove this product from inventory?
+                </div>
+
+                <!-- Tab Section: Inventory -->
+                <div id="tab-inventory" class="tab-content" style="display: none;">
+                    <div class="inventory-layout">
+                        <!-- Add/Edit Product Form -->
+                        <div class="card" id="inventory-form-card">
+                            <div class="card-head">
+                                <div>
+                                    <h2>📦 Add or edit a product</h2>
+                                    <p class="card-desc">Set a minimum stock level so the agent can flag low stock and suggest reorders.</p>
+                                </div>
+                            </div>
+                            <form id="inventory-form">
+                                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 1.15rem;">
+                                    <div class="form-group">
+                                        <label for="inv-product-name">Product name *</label>
+                                        <input type="text" id="inv-product-name" class="form-input" placeholder="e.g. Paneer" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="inv-unit">Unit *</label>
+                                        <select id="inv-unit" class="form-input" required>
+                                            <option value="">Select unit</option>
+                                            <option value="kg">kg (Kilograms)</option>
+                                            <option value="L">L (Liters)</option>
+                                            <option value="pieces">pieces</option>
+                                            <option value="packets">packets</option>
+                                            <option value="box">box</option>
+                                            <option value="bottle">bottle</option>
+                                            <option value="dozen">dozen</option>
+                                            <option value="unit">unit</option>
+                                        </select>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="inv-stock">Current stock *</label>
+                                        <input type="number" id="inv-stock" class="form-input" placeholder="0.0" step="0.1" required>
+                                    </div>
+                                    <div class="form-group">
+                                        <label for="inv-minimum">Minimum stock *</label>
+                                        <input type="number" id="inv-minimum" class="form-input" placeholder="0.0" step="0.1" required>
+                                    </div>
+                                </div>
+
+                                <div style="display: flex; gap: 0.75rem; margin-top: 0.35rem;">
+                                    <button type="submit" class="btn btn-primary" id="inv-submit-btn">Save product</button>
+                                    <button type="button" class="btn btn-secondary" id="inv-clear-btn">Clear form</button>
+                                </div>
+                            </form>
+                        </div>
+
+                        <!-- Current Inventory Table -->
+                        <h2 class="section-title">Current inventory</h2>
+                        <div class="card" style="padding: 0; overflow: hidden;">
+                            <div class="items-container">
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Product name</th>
+                                            <th>Current stock</th>
+                                            <th>Minimum stock</th>
+                                            <th>Unit</th>
+                                            <th>Status</th>
+                                            <th style="text-align: center;">Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="inventory-table-body">
+                                        <tr><td><div class="skel skel-line w-70"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-70"></div></td></tr>
+                                        <tr><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-70"></div></td></tr>
+                                        <tr><td><div class="skel skel-line w-85"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-70"></div></td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <!-- Audit Log Section -->
+                        <h2 class="section-title">Recent changes</h2>
+                        <div class="card" style="padding: 0; overflow: hidden;">
+                            <div class="items-container">
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Product</th>
+                                            <th>Action</th>
+                                            <th>Old stock</th>
+                                            <th>New stock</th>
+                                            <th>Source</th>
+                                            <th>Timestamp</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="audit-log-body">
+                                        <tr><td><div class="skel skel-line w-70"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-70"></div></td></tr>
+                                        <tr><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-40"></div></td><td><div class="skel skel-line w-55"></div></td><td><div class="skel skel-line w-70"></div></td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Modals -->
+                    <!-- Edit Modal -->
+                    <div id="edit-modal" class="modal">
+                        <div class="modal-content">
+                            <div class="modal-header">
+                                <h3>Edit stock / adjust inventory</h3>
+                                <button type="button" class="modal-close" id="edit-modal-close">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <div id="edit-mode-tabs" style="display: flex; gap: 0.6rem; margin-bottom: 1.65rem;">
+                                    <button type="button" class="modal-tab-btn active" data-mode="set">Set absolute stock</button>
+                                    <button type="button" class="modal-tab-btn" data-mode="adjust">Adjust by delta</button>
+                                </div>
+
+                                <form id="edit-form">
+                                    <input type="hidden" id="edit-product-name">
+
+                                    <!-- SET mode -->
+                                    <div id="edit-mode-set" class="edit-mode-content">
+                                        <div class="form-group">
+                                            <label for="edit-new-stock">New stock value</label>
+                                            <input type="number" id="edit-new-stock" class="form-input" placeholder="0.0" step="0.1">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="edit-new-minimum">New minimum stock</label>
+                                            <input type="number" id="edit-new-minimum" class="form-input" placeholder="0.0" step="0.1">
+                                        </div>
+                                    </div>
+
+                                    <!-- ADJUST mode -->
+                                    <div id="edit-mode-adjust" class="edit-mode-content" style="display: none;">
+                                        <div class="form-group">
+                                            <label for="edit-delta-qty">Quantity to add / remove</label>
+                                            <input type="number" id="edit-delta-qty" class="form-input" placeholder="0.0" step="0.1">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="edit-delta-type">Action</label>
+                                            <select id="edit-delta-type" class="form-input">
+                                                <option value="add">Add (increase stock)</option>
+                                                <option value="remove">Remove (decrease stock)</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary" style="width: 100%; margin-top: 1.25rem;">Save changes</button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Delete Confirmation Modal -->
+                    <div id="delete-modal" class="modal">
+                        <div class="modal-content modal-content-small">
+                            <div class="modal-header">
+                                <h3>Confirm delete</h3>
+                                <button type="button" class="modal-close" id="delete-modal-close">&times;</button>
+                            </div>
+                            <div class="modal-body">
+                                <p id="delete-confirm-text" style="margin-bottom: 1.65rem; color: var(--text-secondary); font-size: 0.875rem;">
+                                    Are you sure you want to remove this product from inventory?
+                                </p>
+                                <div style="display: flex; gap: 0.75rem; justify-content: flex-end;">
+                                    <button type="button" class="btn btn-secondary" id="delete-cancel-btn">Cancel</button>
+                                    <button type="button" class="btn btn-danger" id="delete-confirm-btn">Delete product</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Tab Section: Deductions -->
+                <div id="tab-deductions" class="tab-content" style="display: none;">
+                    <h2 class="section-title" style="margin-top: 0;">Pending inventory deductions</h2>
+                    <div id="deductions-container" class="pending-list">
+                        <div class="pending-card">
+                            <div class="skel-stack">
+                                <div class="skel skel-line w-40"></div>
+                                <div class="skel skel-line sm w-70"></div>
+                                <div class="skel skel-line sm w-55"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+            </div><!-- /main-col -->
+
+            <!-- ---------- Floating right rail ---------- -->
+            <aside class="rail stagger">
+
+                <section class="panel" style="--i:1">
+                    <div class="panel-head">
+                        <h3>Restaurant health</h3>
+                    </div>
+                    <div class="panel-body">
+                        <div class="ring-wrap">
+                            <div class="health-ring" id="health-ring"><span id="health-pct">—</span></div>
+                        </div>
+                        <div class="health-legend">
+                            <span>OK <i id="legend-ok">—</i></span>
+                            <span>Low <i id="legend-low">—</i></span>
+                            <span>Out <i id="legend-out">—</i></span>
+                        </div>
+                        <p class="panel-empty" id="health-note" style="text-align:center; padding-top:0.85rem;">
+                            Reading stock levels…
                         </p>
-                        <div style="display: flex; gap: 1rem; justify-content: flex-end;">
-                            <button type="button" class="btn btn-secondary" id="delete-cancel-btn">Cancel</button>
-                            <button type="button" class="btn btn-danger" id="delete-confirm-btn">Delete Product</button>
+                    </div>
+                    <div class="panel-foot">
+                        <a href="#inventory" class="panel-link">Manage inventory →</a>
+                    </div>
+                </section>
+
+                <section class="panel" style="--i:2">
+                    <div class="panel-head">
+                        <h3>Today's AI suggestions</h3>
+                        <span class="count" id="rec-count">—</span>
+                    </div>
+                    <div class="panel-body" id="rec-list">
+                        <div class="skel-row"><div class="skel skel-circle"></div><div class="skel-stack" style="flex:1"><div class="skel skel-line w-70"></div><div class="skel skel-line sm w-40"></div></div></div>
+                        <div class="skel-row"><div class="skel skel-circle"></div><div class="skel-stack" style="flex:1"><div class="skel skel-line w-55"></div><div class="skel skel-line sm w-40"></div></div></div>
+                    </div>
+                    <div class="panel-foot">
+                        <a href="#inventory" class="panel-link">Review stock →</a>
+                    </div>
+                </section>
+
+                <section class="panel" style="--i:3">
+                    <div class="panel-head">
+                        <h3>Alerts</h3>
+                        <span class="count" id="alert-count">—</span>
+                    </div>
+                    <div class="panel-body" id="alert-list">
+                        <div class="skel-row"><div class="skel skel-circle"></div><div class="skel-stack" style="flex:1"><div class="skel skel-line w-85"></div><div class="skel skel-line sm w-40"></div></div></div>
+                    </div>
+                    <div class="panel-foot">
+                        <a href="#documents" class="panel-link">Review documents →</a>
+                    </div>
+                </section>
+
+                <section class="panel" style="--i:4">
+                    <div class="panel-head">
+                        <h3>Recent activity</h3>
+                    </div>
+                    <div class="panel-body">
+                        <div class="timeline" id="activity-list">
+                            <div class="skel-stack" style="gap:1rem">
+                                <div class="skel skel-line w-70"></div>
+                                <div class="skel skel-line sm w-55"></div>
+                                <div class="skel skel-line w-85"></div>
+                            </div>
                         </div>
                     </div>
-                </div>
-            </div>
-        </div>
+                    <div class="panel-foot">
+                        <a href="#inventory" class="panel-link">View full audit log →</a>
+                    </div>
+                </section>
 
-        <!-- Tab Section: Deductions -->
-        <div id="tab-deductions" class="tab-content" style="display: none;">
-            <h2 class="section-title" style="margin-top: 0;">⚖️ Pending Inventory Deductions</h2>
-            <div id="deductions-container" class="pending-list">
-                <div class="empty-state">
-                    <div class="empty-state-icon">⚖️</div>
-                    <p>No pending inventory deductions to approve.</p>
-                </div>
-            </div>
-        </div>
-    </div>
+            </aside>
+
+        </div><!-- /layout -->
+    </main>
 
     <div class="toast-container" id="toast-container"></div>
 
+    <!-- Business logic (unchanged) -->
     <script src="/static/js/dashboard.js"></script>
+    <!-- Presentation-only layer: hero, health, suggestions, alerts, activity, search -->
+    <script src="/static/js/dashboard-ui.js"></script>
 </body>
 </html>
