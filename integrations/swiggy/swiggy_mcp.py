@@ -379,10 +379,33 @@ class SwiggyInstamart:
         ):
             return []
 
-        return search_result.structuredContent.get(
-            "products",
-            []
-        )
+        # The payload may arrive as structuredContent (older MCP) or as JSON text
+        # in content[0].text (newer 2025-11-25 protocol -> structuredContent=None),
+        # and products may be top-level or nested under "data". Handle all shapes.
+        def _products_from(obj):
+            if isinstance(obj, dict):
+                if isinstance(obj.get("products"), list):
+                    return obj["products"]
+                inner = obj.get("data")
+                if isinstance(inner, dict) and isinstance(inner.get("products"), list):
+                    return inner["products"]
+            return None
+
+        products = _products_from(getattr(search_result, "structuredContent", None))
+        if products is not None:
+            return products
+
+        content = getattr(search_result, "content", None)
+        if content and getattr(content[0], "text", None):
+            try:
+                products = _products_from(json.loads(content[0].text))
+                if products is not None:
+                    return products
+            except Exception:
+                pass
+
+        print(f"[Swiggy] search {item_name!r}: no products parsed")
+        return []
 
 
 async def main():
