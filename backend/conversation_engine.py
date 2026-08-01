@@ -2,7 +2,7 @@ from ai.conversation.session import session
 from ai.conversation.chunker import chunker
 from ai.conversation.session_memory import memory
 
-from backend.chat import process_message
+from ai.concierge import respond
 
 
 class ConversationEngine:
@@ -16,7 +16,7 @@ class ConversationEngine:
     • Response chunking
     • Continue support
 
-    Business logic is handled by backend.chat
+    Business logic is handled by ai.concierge
     """
 
     def __init__(self):
@@ -63,7 +63,7 @@ class ConversationEngine:
         # Process Business Logic
         # ---------------------------------------
 
-        response = await process_message(
+        response = await respond(
 
             phone=phone,
 

@@ -45,12 +45,10 @@ _MAX_PART_LEN = 1500
 MAX_SEND_ATTEMPTS = 5
 SEND_BACKOFF_BASE_SECONDS = 2
 
-# Media uploads are handled on the web dashboard; this is the same note the
-# webhook used to return inline.
+# Attachments aren't understood yet (images/voice land in a later phase).
 MEDIA_REDIRECT_MESSAGE = (
-    "📋 *Grovio Document Upload*\n\n"
-    "Document uploads (invoices and sales bills) are now managed via the Web "
-    "Admin Dashboard. Please upload your files and confirm them there."
+    "I can't read attachments yet — tell me what you're in the mood for and "
+    "I'll take it from there."
 )
 
 _FALLBACK_REPLY = "Sorry, I couldn't generate a response."

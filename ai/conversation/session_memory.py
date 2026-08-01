@@ -3,92 +3,32 @@ from datetime import datetime
 
 class SessionMemory:
     """
-    Stores the current conversation state
-    for every restaurant.
+    Short-lived working memory for an in-flight conversation, keyed by phone.
 
-    Later this can be replaced with Redis.
+    This is NOT the concierge's long-term memory — it is wiped on restart and
+    holds only what the current exchange needs. Durable per-user memory
+    (preferences, allergies, budget, order history) arrives in Phase 4.
     """
 
     def __init__(self):
-
         self.sessions = {}
 
-    # ---------------------------------
-    # Create Session
-    # ---------------------------------
-
-    def get(self, restaurant):
-
-        if restaurant not in self.sessions:
-
-            self.sessions[restaurant] = {
-
-                "last_agent": None,
-
-                "last_purchase_order": None,
-
-                "awaiting_approval": False,
-
+    def get(self, phone):
+        if phone not in self.sessions:
+            self.sessions[phone] = {
                 "last_message": None,
-
                 "last_response": None,
-
-                "updated_at": datetime.now()
-
+                "updated_at": datetime.now(),
             }
+        return self.sessions[phone]
 
-        return self.sessions[restaurant]
-
-    # ---------------------------------
-    # Update
-    # ---------------------------------
-
-    def update(
-
-        self,
-
-        restaurant,
-
-        **kwargs
-
-    ):
-
-        session = self.get(restaurant)
-
+    def update(self, phone, **kwargs):
+        session = self.get(phone)
         session.update(kwargs)
-
         session["updated_at"] = datetime.now()
 
-    # ---------------------------------
-    # Clear
-    # ---------------------------------
-
-    def clear(self, restaurant):
-
-        if restaurant in self.sessions:
-
-            del self.sessions[restaurant]
+    def clear(self, phone):
+        self.sessions.pop(phone, None)
 
 
 memory = SessionMemory()
-
-
-if __name__ == "__main__":
-
-    memory.update(
-
-        "restaurant",
-
-        last_agent="procurement",
-
-        awaiting_approval=True
-
-    )
-
-    from pprint import pprint
-
-    pprint(
-
-        memory.get("restaurant")
-
-    )

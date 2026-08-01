@@ -197,32 +197,3 @@ class SessionManager:
 
 
 session = SessionManager()
-
-
-if __name__ == "__main__":
-
-    phone = "9876543210"
-
-    session.set_intent(
-
-        phone,
-
-        "inventory"
-
-    )
-
-    session.add_message(
-
-        phone,
-
-        "Inventory",
-
-        "Milk : 10"
-
-    )
-
-    print(
-
-        session.get(phone)
-
-    )
