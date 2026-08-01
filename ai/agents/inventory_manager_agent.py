@@ -53,7 +53,7 @@ class InventoryManagerAgent:
         Returns: {product, qty, unit, minimum_qty, minimum_unit, confirm_unit_change} or None
         """
         # Pattern: set [product] stock to [number] [unit] [, minimum [number] [unit]]
-        pattern = r"set\s+([a-z\s]+?)\s+stock\s+to\s+([\d.]+)\s+([a-z]+)(?:,?\s+(?:min|minimum):?\s+([\d.]+)\s+([a-z]+))?"
+        pattern = r"set\s+([a-z\s]+?)\s+stock\s+to\s+([\d.]+)\s*([a-z]+)(?:,?\s+(?:min|minimum):?\s+([\d.]+)\s*([a-z]+))?"
         match = re.search(pattern, message, re.IGNORECASE)
 
         if not match:
@@ -96,8 +96,8 @@ class InventoryManagerAgent:
 
         Returns: {action, qty, unit, product, confirm_unit_change} or None
         """
-        # Pattern: (add|remove) [number] [unit] [product]
-        pattern = r"(add|remove|subtract)\s+([\d.]+)\s+([a-z]+)\s+([a-z\s]+)"
+        # Pattern: (add|remove) [number] [unit] [product]  (unit may be glued: "10kg")
+        pattern = r"(add|remove|subtract)\s+([\d.]+)\s*([a-z]+)\s+([a-z\s]+)"
         match = re.search(pattern, message, re.IGNORECASE)
 
         if not match:

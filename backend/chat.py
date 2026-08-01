@@ -37,6 +37,15 @@ PAYMENT_SELECTION_ENABLED = False
 COD_PAYMENT_METHOD = "Cash"
 
 
+# ----------------------------------------------------------------------
+# Inventory mutations (product decision)
+# ----------------------------------------------------------------------
+# Stock is added/edited on the web dashboard, not over WhatsApp. Set/Add/Remove
+# commands are detected only to give a dashboard redirect. Flip to True to
+# re-enable WhatsApp inventory mutations via InventoryManagerAgent (kept intact).
+WHATSAPP_INVENTORY_COMMANDS_ENABLED = False
+
+
 def _is_inventory_command(message: str) -> bool:
     """Detect if message is an inventory SET/ADD/REMOVE command."""
     msg_lower = message.lower().strip()
@@ -45,12 +54,12 @@ def _is_inventory_command(message: str) -> bool:
     if re.search(r"^set\s+.+\s+stock\s+to\s+", msg_lower):
         return True
 
-    # ADD pattern: "add [qty] [unit] [product]"
-    if re.search(r"^add\s+[\d.]+\s+[a-z]+\s+", msg_lower):
+    # ADD pattern: "add [qty] [unit] [product]" (unit may be glued, e.g. "10kg")
+    if re.search(r"^add\s+[\d.]+\s*[a-z]+\s+", msg_lower):
         return True
 
     # REMOVE pattern: "remove [qty] [unit] [product]"
-    if re.search(r"^(?:remove|subtract)\s+[\d.]+\s+[a-z]+\s+", msg_lower):
+    if re.search(r"^(?:remove|subtract)\s+[\d.]+\s*[a-z]+\s+", msg_lower):
         return True
 
     return False
@@ -836,6 +845,18 @@ async def process_message(
     # ==================================================
 
     if _is_inventory_command(message):
+        # Product decision: stock is managed on the web dashboard, not over
+        # WhatsApp. We still DETECT the command (so it gets a clean redirect
+        # instead of falling through to the LLM), then point to the dashboard.
+        # Flip WHATSAPP_INVENTORY_COMMANDS_ENABLED to restore WhatsApp mutations
+        # (InventoryManagerAgent is kept intact for that).
+        if not WHATSAPP_INVENTORY_COMMANDS_ENABLED:
+            return (
+                "📦 *Inventory is managed on the dashboard.*\n\n"
+                "Open the *Inventory* tab to add or update stock — WhatsApp is "
+                "for ordering and queries (e.g. \"what is my inventory?\")."
+            )
+
         if not is_inventory_admin(phone):
             return "❌ *Not Authorized*\n\nInventory commands (Set/Add/Remove stock) are restricted to admin users.\n\nContact your administrator if you should have access."
 

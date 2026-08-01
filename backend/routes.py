@@ -2,11 +2,13 @@ from fastapi import APIRouter, Form, Request, HTTPException, UploadFile, File
 from fastapi.responses import Response, HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.request_validator import RequestValidator
+from typing import List
 import os
 import jwt
 import datetime
 import uuid
 import hmac
+import asyncio
 import collections
 
 from core.logger import logger
@@ -224,7 +226,10 @@ async def webhook(
     params = dict(form_data)
 
     if not validator.validate(url, params, signature):
-        print("🚫 Webhook Signature Verification Failed!")
+        # The reconstructed url must EXACTLY match the Twilio console URL (scheme +
+        # host + path, no trailing slash). http-vs-https behind a tunnel is the usual
+        # cause. No secrets logged.
+        print(f"🚫 Webhook signature verification failed (reconstructed url: {url})")
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
     print("\n" + "=" * 70)
@@ -347,6 +352,45 @@ _UPLOAD_EXTENSIONS = {
 }
 
 
+# Reverse of _UPLOAD_EXTENSIONS — used when re-deriving content_type from a
+# stored batch file (whose extension we control).
+_EXT_CONTENT_TYPE = {".pdf": "application/pdf", ".jpg": "image/jpeg", ".png": "image/png"}
+
+
+def extract_to_pending(filepath: str, content_type: str, doc_type: str):
+    """Reusable single-invoice extraction core: OCR + LLM -> pending_document.
+
+    Returns (doc_id, invoice). Raises ValueError on bad type / extraction failure.
+    Does NOT own the file lifecycle — the caller creates and removes `filepath`.
+    Both the single-upload endpoint and the bulk worker go through here, so OCR
+    and parsing logic exists in exactly one place.
+    """
+    if content_type not in _UPLOAD_EXTENSIONS:
+        raise ValueError("Invalid file type. Only PDF and JPEG/PNG images are allowed.")
+
+    parsed = pipeline.parser.parse_local(filepath, content_type)
+
+    # Save raw OCR text for debug (dev-only: can contain customer/financial data).
+    if _debug_enabled():
+        debug_dir = os.path.join("downloads", "ocr_debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        debug_filepath = os.path.join(debug_dir, f"raw_ocr_{doc_type}_{uuid.uuid4().hex}.txt")
+        with open(debug_filepath, "w", encoding="utf-8") as f_debug:
+            f_debug.write(parsed.get("text", ""))
+        print(f"[DEBUG] Raw OCR text saved to: {debug_filepath}")
+
+    invoice = pipeline.extractor.extract(parsed["text"])
+    if invoice.get("error"):
+        raise ValueError(f"LLM Extraction failed: {invoice['error']}")
+    if not invoice.get("items"):
+        raise ValueError("LLM Extraction failed: No line items could be parsed. Please verify receipt image quality and try again.")
+
+    invoice["doc_type"] = doc_type
+    from db import save_pending_document
+    doc_id = save_pending_document(phone=f"web_{uuid.uuid4().hex}", doc_type=doc_type, payload=invoice)
+    return doc_id, invoice
+
+
 async def process_web_upload(file: UploadFile, doc_type: str):
     # 1. Type validation
     if file.content_type not in _UPLOAD_EXTENSIONS:
@@ -358,63 +402,21 @@ async def process_web_upload(file: UploadFile, doc_type: str):
     if len(contents) > max_size:
         raise HTTPException(status_code=400, detail="File too large. Maximum size is 10MB.")
 
-    # Reset cursor after reading
-    await file.seek(0)
-
-    # 3. Create temp file path.
-    # SECURITY (M-3): never build the path from the client-supplied filename
-    # (path traversal risk, e.g. "../../../evil.py"). The extension is derived
-    # solely from the already-whitelisted content_type — it's also what
-    # parser.extract_text() branches on (".pdf" vs image), so this is both
-    # safer and functionally correct.
+    # SECURITY (M-3): temp filename/extension derived from the whitelisted
+    # content_type, never the client filename (path-traversal safe).
     os.makedirs("downloads", exist_ok=True)
     ext = _UPLOAD_EXTENSIONS[file.content_type]
-    temp_filename = f"web_{uuid.uuid4().hex}{ext}"
-    temp_filepath = os.path.join("downloads", temp_filename)
+    temp_filepath = os.path.join("downloads", f"web_{uuid.uuid4().hex}{ext}")
 
     try:
-        # Save temp file
         with open(temp_filepath, "wb") as f:
             f.write(contents)
-
-        # 4. Parse local file
-        parsed = pipeline.parser.parse_local(temp_filepath, file.content_type)
-        
-        # Save raw OCR text for debug (dev-only: this can contain
-        # customer/financial data, so never persist it in production).
-        if _debug_enabled():
-            debug_dir = os.path.join("downloads", "ocr_debug")
-            os.makedirs(debug_dir, exist_ok=True)
-            debug_filename = f"raw_ocr_{doc_type}_{uuid.uuid4().hex}.txt"
-            debug_filepath = os.path.join(debug_dir, debug_filename)
-            with open(debug_filepath, "w", encoding="utf-8") as f_debug:
-                f_debug.write(parsed.get("text", ""))
-            print(f"[DEBUG] Raw OCR text saved to: {debug_filepath}")
-
-        # Extract structured JSON
-        invoice = pipeline.extractor.extract(parsed["text"])
-
-        # Check for extraction failure
-        if "error" in invoice and invoice["error"]:
-            raise HTTPException(status_code=400, detail=f"LLM Extraction failed: {invoice['error']}")
-        if not invoice.get("items"):
-            raise HTTPException(status_code=400, detail="LLM Extraction failed: No line items could be parsed. Please verify receipt image quality and try again.")
-
-        # Set doc_type
-        invoice["doc_type"] = doc_type
-
-        # 5. Save pending document
-        from db import save_pending_document
-        unique_phone = f"web_{uuid.uuid4().hex}"
-        doc_id = save_pending_document(phone=unique_phone, doc_type=doc_type, payload=invoice)
-
-        return {
-            "success": True,
-            "id": doc_id,
-            "invoice": invoice
-        }
+        try:
+            doc_id, invoice = extract_to_pending(temp_filepath, file.content_type, doc_type)
+        except ValueError as ve:
+            raise HTTPException(status_code=400, detail=str(ve))
+        return {"success": True, "id": doc_id, "invoice": invoice}
     finally:
-        # 6. Always clean up temp file
         if os.path.exists(temp_filepath):
             os.remove(temp_filepath)
 
@@ -459,6 +461,75 @@ def get_pending_documents(request: Request):
     docs = get_all_pending_documents()
     return docs
 
+def commit_pending_document(doc_id: int, payload: dict = None):
+    """Commit ONE pending document to inventory / sales. Shared by the single
+    confirm route and bulk approve. Returns (status_code, response_dict)."""
+    from db import get_pending_document_by_id, update_pending_document_status
+    pending_doc = get_pending_document_by_id(doc_id)
+    if not pending_doc:
+        return 404, {"success": False, "message": "Pending document not found."}
+    if pending_doc["status"] != "PENDING":
+        return 400, {"success": False, "message": f"Document is already {pending_doc['status']}."}
+
+    doc_type = pending_doc["doc_type"]
+    if payload is None:
+        payload = pending_doc["payload"]
+
+    # Reject if any item has null/missing/zero quantity.
+    missing_qty_items = []
+    for idx, item in enumerate(payload.get("items", [])):
+        qty = item.get("quantity")
+        if qty is None or (isinstance(qty, (int, float)) and qty <= 0):
+            missing_qty_items.append(item.get("product") or item.get("dish_name") or f"Item #{idx + 1}")
+    if missing_qty_items:
+        names = ", ".join(f'"{n}"' for n in missing_qty_items)
+        return 400, {"success": False,
+                     "message": f"Cannot confirm: quantity is missing or zero for {names}. Please fill in all quantities before confirming."}
+
+    try:
+        update_pending_document_status(doc_id, "CONFIRMED")
+
+        if doc_type == "SUPPLIER_INVOICE":
+            from ai.invoice.processor import InvoiceProcessor
+            res = InvoiceProcessor().process(payload)
+            if res.get("success"):
+                return 200, {"success": True,
+                             "message": "Supplier Invoice Confirmed & Logged. Inventory has been updated.",
+                             "details": res}
+            update_pending_document_status(doc_id, "PENDING")
+            return 400, {"success": False, "message": f"Failed to process supplier invoice: {res.get('message')}"}
+
+        elif doc_type == "SALES_BILL":
+            from db import save_sales_bill, confirm_sales_bill
+            from datetime import datetime
+            bill_number = payload.get("invoice_number") or f"SB-{doc_id}"
+            bill_date = payload.get("date") or datetime.now().strftime("%Y-%m-%d")
+            total_amount = payload.get("total_amount") or 0.0
+            items = []
+            for item in payload.get("items", []):
+                qty = item.get("quantity")
+                if qty is not None and qty > 0:
+                    items.append({"dish_name": item.get("product"), "quantity": int(qty),
+                                  "unit_price": item.get("unit_price"), "total_price": item.get("total")})
+            import sqlite3
+            try:
+                bill_db_id = save_sales_bill(bill_number, bill_date, total_amount, items, status='PENDING_CONFIRMATION')
+            except sqlite3.IntegrityError:
+                update_pending_document_status(doc_id, "PENDING")
+                return 409, {"success": False,
+                             "message": f"Bill number \"{bill_number}\" has already been logged. "
+                                        f"Edit the bill number to a unique value before confirming."}
+            confirm_sales_bill(bill_db_id)
+            return 200, {"success": True,
+                         "message": f"Sales Bill Confirmed & Logged. Bill Number: {bill_number}. Ingredient consumption calculated.",
+                         "bill_id": bill_db_id}
+
+        return 400, {"success": False, "message": f"Unknown document type: {doc_type}"}
+    except Exception as e:
+        update_pending_document_status(doc_id, "PENDING")
+        return 500, _server_error(e, f"commit_pending_document (id={doc_id})")
+
+
 @router.post("/admin/confirm/{id}")
 async def confirm_document(id: int, request: Request):
     try:
@@ -466,88 +537,162 @@ async def confirm_document(id: int, request: Request):
     except HTTPException:
         return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
 
-    from db import get_pending_document_by_id, update_pending_document_status
-    pending_doc = get_pending_document_by_id(id)
-    if not pending_doc:
-        return JSONResponse(status_code=404, content={"success": False, "message": "Pending document not found."})
-
-    if pending_doc["status"] != "PENDING":
-        return JSONResponse(status_code=400, content={"success": False, "message": f"Document is already {pending_doc['status']}."})
-
-    doc_type = pending_doc["doc_type"]
-    
-    # Read manually edited/override payload from body if provided
+    # Read manually edited/override payload from the body if provided.
     try:
         body = await request.json()
-        payload = body.get("payload") or pending_doc["payload"]
+        payload = body.get("payload")
     except Exception:
-        payload = pending_doc["payload"]
+        payload = None
 
-    # Validate: reject if any item has null/missing/zero quantity
-    items_payload = payload.get("items", [])
-    missing_qty_items = []
-    for idx, item in enumerate(items_payload):
-        qty = item.get("quantity")
-        if qty is None or (isinstance(qty, (int, float)) and qty <= 0):
-            product_name = item.get("product") or item.get("dish_name") or f"Item #{idx + 1}"
-            missing_qty_items.append(product_name)
-    if missing_qty_items:
-        names = ", ".join(f'"{n}"' for n in missing_qty_items)
-        return JSONResponse(
-            status_code=400,
-            content={
-                "success": False,
-                "message": f"Cannot confirm: quantity is missing or zero for {names}. Please fill in all quantities before confirming."
-            }
-        )
+    code, content = commit_pending_document(id, payload)
+    return JSONResponse(status_code=code, content=content) if code != 200 else content
 
+# ===========================================================================
+# BULK INVOICE UPLOAD
+# ===========================================================================
+# Configurable concurrency (default 3). Each file reuses extract_to_pending;
+# extracted files become normal pending_documents that flow through the
+# existing single-confirm UI for individual corrections.
+_BULK_WORKERS = max(1, int(os.getenv("BULK_UPLOAD_WORKERS", "3")))
+_BATCH_MAX_FILES = 25  # ponytail: guardrail; raise if real batches are larger
+
+
+async def _process_batch_file(file_id: int):
+    """Extract one batch file. Never raises — failures are recorded on the row
+    so the rest of the batch continues."""
+    from db import get_batch_file, set_batch_file_status
+    f = get_batch_file(file_id)
+    if not f or not f.get("filepath"):
+        return
+    set_batch_file_status(file_id, "PROCESSING", bump_attempt=True)
+    content_type = _EXT_CONTENT_TYPE.get(os.path.splitext(f["filepath"])[1].lower())
     try:
-        update_pending_document_status(id, "CONFIRMED")
-
-        if doc_type == "SUPPLIER_INVOICE":
-            from ai.invoice.processor import InvoiceProcessor
-            proc = InvoiceProcessor()
-            res = proc.process(payload)
-            if res.get("success"):
-                return {
-                    "success": True,
-                    "message": "Supplier Invoice Confirmed & Logged. Inventory has been updated.",
-                    "details": res
-                }
-            else:
-                update_pending_document_status(id, "PENDING")
-                return JSONResponse(status_code=400, content={"success": False, "message": f"Failed to process supplier invoice: {res.get('message')}"})
-
-        elif doc_type == "SALES_BILL":
-            from db import save_sales_bill, confirm_sales_bill
-            from datetime import datetime
-            bill_number = payload.get("invoice_number") or f"SB-{id}"
-            bill_date = payload.get("date") or datetime.now().strftime("%Y-%m-%d")
-            total_amount = payload.get("total_amount") or 0.0
-
-            items = []
-            for item in payload.get("items", []):
-                qty = item.get("quantity")
-                if qty is not None and qty > 0:
-                    items.append({
-                        "dish_name": item.get("product"),
-                        "quantity": int(qty),
-                        "unit_price": item.get("unit_price"),
-                        "total_price": item.get("total")
-                    })
-
-            bill_db_id = save_sales_bill(bill_number, bill_date, total_amount, items, status='PENDING_CONFIRMATION')
-            confirm_sales_bill(bill_db_id)
-
-            return {
-                "success": True,
-                "message": f"Sales Bill Confirmed & Logged. Bill Number: {bill_number}. Ingredient consumption calculated.",
-                "bill_id": bill_db_id
-            }
-
+        # OCR + LLM is blocking; run off the event loop so workers run in parallel.
+        doc_id, _ = await asyncio.to_thread(extract_to_pending, f["filepath"], content_type, f["doc_type"])
+        set_batch_file_status(file_id, "EXTRACTED", pending_doc_id=doc_id)
+        try:
+            os.remove(f["filepath"])  # keep only failed files, for retry
+        except OSError:
+            pass
     except Exception as e:
-        update_pending_document_status(id, "PENDING")
-        return JSONResponse(status_code=500, content=_server_error(e, f"confirm_document (id={id})"))
+        logger.error(f"batch file {file_id} extraction failed: {e}", exc_info=True)
+        set_batch_file_status(file_id, "FAILED", error=str(e))
+
+
+async def _process_batch(batch_id: str):
+    from db import get_batch_files
+    sem = asyncio.Semaphore(_BULK_WORKERS)
+
+    async def run(fid):
+        async with sem:
+            await _process_batch_file(fid)
+
+    pending = [f["id"] for f in get_batch_files(batch_id) if f["status"] in ("PENDING", "FAILED")]
+    await asyncio.gather(*(run(fid) for fid in pending))
+
+
+@router.post("/admin/upload/batch")
+async def upload_batch(request: Request, files: List[UploadFile] = File(...), doc_type: str = Form(...)):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    if doc_type not in ("SUPPLIER_INVOICE", "SALES_BILL"):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Invalid doc_type."})
+    if not files:
+        return JSONResponse(status_code=400, content={"success": False, "message": "No files uploaded."})
+    if len(files) > _BATCH_MAX_FILES:
+        return JSONResponse(status_code=400, content={"success": False, "message": f"Too many files. Max {_BATCH_MAX_FILES} per batch."})
+
+    from db import create_batch_file
+    batch_id = uuid.uuid4().hex
+    batch_dir = os.path.join("downloads", "batches", batch_id)
+    os.makedirs(batch_dir, exist_ok=True)
+    max_size = 10 * 1024 * 1024
+
+    for file in files:
+        name = file.filename or "file"
+        # Bad type / oversize become FAILED rows so they still show in the review.
+        if file.content_type not in _UPLOAD_EXTENSIONS:
+            create_batch_file(batch_id, name, doc_type, None, status="FAILED",
+                              error="Unsupported file type (PDF/JPG/PNG only).")
+            continue
+        contents = await file.read()
+        if len(contents) > max_size:
+            create_batch_file(batch_id, name, doc_type, None, status="FAILED", error="File exceeds 10MB.")
+            continue
+        ext = _UPLOAD_EXTENSIONS[file.content_type]  # M-3: extension from whitelisted type
+        path = os.path.join(batch_dir, f"{uuid.uuid4().hex}{ext}")
+        with open(path, "wb") as fh:
+            fh.write(contents)
+        create_batch_file(batch_id, name, doc_type, path, status="PENDING")
+
+    # Fire-and-forget: the UI polls /admin/batch/{id} for progress.
+    asyncio.create_task(_process_batch(batch_id))
+    return {"success": True, "batch_id": batch_id, "total": len(files)}
+
+
+def _batch_view(batch_id: str):
+    from db import get_batch_files
+    files = get_batch_files(batch_id)
+    counts = {"total": len(files), "PENDING": 0, "PROCESSING": 0, "EXTRACTED": 0, "FAILED": 0, "confirmed": 0}
+    for f in files:
+        counts[f["status"]] = counts.get(f["status"], 0) + 1
+        if f.get("doc_status") == "CONFIRMED":
+            counts["confirmed"] += 1
+    done = all(f["status"] in ("EXTRACTED", "FAILED") for f in files) if files else True
+    return {"batch_id": batch_id, "files": files, "counts": counts, "processing_done": done}
+
+
+@router.get("/admin/batch/{batch_id}")
+def get_batch(batch_id: str, request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+    return _batch_view(batch_id)
+
+
+@router.post("/admin/batch/{batch_id}/approve")
+def approve_batch(batch_id: str, request: Request):
+    """Bulk-commit every extracted-and-still-pending document in the batch.
+    Individual corrections stay per-doc via /admin/confirm/{pending_doc_id}."""
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_batch_files
+    results = []
+    for f in get_batch_files(batch_id):
+        if f["status"] == "EXTRACTED" and f["doc_status"] == "PENDING":
+            code, res = commit_pending_document(f["pending_doc_id"])
+            results.append({"file_id": f["id"], "pending_doc_id": f["pending_doc_id"],
+                            "ok": code == 200, "message": res.get("message")})
+    approved = sum(1 for r in results if r["ok"])
+    return {"success": True, "approved": approved, "attempted": len(results), "results": results}
+
+
+@router.post("/admin/batch/{batch_id}/retry/{file_id}")
+async def retry_batch_file(batch_id: str, file_id: int, request: Request):
+    try:
+        get_current_user(request)
+    except HTTPException:
+        return JSONResponse(status_code=401, content={"success": False, "message": "Not authenticated"})
+
+    from db import get_batch_file
+    f = get_batch_file(file_id)
+    if not f or f["batch_id"] != batch_id:
+        return JSONResponse(status_code=404, content={"success": False, "message": "File not found in batch."})
+    if f["status"] != "FAILED":
+        return JSONResponse(status_code=400, content={"success": False, "message": f"Only FAILED files can be retried (this is {f['status']})."})
+    if not f.get("filepath") or not os.path.exists(f["filepath"]):
+        return JSONResponse(status_code=400, content={"success": False, "message": "Original file is no longer available to retry."})
+
+    asyncio.create_task(_process_batch_file(file_id))
+    return {"success": True, "message": "Retry started."}
+
 
 @router.post("/admin/reject/{id}")
 def reject_document(id: int, request: Request):
@@ -716,8 +861,33 @@ async def add_inventory_route(request: Request):
     if current_stock < 0 or minimum_stock < 0:
         return JSONResponse(status_code=400, content={"success": False, "message": "Stock values cannot be negative"})
 
-    from db import save_inventory, log_inventory_audit
+    from db import get_product_inventory, save_inventory, log_inventory_audit
     try:
+        existing = get_product_inventory(product_name)
+        if existing:
+            # Adding to a product that already exists ACCUMULATES stock
+            # (add-to-existing), keeping its canonical name; minimum/unit refresh.
+            canonical = existing[1]
+            old_stock = existing[2] or 0
+            new_total = old_stock + current_stock
+            save_inventory(canonical, new_total, minimum_stock, unit)
+            log_inventory_audit(
+                product_name=canonical,
+                action_type="ADD",
+                old_stock=old_stock,
+                new_stock=new_total,
+                old_unit=existing[4],
+                new_unit=unit,
+                old_minimum=existing[3],
+                new_minimum=minimum_stock,
+                source="dashboard",
+                user_phone=None,
+                notes="Added to existing stock via dashboard",
+            )
+            return {"success": True,
+                    "message": f"Added {current_stock} {unit} to '{canonical}' — now {new_total} {unit}"}
+
+        # New product
         save_inventory(product_name, current_stock, minimum_stock, unit)
         log_inventory_audit(
             product_name=product_name,
@@ -730,7 +900,7 @@ async def add_inventory_route(request: Request):
             new_minimum=minimum_stock,
             source="dashboard",
             user_phone=None,
-            notes=f"Added via dashboard"
+            notes="Added via dashboard",
         )
         return {"success": True, "message": f"Product '{product_name}' added to inventory"}
     except Exception as e:
@@ -770,26 +940,38 @@ async def update_inventory_route(request: Request):
         old_minimum = existing[3]
         old_unit = existing[4]
 
-        # Handle stock update
-        if new_stock is not None:
-            try:
-                new_stock = float(new_stock)
-            except ValueError:
-                return JSONResponse(status_code=400, content={"success": False, "message": "Stock value must be numeric"})
-
-            if new_stock < 0:
-                return JSONResponse(status_code=400, content={"success": False, "message": "Stock cannot be negative"})
-
-            if action_type == "ADJUST_DELTA":
-                final_stock = old_stock + new_stock
+        # Handle stock update. The two modes take DIFFERENT inputs:
+        #   ADJUST_DELTA -> a signed delta (dashboard sends `delta_quantity`);
+        #                   validate the RESULT, not the delta, so removing stock works.
+        #   SET_ABSOLUTE -> an absolute `new_stock` that must be >= 0.
+        if action_type == "ADJUST_DELTA":
+            # Back-compat: the delta was historically sent as `new_stock`.
+            delta = data.get("delta_quantity")
+            if delta is None:
+                delta = new_stock
+            if delta is not None:
+                try:
+                    delta = float(delta)
+                except (ValueError, TypeError):
+                    return JSONResponse(status_code=400, content={"success": False, "message": "Adjustment value must be numeric"})
+                final_stock = old_stock + delta
                 if final_stock < 0:
-                    return JSONResponse(status_code=400, content={"success": False, "message": f"Cannot adjust by {new_stock} (would result in negative stock)"})
-                update_inventory(product_name, new_stock)
-            else:  # SET_ABSOLUTE
+                    return JSONResponse(status_code=400, content={"success": False, "message": f"Cannot adjust by {delta} (would result in negative stock)"})
+                update_inventory(product_name, delta)
+            else:
+                final_stock = old_stock
+        else:  # SET_ABSOLUTE
+            if new_stock is not None:
+                try:
+                    new_stock = float(new_stock)
+                except (ValueError, TypeError):
+                    return JSONResponse(status_code=400, content={"success": False, "message": "Stock value must be numeric"})
+                if new_stock < 0:
+                    return JSONResponse(status_code=400, content={"success": False, "message": "Stock cannot be negative"})
                 save_inventory(product_name, new_stock, old_minimum, old_unit)
                 final_stock = new_stock
-        else:
-            final_stock = old_stock
+            else:
+                final_stock = old_stock
 
         # Update minimum if provided
         if new_minimum is not None:

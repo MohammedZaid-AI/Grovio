@@ -362,5 +362,7 @@
         refresh();
         // Keep the rail honest after the user changes inventory in another tab.
         window.addEventListener('focus', refresh);
+        // ...and immediately after any in-app mutation (dashboard.js emits this).
+        document.addEventListener('grovio:data-changed', refresh);
     });
 })();

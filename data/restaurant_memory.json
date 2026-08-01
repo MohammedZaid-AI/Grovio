@@ -2,16 +2,17 @@
     "categories": {
         "cola": {
             "brand_counts": {
-                "Coca-Cola": 2
+                "Coca-Cola": 5
             },
             "pack_counts": {
                 "750 ml x 12": 1,
-                "1.25 ltr": 2,
-                "1 Combo": 1
+                "1.25 ltr": 4,
+                "1 Combo": 1,
+                "1.25 ltr x 2": 1
             },
             "supplier_counts": {},
             "favorite_products": {
-                "Coca-Cola Soft Drink Bottle": 4,
+                "Coca-Cola Soft Drink Bottle": 7,
                 "Coke & Bingo Chilli Potato Combo": 2
             },
             "rejected": [
@@ -27,24 +28,43 @@
                     "chosen": "Coke & Bingo Chilli Potato Combo"
                 }
             ],
-            "purchase_count": 2,
-            "last_purchased_at": "2026-07-09T08:12:07.484240+00:00"
+            "purchase_count": 5,
+            "last_purchased_at": "2026-07-25T16:08:05.016858+00:00"
         },
         "ice cream": {
             "brand_counts": {
-                "Amul": 1
+                "Amul": 3,
+                "Ideal": 1
             },
             "pack_counts": {
-                "1 ltr": 1
+                "1 ltr": 1,
+                "60 ml": 2,
+                "120 ml": 2,
+                "170 ml": 1
             },
             "supplier_counts": {},
             "favorite_products": {
-                "Amul King Alphonso Gold Ice Cream Tub": 1
+                "Amul King Alphonso Gold Ice Cream Tub": 1,
+                "Amul Ice Cream Pista Malai Kulfi": 3,
+                "Amul Tricone Cookie Crunch Delight Ice Cream Cone": 3,
+                "Ideal Ice Cream Tripple Sundae Cup": 1
             },
-            "rejected": [],
-            "overrides": [],
-            "purchase_count": 1,
-            "last_purchased_at": "2026-07-09T01:41:02.838518+00:00"
+            "rejected": [
+                "Amul Falooda Ice Cream Sundae Tub",
+                "Amul Ice Cream Pista Malai Kulfi"
+            ],
+            "overrides": [
+                {
+                    "suggested": "Amul Falooda Ice Cream Sundae Tub",
+                    "chosen": "Amul Ice Cream Pista Malai Kulfi"
+                },
+                {
+                    "suggested": "Amul Ice Cream Pista Malai Kulfi",
+                    "chosen": "Amul Tricone Cookie Crunch Delight Ice Cream Cone"
+                }
+            ],
+            "purchase_count": 4,
+            "last_purchased_at": "2026-07-25T16:08:05.018044+00:00"
         },
         "combo": {
             "brand_counts": {

@@ -100,10 +100,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }, 5000);
     }
 
+    // Broadcast after any mutation that changes inventory/recipe/deduction data
+    // so the read-only rail widgets (dashboard-ui.js) refresh without a page
+    // reload. Decoupled via a DOM event — no direct cross-file coupling.
+    function notifyDataChanged() {
+        document.dispatchEvent(new CustomEvent('grovio:data-changed'));
+    }
+
     // -------------------------------------------------------
     // Helper: Drag and Drop Setup
     // -------------------------------------------------------
     function setupDropzone(dropzone, input, endpoint, loaderId) {
+        if (!dropzone || !input) return;   // card may be absent (e.g. supplier invoices removed)
         const loader = document.getElementById(loaderId);
 
         dropzone.addEventListener('click', () => input.click());
@@ -114,13 +122,13 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
 
-        // Drag events
+        // Drag events — toggle the design-system .dragover class (styled in CSS)
+        // instead of hardcoding colors, so it respects the theme.
         ['dragenter', 'dragover'].forEach(eventName => {
             dropzone.addEventListener(eventName, (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                dropzone.style.borderColor = 'var(--accent)';
-                dropzone.style.background = 'rgba(59, 130, 246, 0.05)';
+                dropzone.classList.add('dragover');
             }, false);
         });
 
@@ -128,8 +136,7 @@ document.addEventListener('DOMContentLoaded', () => {
             dropzone.addEventListener(eventName, (e) => {
                 e.preventDefault();
                 e.stopPropagation();
-                dropzone.style.borderColor = 'var(--glass-border)';
-                dropzone.style.background = 'rgba(255, 255, 255, 0.02)';
+                dropzone.classList.remove('dragover');
             }, false);
         });
 
@@ -759,6 +766,7 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             const data = await response.json();
             renderDeductionsList(data);
+            notifyDataChanged();   // deductions change stock -> refresh rail
         } catch (err) {
             console.error('Failed to fetch pending deductions:', err);
             showToast('Failed to fetch pending inventory deductions.', 'error');
@@ -811,9 +819,9 @@ document.addEventListener('DOMContentLoaded', () => {
             card.innerHTML = `
                 <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;">
                     <div>
-                        <div class="doc-title" style="font-size: 1.1rem; color: #fff; font-weight: 600;">${escapeHtml(ingName)}</div>
+                        <div class="doc-title" style="font-size: 1.1rem; color: var(--text); font-weight: 600;">${escapeHtml(ingName)}</div>
                         <div style="color: var(--text-secondary); font-size: 0.85rem; margin-top: 0.25rem;">
-                            Estimated Qty: <strong style="color: var(--accent);">${qty} ${escapeHtml(unit)}</strong>
+                            Estimated Qty: <strong style="color: var(--primary);">${qty} ${escapeHtml(unit)}</strong>
                         </div>
                         <div style="color: var(--text-secondary); font-size: 0.8rem; margin-top: 0.25rem;">
                             Source Bill: <strong>${escapeHtml(billNumber)}</strong> (${escapeHtml(billDate)})
@@ -857,6 +865,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
             if (response.ok && data.success) {
                 showToast(data.message || 'Deduction approved successfully.', 'success');
+                // Approval decremented stock -> refresh the inventory table + audit
+                // log (and the rail, via fetchInventoryList) so every view reflects
+                // the new stock immediately, not just after a tab switch.
+                fetchInventoryList();
+                fetchAuditLog();
                 if (card) {
                     card.style.transform = 'scale(0.9)';
                     card.style.opacity = '0';
@@ -1027,6 +1040,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             const data = await response.json();
             renderInventoryTable(data.data || []);
+            notifyDataChanged();   // keep rail widgets in sync
         } catch (err) {
             showToast('Failed to fetch inventory.', 'error');
             renderInventoryTable([]);
@@ -1047,7 +1061,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         tbody.innerHTML = items.map((item, idx) => {
-            const [id, productName, currentStock, minimumStock, unit] = item;
+            // /admin/inventory returns labeled objects, not positional rows.
+            const { product_name: productName, current_stock: currentStock,
+                    minimum_stock: minimumStock, unit } = item;
             let status = '✅ OK';
             let statusClass = 'ok';
 
@@ -1105,7 +1121,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         tbody.innerHTML = logs.map((log) => {
-            const [id, productName, action, oldStock, newStock, oldUnit, newUnit, oldMinimum, newMinimum, source, userPhone, notes, createdAt] = log;
+            // /admin/inventory/audit-log returns labeled objects, not positional rows.
+            const { product_name: productName, action_type: action, old_stock: oldStock,
+                    new_stock: newStock, source, created_at: createdAt } = log;
 
             const actionLabel = action === 'SET_ABSOLUTE' ? '📝 SET' :
                               action === 'ADJUST_DELTA' ? '➕ ADJUST' : action;
@@ -1138,13 +1156,14 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             const data = await response.json();
-            const item = data.data.find(i => i[1] === productName);
+            const item = data.data.find(i => i.product_name === productName);
             if (!item) {
                 showToast('Product not found.', 'error');
                 return;
             }
 
-            const [id, name, currentStock, minimumStock, unit] = item;
+            const { product_name: name, current_stock: currentStock,
+                    minimum_stock: minimumStock, unit } = item;
             currentEditingProduct = name;
 
             document.getElementById('edit-product-name').value = name;

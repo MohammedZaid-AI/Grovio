@@ -142,27 +142,58 @@
                             </div>
                         </div>
 
-                        <!-- Supplier Invoices Card -->
-                        <div class="card" id="grocery-invoice-card" style="--i:2">
+                        <!-- Manual inventory pointer: stock is added by hand, not from supplier scans -->
+                        <div class="card" style="--i:2">
                             <div class="card-head">
                                 <div>
-                                    <h2>📋 Supplier Invoices</h2>
-                                    <p class="card-desc">Update inventory levels and record ingredient purchase prices from vendor invoices.</p>
+                                    <h2>📦 Add stock manually</h2>
+                                    <p class="card-desc">Inventory is maintained by hand for accuracy. Add or update products in the Inventory tab; sales bills below deduct ingredients automatically.</p>
                                 </div>
                             </div>
-                            <div class="upload-zone" id="grocery-invoice-dropzone">
-                                <div class="loading-overlay" id="grocery-invoice-loading">
-                                    <div class="spinner"></div>
-                                    <p>Extracting document…</p>
-                                </div>
-                                <div class="upload-icon">📋</div>
-                                <p>Drag and drop an invoice here, or <span>browse</span></p>
-                                <p class="upload-hint">PDF, JPG or PNG · up to 10 MB</p>
-                                <div class="upload-cta">
-                                    <button type="button" class="btn btn-primary">Browse files</button>
-                                </div>
-                                <input type="file" id="grocery-invoice-input" class="file-input" accept="application/pdf, image/jpeg, image/jpg, image/png">
+                            <div style="display:flex; gap:0.75rem; flex-wrap:wrap;">
+                                <a href="#inventory" class="btn btn-primary">Go to Inventory</a>
+                                <a href="#recipes" class="btn btn-secondary">Manage Recipes</a>
                             </div>
+                        </div>
+                    </div>
+
+                    <!-- Bulk invoice upload -->
+                    <div class="card" id="bulk-upload-card" style="margin-top: var(--sp-5);">
+                        <div class="card-head">
+                            <div>
+                                <h2>🗂️ Bulk Sales Bill Upload</h2>
+                                <p class="card-desc">Upload many customer sales bills at once. They extract in the background; review and approve them together to deduct ingredients.</p>
+                            </div>
+                        </div>
+                        <div style="display:flex; gap:0.75rem; flex-wrap:wrap; align-items:center; margin-bottom:1rem;">
+                            <select id="bulk-doc-type" class="form-input" style="display:none;">
+                                <option value="SALES_BILL" selected>Customer sales bills</option>
+                            </select>
+                            <input type="file" id="bulk-file-input" class="file-input" multiple
+                                   accept="application/pdf, image/jpeg, image/jpg, image/png">
+                            <button type="button" class="btn btn-secondary" id="bulk-browse-btn">Select files</button>
+                            <span id="bulk-file-count" style="font-size:var(--fs-xs); color:var(--text-3);"></span>
+                            <button type="button" class="btn btn-primary" id="bulk-upload-btn" disabled>Upload &amp; extract</button>
+                        </div>
+                        <div id="bulk-review" style="display:none;">
+                            <div style="display:flex; justify-content:space-between; align-items:center; gap:1rem; flex-wrap:wrap; margin-bottom:0.75rem;">
+                                <div id="bulk-progress" style="font-size:var(--fs-sm); font-weight:560;"></div>
+                                <button type="button" class="btn btn-success btn-small" id="bulk-approve-btn" disabled>Approve all extracted</button>
+                            </div>
+                            <div class="items-container">
+                                <table class="items-table">
+                                    <thead>
+                                        <tr>
+                                            <th>File</th><th>Status</th><th>Bill #</th>
+                                            <th>Total</th><th style="text-align:center;">Action</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="bulk-review-body"></tbody>
+                                </table>
+                            </div>
+                            <p style="font-size:var(--fs-xs); color:var(--text-3); margin-top:0.75rem;">
+                                Extracted bills also appear in <b>Pending confirmations</b> below, where you can correct individual line items before approving.
+                            </p>
                         </div>
                     </div>
 
@@ -496,5 +527,7 @@
     <script src="/static/js/dashboard.js"></script>
     <!-- Presentation-only layer: hero, health, suggestions, alerts, activity, search -->
     <script src="/static/js/dashboard-ui.js"></script>
+    <!-- Bulk invoice upload (self-contained) -->
+    <script src="/static/js/batch-upload.js"></script>
 </body>
 </html>

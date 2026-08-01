@@ -118,6 +118,27 @@ def init_db():
         )
         ''')
 
+        # Bulk invoice upload: one row per uploaded file. A "batch" is just the
+        # set of rows sharing a batch_id (metadata = MIN(created_at)/COUNT/doc_type).
+        # On successful extraction the file becomes a pending_documents row, which
+        # then flows through the existing single-confirm UI for corrections.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS invoice_batch_files (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            batch_id TEXT NOT NULL,
+            filename TEXT,
+            doc_type TEXT NOT NULL,
+            filepath TEXT,
+            status TEXT DEFAULT 'PENDING',   -- PENDING -> PROCESSING -> EXTRACTED / FAILED
+            error TEXT,
+            pending_doc_id INTEGER,
+            attempts INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_batch_files ON invoice_batch_files(batch_id)")
+
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS recipes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -482,7 +503,25 @@ def get_dashboard_stats():
 def save_inventory(product_name, current_stock, minimum_stock, unit):
     conn = get_connection()
     try:
-        conn.execute('\n        INSERT OR REPLACE INTO inventory(\n\n            product_name,\n\n            current_stock,\n\n            minimum_stock,\n\n            unit\n\n        )\n\n        VALUES (?, ?, ?, ?)\n        ', (product_name, current_stock, minimum_stock, unit))
+        cur = conn.cursor()
+        # Resolve the product case-insensitively. The old INSERT OR REPLACE keyed
+        # on the case-SENSITIVE UNIQUE(product_name), so adding "Rice" alongside an
+        # existing "rice" created a duplicate row — while recipes/deductions match
+        # case-insensitively and would then hit the wrong/both rows. Update the
+        # existing row (keeping its canonical name) instead of making a twin.
+        existing = cur.execute(
+            "SELECT product_name FROM inventory WHERE LOWER(product_name) = LOWER(?)",
+            (product_name,)).fetchone()
+        if existing:
+            cur.execute(
+                "UPDATE inventory SET current_stock = ?, minimum_stock = ?, unit = ?, "
+                "is_active = 1, updated_at = CURRENT_TIMESTAMP WHERE product_name = ?",
+                (current_stock, minimum_stock, unit, existing[0]))
+        else:
+            cur.execute(
+                "INSERT INTO inventory(product_name, current_stock, minimum_stock, unit) "
+                "VALUES (?, ?, ?, ?)",
+                (product_name, current_stock, minimum_stock, unit))
         conn.commit()
     finally:
         conn.close()
@@ -506,7 +545,11 @@ def get_inventory():
 def get_product_inventory(product_name):
     conn = get_connection()
     try:
-        row = conn.execute('\n        SELECT *\n\n        FROM inventory\n\n        WHERE product_name=?\n        ', (product_name,)).fetchone()
+        # Case-insensitive so "rice" resolves the "Rice" row (consistent with
+        # save_inventory and recipe/deduction matching).
+        row = conn.execute(
+            'SELECT * FROM inventory WHERE LOWER(product_name) = LOWER(?)',
+            (product_name,)).fetchone()
         return row
     finally:
         conn.close()
@@ -1619,6 +1662,94 @@ def update_pending_document_status(doc_id, status):
     finally:
         conn.close()
 
+# ---------------------------------------------------------------------------
+# Bulk invoice batch files
+# ---------------------------------------------------------------------------
+def create_batch_file(batch_id, filename, doc_type, filepath, status='PENDING', error=None):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO invoice_batch_files (batch_id, filename, doc_type, filepath, status, error)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (batch_id, filename, doc_type, filepath, status, error))
+        conn.commit()
+        return cur.lastrowid
+    finally:
+        conn.close()
+
+
+def set_batch_file_status(file_id, status, error=None, pending_doc_id=None, bump_attempt=False):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute(f"""
+            UPDATE invoice_batch_files
+            SET status = ?, error = ?, pending_doc_id = COALESCE(?, pending_doc_id),
+                attempts = attempts + {1 if bump_attempt else 0},
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (status, error, pending_doc_id, file_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_batch_file(file_id):
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, batch_id, filename, doc_type, filepath, status, error, pending_doc_id, attempts
+            FROM invoice_batch_files WHERE id = ?
+        """, (file_id,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        keys = ['id', 'batch_id', 'filename', 'doc_type', 'filepath', 'status', 'error', 'pending_doc_id', 'attempts']
+        return dict(zip(keys, row))
+    finally:
+        conn.close()
+
+
+def get_batch_files(batch_id):
+    """Per-file status joined with the extracted pending document so the review
+    table can show supplier / invoice number / total / confirm-status."""
+    import json
+    conn = get_connection()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT f.id, f.batch_id, f.filename, f.doc_type, f.status, f.error,
+                   f.pending_doc_id, f.attempts, f.created_at,
+                   p.payload, p.status
+            FROM invoice_batch_files f
+            LEFT JOIN pending_documents p ON p.id = f.pending_doc_id
+            WHERE f.batch_id = ?
+            ORDER BY f.id ASC
+        """, (batch_id,))
+        out = []
+        for r in cur.fetchall():
+            payload = {}
+            if r[9]:
+                try:
+                    payload = json.loads(r[9])
+                except Exception:
+                    payload = {}
+            out.append({
+                'id': r[0], 'batch_id': r[1], 'filename': r[2], 'doc_type': r[3],
+                'status': r[4], 'error': r[5], 'pending_doc_id': r[6], 'attempts': r[7],
+                'created_at': r[8],
+                'supplier': payload.get('supplier') or payload.get('vendor'),
+                'invoice_number': payload.get('invoice_number'),
+                'total_amount': payload.get('total_amount'),
+                'doc_status': r[10],  # None until extracted; PENDING/CONFIRMED/... after
+            })
+        return out
+    finally:
+        conn.close()
+
+
 def get_pending_inventory_deductions():
     """
     Retrieves all pending inventory deductions with their source sales bill details and current stock levels.
@@ -1674,24 +1805,32 @@ def approve_inventory_deduction(deduction_id):
         ing_name, qty, unit, bill_id, status = row
         if status != 'PENDING':
             return False, f"Deduction is already {status}."
-        
+
         # Enforce that the ingredient must be tracked
         cursor.execute("SELECT 1 FROM inventory WHERE LOWER(product_name) = LOWER(?)", (ing_name,))
         exists = cursor.fetchone()
         if not exists:
             return False, f"Ingredient '{ing_name}' is not tracked in inventory. Add it to inventory first."
-        
-        # Perform the stock decrement
+
+        # Atomically CLAIM the deduction before touching stock. Only the first
+        # concurrent approval flips PENDING->APPROVED and proceeds to decrement;
+        # a duplicate request / double-click / two tabs gets rowcount 0 and
+        # aborts, so stock can never be deducted twice for one deduction.
+        cursor.execute(
+            "UPDATE pending_inventory_deductions SET status = 'APPROVED' WHERE id = ? AND status = 'PENDING'",
+            (deduction_id,))
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return False, "Deduction was already processed."
+
+        # Perform the stock decrement (we now exclusively own this deduction)
         cursor.execute("""
             UPDATE inventory
             SET current_stock = current_stock - ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE LOWER(product_name) = LOWER(?)
         """, (qty, ing_name))
-        
-        # Update pending deduction status
-        cursor.execute("UPDATE pending_inventory_deductions SET status = 'APPROVED' WHERE id = ?", (deduction_id,))
-        
+
         # Update product consumption status
         cursor.execute("""
             UPDATE product_consumption 
@@ -1718,14 +1857,20 @@ def reject_inventory_deduction(deduction_id):
         ing_name, bill_id, status = row
         if status != 'PENDING':
             return False, f"Deduction is already {status}."
-        
-        # Update pending deduction status
-        cursor.execute("UPDATE pending_inventory_deductions SET status = 'REJECTED' WHERE id = ?", (deduction_id,))
-        
+
+        # Atomic claim (same guard as approve) so a reject can never race with,
+        # or overwrite, a concurrent approval that already decremented stock.
+        cursor.execute(
+            "UPDATE pending_inventory_deductions SET status = 'REJECTED' WHERE id = ? AND status = 'PENDING'",
+            (deduction_id,))
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return False, "Deduction was already processed."
+
         # Update product consumption status
         cursor.execute("""
-            UPDATE product_consumption 
-            SET status = 'REJECTED' 
+            UPDATE product_consumption
+            SET status = 'REJECTED'
             WHERE LOWER(product_name) = LOWER(?) AND source_bill_id = ?
         """, (ing_name, bill_id))
         
