@@ -3,14 +3,14 @@ Phase 2 reliability tests: async WhatsApp delivery.
 
 Covers the delivery layer that removes the Twilio webhook-timeout failure mode:
   * duplicate webhook protection (dedup by MessageSid)
-  * background processing via the SAME ConversationEngine (mocked at engine.process)
+  * background processing via the concierge (mocked at worker.respond)
   * ordered multi-part delivery / long-response chunking
   * send retries + hard-failure recording (never silently dropped)
   * restart recovery (re-send pending outbound; fail interrupted inbound)
   * multiple concurrent conversations (per-phone isolation)
   * no duplicate replies (SENT parts are not re-sent)
 
-Network is never touched: engine.process and Twilio send_whatsapp are mocked.
+Network is never touched: concierge.respond and send_whatsapp are mocked.
 Run:  python tests/test_whatsapp_async_delivery.py
 """
 import asyncio
@@ -22,6 +22,11 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Pin the legacy transport: this suite proves the delivery pipeline is
+# unchanged by the pivot. The Cloud API path is covered by
+# tests/test_cloud_api_transport.py.
+os.environ["WHATSAPP_TRANSPORT"] = "twilio"
+
 # Isolated temp DB BEFORE importing anything that touches db.
 import db
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -30,7 +35,6 @@ db.DB_PATH = _tmp.name
 db.init_db()
 
 import backend.whatsapp_worker as worker
-from backend.conversation_engine import engine
 from whatsapp.twilio import classify_send_error
 from twilio.base.exceptions import TwilioRestException
 
@@ -114,15 +118,15 @@ async def test_dedup():
 
 
 async def test_basic_delivery():
-    print("\n[2] Basic processing via engine + single ordered send")
+    print("\n[2] Basic processing via concierge + single ordered send")
     phone = "whatsapp:+910000000002"
-    sender = Mock(return_value="TWSID-1")
-    with patch.object(engine, "process", new=AsyncMock(return_value="Hello there")), \
+    sender = AsyncMock(return_value="TWSID-1")
+    with patch.object(worker, "respond", new=AsyncMock(return_value="Hello there")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-2", phone, "hey", 0)
         await drain(phone)
     rows = outbound_rows(phone)
-    check("engine.process consulted (single reply part)", len(rows) == 1)
+    check("concierge consulted (single reply part)", len(rows) == 1)
     check("reply body delivered", rows and rows[0][1] == "Hello there")
     check("marked SENT with provider sid", rows and rows[0][2] == "SENT" and rows[0][4] == "TWSID-1")
     check("inbound marked DONE", inbound_status(phone) == ["DONE"])
@@ -134,8 +138,8 @@ async def test_long_response_ordered():
     phone = "whatsapp:+910000000003"
     long_reply = "\n".join(f"line-{i}" for i in range(400))  # > 1500 chars, splittable
     order = []
-    sender = Mock(side_effect=lambda to, body: (order.append(body), "S")[1])
-    with patch.object(engine, "process", new=AsyncMock(return_value=long_reply)), \
+    sender = AsyncMock(side_effect=lambda to, body: (order.append(body), "S")[1])
+    with patch.object(worker, "respond", new=AsyncMock(return_value=long_reply)), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-3", phone, "report", 0)
         await drain(phone)
@@ -150,8 +154,8 @@ async def test_long_response_ordered():
 async def test_send_retry():
     print("\n[4] Send retries then succeeds")
     phone = "whatsapp:+910000000004"
-    sender = Mock(side_effect=[Exception("429"), Exception("timeout"), "TWSID-OK"])
-    with patch.object(engine, "process", new=AsyncMock(return_value="retry me")), \
+    sender = AsyncMock(side_effect=[Exception("429"), Exception("timeout"), "TWSID-OK"])
+    with patch.object(worker, "respond", new=AsyncMock(return_value="retry me")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-4", phone, "x", 0)
         await drain(phone)
@@ -164,8 +168,8 @@ async def test_send_retry():
 async def test_hard_failure_recorded():
     print("\n[5] Hard send failure is recorded, not silently dropped")
     phone = "whatsapp:+910000000005"
-    sender = Mock(side_effect=Exception("twilio down"))
-    with patch.object(engine, "process", new=AsyncMock(return_value="never sends")), \
+    sender = AsyncMock(side_effect=Exception("twilio down"))
+    with patch.object(worker, "respond", new=AsyncMock(return_value="never sends")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-5", phone, "x", 0)
         await drain(phone)
@@ -178,8 +182,8 @@ async def test_hard_failure_recorded():
 async def test_processing_error_still_replies():
     print("\n[6] Engine exception -> error reply queued + inbound FAILED")
     phone = "whatsapp:+910000000006"
-    sender = Mock(return_value="S")
-    with patch.object(engine, "process", new=AsyncMock(side_effect=RuntimeError("boom"))), \
+    sender = AsyncMock(return_value="S")
+    with patch.object(worker, "respond", new=AsyncMock(side_effect=RuntimeError("boom"))), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-6", phone, "x", 0)
         await drain(phone)
@@ -196,15 +200,15 @@ async def test_restart_recovery():
     # (a) A reply that was computed but never sent (crash before/at send).
     iid, _ = db.enqueue_inbound_message("SID-7a", phone_out, "x", 0)
     db.save_reply_and_finish(iid, phone_out, ["recovered reply"])
-    # (b) A message interrupted mid-engine: claimed (PROCESSING) but never finished.
+    # (b) A message interrupted mid-turn: claimed (PROCESSING) but never finished.
     db.enqueue_inbound_message("SID-7b", phone_proc, "y", 0)
     db.claim_next_inbound(phone_proc)  # -> PROCESSING
 
-    sender = Mock(return_value="TWSID-R")
-    # Patch the engine defensively: recovery should not invoke it for these
+    sender = AsyncMock(return_value="TWSID-R")
+    # Patch the concierge defensively: recovery should not invoke it for these
     # phones (outbound-only / interrupted), but we never want a test to hit a
     # real LLM if that invariant ever regresses.
-    with patch.object(engine, "process", new=AsyncMock(return_value="unexpected")), \
+    with patch.object(worker, "respond", new=AsyncMock(return_value="unexpected")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.recover_pending()
         await drain(phone_out)
@@ -225,8 +229,8 @@ async def test_concurrent_phones():
         await asyncio.sleep(0.01)
         return f"reply-for-{phone[-2:]}"
 
-    sender = Mock(return_value="S")
-    with patch.object(engine, "process", new=AsyncMock(side_effect=fake_process)), \
+    sender = AsyncMock(return_value="S")
+    with patch.object(worker, "respond", new=AsyncMock(side_effect=fake_process)), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-9A", pa, "a", 0)
         await worker.enqueue_and_wake("SID-9B", pb, "b", 0)
@@ -243,8 +247,8 @@ async def test_concurrent_phones():
 async def test_no_duplicate_resend():
     print("\n[9] Already-SENT parts are never re-sent")
     phone = "whatsapp:+910000000011"
-    sender = Mock(return_value="S")
-    with patch.object(engine, "process", new=AsyncMock(return_value="once only")), \
+    sender = AsyncMock(return_value="S")
+    with patch.object(worker, "respond", new=AsyncMock(return_value="once only")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-11", phone, "x", 0)
         await drain(phone)
@@ -276,8 +280,8 @@ async def test_error_classification():
 async def test_permanent_error_no_retry():
     print("\n[11] 63038 daily limit -> fail immediately, record code, no retries")
     phone = "whatsapp:+910000000012"
-    sender = Mock(side_effect=TwilioRestException(429, "u", "daily limit", code=63038))
-    with patch.object(engine, "process", new=AsyncMock(return_value="hi")), \
+    sender = AsyncMock(side_effect=TwilioRestException(429, "u", "daily limit", code=63038))
+    with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-12", phone, "x", 0)
         await drain(phone)
@@ -290,8 +294,8 @@ async def test_permanent_error_no_retry():
 async def test_retryable_then_success():
     print("\n[12] Transient HTTP 503 retried, then succeeds")
     phone = "whatsapp:+910000000013"
-    sender = Mock(side_effect=[TwilioRestException(503, "u", "unavailable"), "TWSID-OK"])
-    with patch.object(engine, "process", new=AsyncMock(return_value="hi")), \
+    sender = AsyncMock(side_effect=[TwilioRestException(503, "u", "unavailable"), "TWSID-OK"])
+    with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
          patch.object(worker, "send_whatsapp", sender):
         await worker.enqueue_and_wake("SID-13", phone, "x", 0)
         await drain(phone)

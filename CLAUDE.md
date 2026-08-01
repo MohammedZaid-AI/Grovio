@@ -25,46 +25,59 @@ half.
 |---|---|---|
 | 1 | Audit + migration plan (`MIGRATION.md`) | ✅ Done |
 | 2 | Delete the ERP | ✅ Done |
-| 3 | Conversation engine + WhatsApp Cloud API transport | ⏳ Next |
-| 4 | Memory | — |
-| 5 | Recommendation engine | — |
+| 3 | Planner + providers + memory + Cloud API transport | ✅ Done |
+| 4 | Memory depth (learning, extraction, habits) | ⏳ Next |
+| 5 | Recommendation engine + a real restaurant provider | Blocked on a data source |
 | 6 | Ordering | — |
 | 7 | Tracking | — |
 
 ## Architecture
 
 ```
-WhatsApp  →  webhook (enqueue, return 200 in ms)
+WhatsApp  →  webhook (verify, enqueue, return 200 in ms)
                  ↓
-          whatsapp_worker         durable queue, per-phone ordering, retries
+          whatsapp_worker      durable queue, per-phone ordering, retries
                  ↓
-          ConversationEngine      history, chunking, "continue"
+          ai/concierge.py      turn entry point
                  ↓
-          ai/concierge.py         ← the product seam (Phase 3 fills this)
-                 ↓
-          Memory → Planner → Recommendations → Provider Layer
-                                                    ↓
-                                   Swiggy | Zomato | Blinkit | Zepto
+          ai/planner.py        LLM orchestrates via tools
+                 ├── ai/memory.py           user model (retrieval + writes)
+                 ├── ai/recommendation.py   deterministic scoring + reasons
+                 └── ai/providers/registry  routed by CAPABILITY, not by name
+                                   ↓
+                     Swiggy | Zomato | Blinkit | Zepto
 ```
 
 **Nothing above the provider layer may know which provider it is talking to.**
-That boundary is what makes new platforms additive instead of invasive.
+`tests/test_concierge.py` §10 enforces this mechanically — it fails the build if
+a platform name appears in `ai/*.py`, `backend/` or `core/`.
+
+The LLM cannot reach a provider, the database, or a platform directly. Its only
+levers are the tools in `planner.TOOLS`. That is what makes the layering real
+rather than decorative.
 
 ## Layout
 
 ```
 backend/
-  app.py                FastAPI app + lifespan (schema, restart recovery)
-  routes.py             ONE route: POST /webhook
+  app.py                FastAPI app + lifespan (schema, providers, recovery)
+  routes.py             ONE capability: GET/POST /webhook
   whatsapp_worker.py    async delivery worker — do not casually modify
-  conversation_engine.py
 ai/
-  concierge.py          conversation entry point (Phase 3)
-  conversation/         session, chunker, working memory
-core/                   llm, config, logger, authz, formatters
-integrations/swiggy/    Instamart MCP client (grocery; seed of a future provider)
-db.py                   delivery queue only — 2 tables
-tests/
+  concierge.py          turn entry point (run planner, persist, stay friendly)
+  planner.py            orchestration: intent → memory → recommend → execute
+  memory.py             user model: facts, history, food memory
+  recommendation.py     scoring; reasons are derived, never invented
+  providers/
+    base.py             Offer + Provider protocol (neutral currency)
+    registry.py         capability routing, fan-out, failure isolation
+    swiggy.py           the ONLY file allowed to know Swiggy exists
+core/                   llm (async, tool-calling), config, logger, authz
+whatsapp/
+  transport.py          seam: picks the transport, normalises it to async
+  cloud_api.py          WhatsApp Cloud API (default)
+  twilio.py             legacy, WHATSAPP_TRANSPORT=twilio
+db.py                   delivery queue + user model
 ```
 
 ## Local development
@@ -87,7 +100,11 @@ PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | LLM inference |
 | `OPENAI_BASE_URL`, `LLM_MODEL` | Provider + model override |
 | `AUTHORIZED_PHONES` | Allowlist for spending money. **Fails closed.** |
-| `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` / `TWILIO_WHATSAPP_FROM` | Transport (until Phase 3) |
+| `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
+| `WHATSAPP_PHONE_NUMBER_ID` | Cloud API sender id |
+| `WHATSAPP_APP_SECRET` | Webhook signature verification. **Fails closed.** |
+| `WHATSAPP_VERIFY_TOKEN` | Echoed during webhook registration |
+| `WHATSAPP_TRANSPORT` | `cloud` (default) or `twilio` |
 | `DEBUG` | Gate content logging (default off) |
 
 ## Rules
@@ -105,13 +122,17 @@ PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
 
 ## Landmines
 
-- `core/llm.py` is **sync and single-turn** (`system` + `user` strings). It
-  cannot support a real conversation — Phase 3 must rework it to async
-  multi-turn messages.
-- `ai/conversation/session*.py` are **in-memory**; every restart wipes them.
-  Durable memory is Phase 4, and memory is the product's moat.
+- **There is no restaurant provider.** Only grocery (Instamart) is registered,
+  so `find_food(kind="restaurant")` returns `CAPABILITY_UNAVAILABLE` by design
+  and the concierge says it cannot search yet. Registering a stub that returns
+  invented venues would be the single worst change anyone could make here. See
+  `MIGRATION.md` §0.
+- **Allergy filtering is a backstop, not a guarantee.** `recommendation._is_avoided`
+  matches literal names ("peanuts" → "Peanut Salad") but cannot know lobster IS
+  shellfish. The avoid list also goes into the system prompt as MUST AVOID.
+  Airtight filtering needs allergen tags from the provider.
 - `backend/whatsapp_worker.py` is the most carefully-built file here (dedup,
   ordering, retry classification, restart recovery). 47 tests cover it. Change
   it deliberately.
-- The Swiggy MCP is **Instamart — groceries**. It has no restaurants, menus,
-  ratings or ETAs. See `MIGRATION.md` §0 before building anything on it.
+- Scoring is deliberately **deterministic** so explanations cannot be
+  rationalised after the fact. Do not move ranking into the LLM.

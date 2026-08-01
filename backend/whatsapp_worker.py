@@ -12,8 +12,8 @@ decouples processing from the webhook:
     worker   ->  ConversationEngine -> reply -> Twilio REST API
 
 Design guarantees:
-  * SINGLE source of truth — the worker calls the SAME `engine.process`; no
-    business logic is duplicated and ConversationEngine/LangGraph are untouched.
+  * SINGLE source of truth — the worker calls `ai.concierge.respond` and holds
+    no product logic of its own.
   * Ordering — exactly ONE worker task per phone drains that phone's messages in
     arrival order; reply parts are sent in part_index order.
   * No duplicate replies — inbound is deduped by MessageSid; a reply is queued
@@ -33,8 +33,8 @@ import asyncio
 
 from core.logger import logger
 import db
-from backend.conversation_engine import engine
-from whatsapp.twilio import send_whatsapp, classify_send_error
+from ai.concierge import respond
+from whatsapp.transport import send_whatsapp, classify_send_error
 
 
 # Reply parts are re-split with the SAME limit the old webhook used, so delivery
@@ -146,7 +146,7 @@ async def _process_inbound(msg):
         if msg.get("num_media"):
             reply = MEDIA_REDIRECT_MESSAGE
         else:
-            reply = await engine.process(phone=phone, message=body)
+            reply = await respond(phone=phone, message=body)
         if not reply:
             reply = _FALLBACK_REPLY
         parts = _split(reply)
@@ -173,9 +173,8 @@ async def _send_with_retry(part, phone):
     for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         db.increment_outbound_attempt(outbound_id)
         try:
-            # Twilio's SDK is blocking; run it off the event loop so other
-            # phones' workers keep making progress.
-            sid = await asyncio.to_thread(send_whatsapp, phone, body)
+            # Always awaitable — whatsapp.transport normalises blocking SDKs.
+            sid = await send_whatsapp(phone, body)
             db.mark_outbound_sent(outbound_id, sid)
             return
         except Exception as e:

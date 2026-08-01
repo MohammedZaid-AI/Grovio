@@ -1,21 +1,39 @@
 """
 AI Food Concierge — conversation entry point.
 
-This is the seam the transport layer talks to. Everything above it (webhook,
-queue, worker, delivery) is transport plumbing; everything below it is product.
+The seam between transport and product. Everything above is plumbing (webhook,
+queue, worker, delivery); everything below is the concierge.
 
-PHASE 3 fills this in: async multi-turn LLM conversation, planner, memory.
-Right now it is a deliberate placeholder so the app boots and the delivery
-pipeline stays verifiable end to end after the Phase 2 deletion.
+Thin by design: run the planner, persist the turn, keep failures friendly.
 """
+from ai import memory
+from ai.planner import plan
+from core.logger import logger
 
-_PLACEHOLDER = (
-    "👋 Hey! I'm your food concierge — still being wired up.\n\n"
-    "Soon you'll just tell me what you're in the mood for and I'll figure out "
-    "the rest."
-)
+EMPTY_MESSAGE_REPLY = "Tell me what you're in the mood for and I'll take it from there 🙂"
+ERROR_REPLY = "Something went wrong on my end — mind trying that again?"
 
 
 async def respond(phone: str, message: str) -> str:
     """Return the assistant's reply to one inbound user message."""
-    return _PLACEHOLDER
+    message = (message or "").strip()
+    if not message:
+        return EMPTY_MESSAGE_REPLY
+
+    try:
+        reply = await plan(phone, message)
+    except Exception:
+        # The user must never see a stack trace or a provider's raw error.
+        logger.error(f"[concierge] turn failed for {phone}", exc_info=True)
+        return ERROR_REPLY
+
+    if not reply:
+        reply = EMPTY_MESSAGE_REPLY
+
+    # Persist only completed turns, so a failed turn cannot poison future context.
+    try:
+        memory.record_turn(phone, message, reply)
+    except Exception:
+        logger.error(f"[concierge] could not persist turn for {phone}", exc_info=True)
+
+    return reply

@@ -181,14 +181,32 @@ upload, inventory, recipe, deduction routes all go).
 Exit criteria: app boots, webhook accepts a message, worker echoes a reply,
 `test_whatsapp_async_delivery.py` still passes.
 
-## 4. Phase 3 — Conversation engine
+## 4. Phase 3 — Planner, providers, memory, transport ✅ DONE
 
-- Rework `core/llm.py`: async, multi-turn `messages[]`, tool-calling support.
-- Replace the supervisor's fixed `VALID_AGENTS` set with intent-driven planning.
-- Transport adapter behind `send(phone, text)` / inbound normalisation, so
-  Blocker 2 stays a one-file decision.
-- Conversation feels like ChatGPT: no command syntax, follow-ups only when a
-  genuinely required slot is missing (budget / people / location).
+- `core/llm.py` reworked: async, multi-turn `messages[]`, tool calling. Groq now
+  goes through its OpenAI-compatible endpoint, so there is one client and one
+  code path (and one fewer dependency).
+- `ai/planner.py` orchestrates. The LLM's only levers are three tools
+  (`find_food`, `remember`, `remember_food`); it cannot touch a provider or the
+  database directly. Its tool choice *is* intent detection.
+- `ai/providers/` — `Offer`/`Provider` protocol, capability registry with
+  fan-out and per-provider failure isolation. `swiggy.py` is the only file that
+  names a platform, enforced by a test.
+- `ai/memory.py` + 3 tables — facts, durable history, food memory, keyed by phone.
+- `ai/recommendation.py` — deterministic scoring; the LLM phrases reasons it
+  cannot invent.
+- `whatsapp/cloud_api.py` + `transport.py` — Cloud API with fail-closed
+  HMAC verification, and a seam that normalises blocking SDKs to async.
+
+**Deleted as duplicate logic:** `ConversationEngine`, `ai/conversation/*`
+(in-memory session/working memory now superseded by durable memory, and a second
+chunker competing with the worker's). The "continue" paging mechanism went with
+them — the worker already delivers multi-part replies automatically, which is
+better UX for chat than making someone type "continue".
+
+Phase 3 absorbed the durable-memory work originally scoped to Phase 4, so Phase
+4 is now about memory *depth*: preference extraction, habit detection
+(weekday/weekend, gym days), and learning from accept/reject.
 
 ## 5. Phase 4 — Memory
 

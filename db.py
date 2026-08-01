@@ -71,6 +71,52 @@ def init_db():
         if "error_code" not in _wo_cols:
             cursor.execute("ALTER TABLE whatsapp_outbound ADD COLUMN error_code INTEGER")
 
+        # ------------------------------------------------------------------
+        # User model (Phase 3)
+        # ------------------------------------------------------------------
+        # Identity is the WhatsApp phone number — there is no signup, no
+        # password, no profile screen. Everything the concierge knows about a
+        # person hangs off that one key.
+
+        # Long-term preferences as key/value so a new preference type (gym days,
+        # health goal, spice tolerance...) never needs a migration.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_facts (
+            phone TEXT NOT NULL,
+            key TEXT NOT NULL,
+            value TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (phone, key)
+        )
+        ''')
+
+        # Durable conversation history (the in-memory session is wiped on restart).
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS conversation_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            role TEXT NOT NULL,               -- 'user' | 'assistant'
+            content TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_history_phone ON conversation_history(phone, id)"
+        )
+
+        # Food memory: what they ate, what they loved, what they turned down.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS food_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            item TEXT NOT NULL,
+            venue TEXT,
+            sentiment TEXT NOT NULL,          -- ORDERED | LIKED | DISLIKED | REJECTED
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_food_memory_phone ON food_memory(phone)")
+
         conn.commit()
     finally:
         conn.close()
@@ -305,6 +351,98 @@ def reset_interrupted_inbound():
         )
         conn.commit()
         return cursor.rowcount
+    finally:
+        conn.close()
+
+
+# ======================================================================
+# User model helpers (Phase 3)
+# ======================================================================
+
+def get_user_facts(phone):
+    """All long-term preferences for a user as {key: value}."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT key, value FROM user_facts WHERE phone = ? ORDER BY key", (phone,)
+        ).fetchall()
+        return {key: value for key, value in rows}
+    finally:
+        conn.close()
+
+
+def set_user_fact(phone, key, value):
+    """Upsert one preference. Storing an empty value forgets it."""
+    key = (key or "").strip().lower()
+    if not key:
+        return
+    conn = get_connection()
+    try:
+        if value is None or not str(value).strip():
+            conn.execute("DELETE FROM user_facts WHERE phone = ? AND key = ?", (phone, key))
+        else:
+            conn.execute(
+                "INSERT INTO user_facts (phone, key, value, updated_at) "
+                "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+                "ON CONFLICT(phone, key) DO UPDATE SET "
+                "value = excluded.value, updated_at = CURRENT_TIMESTAMP",
+                (phone, key, str(value).strip()),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def add_history(phone, role, content):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
+            (phone, role, content),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_history(phone, limit=20):
+    """The most recent turns, oldest first (ready to append to a prompt)."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT role, content FROM conversation_history WHERE phone = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (phone, limit),
+        ).fetchall()
+        return [{"role": role, "content": content} for role, content in reversed(rows)]
+    finally:
+        conn.close()
+
+
+def add_food_memory(phone, item, sentiment, venue=None):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO food_memory (phone, item, venue, sentiment) VALUES (?, ?, ?, ?)",
+            (phone, item, venue, sentiment.upper()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_food_memory(phone, limit=50):
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT item, venue, sentiment, created_at FROM food_memory "
+            "WHERE phone = ? ORDER BY id DESC LIMIT ?",
+            (phone, limit),
+        ).fetchall()
+        return [
+            {"item": item, "venue": venue, "sentiment": sentiment, "at": at}
+            for item, venue, sentiment, at in rows
+        ]
     finally:
         conn.close()
 

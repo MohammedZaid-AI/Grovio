@@ -1,33 +1,27 @@
 """
 HTTP surface for the AI Food Concierge.
 
-There is exactly one route: the WhatsApp webhook. There is no dashboard, no
-admin panel, no upload endpoints — WhatsApp is the entire product.
+One capability: the WhatsApp webhook. There is no dashboard, no admin panel and
+no upload endpoints — WhatsApp is the entire product.
 
 The webhook does the minimum possible work: verify the sender, persist the
-inbound message, and return 200 in milliseconds. All reasoning and delivery
-happens in the background worker (see backend/whatsapp_worker.py), because the
-LLM + provider calls take far longer than any webhook timeout allows.
+inbound message, return 200 in milliseconds. All reasoning and delivery happens
+in the background worker (backend/whatsapp_worker.py), because LLM and provider
+calls take far longer than any webhook timeout allows.
 """
-from fastapi import APIRouter, Form, Request, HTTPException
-from fastapi.responses import Response
 import os
 
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.request_validator import RequestValidator
+from fastapi import APIRouter, Form, HTTPException, Request
+from fastapi.responses import PlainTextResponse, Response
 
 from core.logger import logger
+from whatsapp.transport import TRANSPORT
 
 router = APIRouter()
 
-MEDIA_UNSUPPORTED_MESSAGE = (
-    "I can't read attachments yet — tell me what you're in the mood for and "
-    "I'll take it from there."
-)
-
 
 def _debug_enabled() -> bool:
-    """SECURITY (L-3): message content can be personal. Log it only on request."""
+    """SECURITY: message content is personal. Log it only when asked."""
     return os.getenv("DEBUG", "").strip().lower() in ("1", "true", "yes")
 
 
@@ -79,69 +73,112 @@ def split_message(text: str, max_length: int = 1500) -> list:
     return parts
 
 
-def whatsapp_reply(message):
-    """Build the webhook's TwiML response. Normally empty — replies are
-    delivered out-of-band by the worker."""
-    if _debug_enabled():
-        print(f"\n[DEBUG_FINAL_OUTPUT] {repr(message)}\n")
+async def _queue(message_id, phone, body, unsupported=False):
+    """Persist one inbound message and wake its worker. Never raises — a 500
+    makes the platform retry, and the loss is logged rather than silent."""
+    from backend.whatsapp_worker import enqueue_and_wake
 
-    twiml = MessagingResponse()
-    for msg in (message if isinstance(message, list) else [message]):
-        twiml.message(msg)
+    try:
+        _, is_new = await enqueue_and_wake(
+            message_sid=message_id,
+            phone=phone,
+            body=body,
+            num_media=1 if unsupported else 0,
+        )
+        if not is_new:
+            logger.info(f"Duplicate webhook ignored (message_id={message_id})")
+    except Exception as e:
+        logger.error(f"webhook enqueue failed: {e}", exc_info=True)
 
-    return Response(content=str(twiml), media_type="application/xml")
+
+# ----------------------------------------------------------------------
+# WhatsApp Cloud API (default transport)
+# ----------------------------------------------------------------------
+@router.get("/webhook")
+def verify_webhook(request: Request):
+    """Meta's one-time subscription handshake: echo hub.challenge if the
+    verify token matches. Fails closed when unconfigured."""
+    params = request.query_params
+    expected = os.getenv("WHATSAPP_VERIFY_TOKEN")
+
+    if expected and params.get("hub.mode") == "subscribe" \
+            and params.get("hub.verify_token") == expected:
+        return PlainTextResponse(params.get("hub.challenge", ""))
+
+    logger.warning("Webhook verification rejected (token mismatch or unconfigured)")
+    raise HTTPException(status_code=403, detail="Verification failed")
 
 
 @router.post("/webhook")
-async def webhook(
-    request: Request,
-    Body: str = Form(""),
-    NumMedia: int = Form(0),
-    From: str = Form(""),
-    MessageSid: str = Form(""),
-):
-    # SECURITY (M-2): fail CLOSED. A missing auth token must never silently skip
-    # verification — that would let anyone POST forged messages straight into
-    # the conversation engine.
+async def webhook(request: Request):
+    """Inbound messages.
+
+    Cloud API posts JSON signed with X-Hub-Signature-256. Twilio posts a form
+    signed with X-Twilio-Signature; that path stays until the Cloud API number
+    is live and is selected by WHATSAPP_TRANSPORT.
+    """
+    raw = await request.body()
+
+    if TRANSPORT == "twilio":
+        return await _twilio_webhook(request, raw)
+
+    from whatsapp.cloud_api import parse_inbound, verify_signature
+
+    # SECURITY: fail CLOSED. An unset app secret must deny everyone rather than
+    # let anyone POST forged messages straight into the concierge.
+    if not verify_signature(raw, request.headers.get("x-hub-signature-256", "")):
+        logger.warning("Webhook rejected: invalid X-Hub-Signature-256")
+        raise HTTPException(status_code=403, detail="Invalid signature")
+
+    try:
+        payload = await request.json()
+    except Exception:
+        logger.warning("Webhook rejected: body was not JSON")
+        raise HTTPException(status_code=400, detail="Malformed payload")
+
+    for message in parse_inbound(payload):
+        if not message["phone"]:
+            continue
+        if _debug_enabled():
+            print(f"📩 {message['phone']}: {message['body']!r}")
+        await _queue(
+            message["message_id"], message["phone"], message["body"], message["unsupported"]
+        )
+
+    # Always 200 — a non-200 makes Meta retry the whole batch.
+    return {"status": "received"}
+
+
+# ----------------------------------------------------------------------
+# Twilio (legacy transport, WHATSAPP_TRANSPORT=twilio)
+# ----------------------------------------------------------------------
+async def _twilio_webhook(request: Request, raw: bytes):
+    from twilio.request_validator import RequestValidator
+    from twilio.twiml.messaging_response import MessagingResponse
+
     auth_token = os.getenv("TWILIO_AUTH_TOKEN")
     if not auth_token:
         logger.error("Webhook rejected: TWILIO_AUTH_TOKEN is not configured.")
         raise HTTPException(status_code=500, detail="Webhook is not configured correctly.")
 
-    validator = RequestValidator(auth_token)
-    signature = request.headers.get("x-twilio-signature", "")
     proto = request.headers.get("x-forwarded-proto", "http")
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
     url = f"{proto}://{host}{request.url.path}"
 
-    params = dict(await request.form())
+    form = dict(await request.form())
+    signature = request.headers.get("x-twilio-signature", "")
 
-    if not validator.validate(url, params, signature):
-        # The reconstructed url must EXACTLY match the console URL (scheme + host
-        # + path). http-vs-https behind a tunnel is the usual cause. No secrets.
+    if not RequestValidator(auth_token).validate(url, form, signature):
+        # The reconstructed url must EXACTLY match the console URL. http-vs-https
+        # behind a tunnel is the usual cause. No secrets logged.
         logger.warning(f"Webhook signature verification failed (url: {url})")
         raise HTTPException(status_code=403, detail="Invalid Twilio signature")
 
-    if _debug_enabled():
-        print(f"📩 {From}: {Body!r} (media={NumMedia})")
+    num_media = int(form.get("NumMedia") or 0)
+    phone = form.get("From", "")
+    if phone:
+        if _debug_enabled():
+            print(f"📩 {phone}: {form.get('Body')!r}")
+        await _queue(form.get("MessageSid", ""), phone, form.get("Body", ""), num_media > 0)
 
-    if NumMedia > 0:
-        return whatsapp_reply(MEDIA_UNSUPPORTED_MESSAGE)
-
-    # Persist + return immediately; the worker does the slow part and delivers
-    # the reply itself. Never fail the webhook — a 500 makes Twilio retry.
-    from backend.whatsapp_worker import enqueue_and_wake
-
-    try:
-        inbound_id, is_new = await enqueue_and_wake(
-            message_sid=MessageSid,
-            phone=From,
-            body=Body,
-            num_media=NumMedia,
-        )
-        if not is_new:
-            logger.info(f"Duplicate webhook ignored (inbound_id={inbound_id})")
-    except Exception as e:
-        logger.error(f"webhook enqueue failed: {e}", exc_info=True)
-
-    return whatsapp_reply([])
+    return Response(content=str(MessagingResponse()), media_type="application/xml")

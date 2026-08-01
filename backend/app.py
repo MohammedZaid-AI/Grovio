@@ -6,15 +6,17 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 import db
+import ai.providers
 from backend.routes import router
 from backend.whatsapp_worker import recover_pending
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Ensure the delivery-queue schema exists, then recover anything left in
-    # flight by a previous run so a restart never loses a reply.
+    # Ensure the schema exists, wire up the available platforms, then recover
+    # anything left in flight by a previous run so a restart never loses a reply.
     db.init_db()
+    ai.providers.setup()
     await recover_pending()
     yield
 
