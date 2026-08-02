@@ -164,6 +164,38 @@ def init_db():
         )
         ''')
 
+        # ------------------------------------------------------------------
+        # Ordering (Phase 5)
+        # ------------------------------------------------------------------
+        # What we last showed this user, so "order the second one" resolves to
+        # a REAL offer instead of whatever the model thinks it said.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS offer_sessions (
+            phone TEXT PRIMARY KEY,
+            offers TEXT NOT NULL,              -- JSON list, in the order shown
+            query TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            phone TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            provider_order_id TEXT,
+            status TEXT NOT NULL DEFAULT 'PLACED',
+            title TEXT,
+            venue TEXT,
+            total REAL,
+            currency TEXT DEFAULT 'INR',
+            eta_minutes INTEGER,
+            placed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(phone, id)")
+
         conn.commit()
     finally:
         conn.close()
@@ -660,6 +692,116 @@ def delete_expired_oauth_states():
         cursor.execute("DELETE FROM oauth_states WHERE expires_at < CURRENT_TIMESTAMP")
         conn.commit()
         return cursor.rowcount
+    finally:
+        conn.close()
+
+
+# ======================================================================
+# Ordering helpers (Phase 5)
+# ======================================================================
+
+def save_offer_session(phone, offers_json, query=None):
+    """Remember exactly what we showed, in the order we showed it."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO offer_sessions (phone, offers, query, created_at) "
+            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(phone) DO UPDATE SET offers=excluded.offers, "
+            "query=excluded.query, created_at=CURRENT_TIMESTAMP",
+            (phone, offers_json, query),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_offer_session(phone):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT offers, query, created_at FROM offer_sessions WHERE phone = ?", (phone,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    return {"offers": row[0], "query": row[1], "created_at": row[2]}
+
+
+def clear_offer_session(phone):
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM offer_sessions WHERE phone = ?", (phone,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_order(phone, provider, provider_order_id, status, title,
+               venue=None, total=None, currency="INR", eta_minutes=None):
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO orders (phone, provider, provider_order_id, status, title, "
+            "venue, total, currency, eta_minutes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (phone, provider, provider_order_id, status, title, venue, total,
+             currency, eta_minutes),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
+_ORDER_KEYS = ("id", "phone", "provider", "provider_order_id", "status", "title",
+               "venue", "total", "currency", "eta_minutes", "placed_at")
+_ORDER_COLUMNS = ", ".join(_ORDER_KEYS)
+
+
+def get_latest_order(phone):
+    """The order a user means when they say 'my order'."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {_ORDER_COLUMNS} FROM orders WHERE phone = ? ORDER BY id DESC LIMIT 1",
+            (phone,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(zip(_ORDER_KEYS, row)) if row else None
+
+
+def get_active_order(phone):
+    """The most recent order that hasn't finished."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            f"SELECT {_ORDER_COLUMNS} FROM orders WHERE phone = ? "
+            f"AND status NOT IN ('DELIVERED', 'CANCELLED') ORDER BY id DESC LIMIT 1",
+            (phone,),
+        ).fetchone()
+    finally:
+        conn.close()
+    return dict(zip(_ORDER_KEYS, row)) if row else None
+
+
+def update_order_status(order_id, status, eta_minutes=None):
+    conn = get_connection()
+    try:
+        if eta_minutes is None:
+            conn.execute(
+                "UPDATE orders SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, order_id),
+            )
+        else:
+            conn.execute(
+                "UPDATE orders SET status = ?, eta_minutes = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (status, eta_minutes, order_id),
+            )
+        conn.commit()
     finally:
         conn.close()
 

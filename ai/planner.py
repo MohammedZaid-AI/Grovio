@@ -18,6 +18,7 @@ provider, a database or a platform directly, which is what keeps the layering
 real instead of decorative.
 """
 import json
+from datetime import datetime
 
 from core.llm import get_llm
 from core.logger import logger
@@ -33,20 +34,64 @@ You are a food concierge who chats over WhatsApp. You help people decide what to
 eat and then get it ordered.
 
 HOW TO TALK
-- Like a friend who knows food, not a form. No menus of numbered options, no
-  command syntax, no corporate tone.
-- Keep it short. This is WhatsApp, not email.
-- Ask a follow-up ONLY when you genuinely cannot proceed without it (budget,
-  headcount, or location). Never interrogate. If they said "I'm hungry" and you
-  know their usual, suggest it.
-- Light emoji use is fine. Never use markdown headers or bullet characters.
+- Like a friend who knows food. Warm, brief, useful. Never robotic, never salesy,
+  never breathlessly excited.
+- Short messages. This is WhatsApp, not email. Two or three lines is usually
+  plenty; a list of options can be longer.
+- No corporate filler. Never open with "Certainly!", "Great question!" or "I'd be
+  happy to help". Just answer.
+- Ask a follow-up ONLY when you genuinely cannot proceed without it. If they say
+  "I'm hungry" and you know how they eat, suggest something — don't interview
+  them.
+- Light emoji is fine, at most one per message. Never markdown headers, never
+  bullet characters, never bold syntax.
+
+PRESENTING OPTIONS
+When find_food returns options, lay them out exactly like this — number, name,
+then the facts that came back, then one short line of why it suits THEM:
+
+  I found three good options nearby.
+
+  1. Meghana Foods
+  ⭐ 4.6 · ₹340 · 22 min
+  You usually go for spicy biryani, so this is right up your street.
+
+  2. Empire Restaurant
+  ⭐ 4.3 · ₹280 · 18 min
+  Cheaper and quicker, still comfortably in budget.
+
+  Which one?
+
+Only include a rating, price or ETA if the tool actually returned it. Omit what
+you don't have — never write "N/A", never guess, never round a missing number
+into existence.
 
 TRUTHFULNESS — THIS IS ABSOLUTE
 - You may only mention a restaurant, dish, price, rating or delivery time that
-  came back from the find_food tool in this conversation. Never invent one.
-- If a tool reports a capability is unavailable, say so plainly and offer what
-  you CAN do. Never paper over it with a plausible-sounding suggestion.
+  came back from a tool in this conversation. Never invent one.
+- If a tool reports a capability is unavailable, say so plainly and offer the
+  next best thing you CAN do. Never paper over a gap with a plausible guess.
+- Never claim an order was placed, cancelled or delivered unless a tool said so.
 - When you recommend something, give the real reason from the tool's output.
+
+USING WHAT YOU KNOW
+Weave memory in as if you simply know them. Never announce that you remembered.
+
+  Say:    "You usually keep it under ₹350, so this fits."
+  Say:    "You had Truffles last week and liked it."
+  Never:  "I remember that you..."  /  "According to my memory..."
+  Never:  "As an AI..."
+
+Use the time and day given below. Friday night and Tuesday lunch are different
+meals. Never ask for something you already know.
+
+ORDERING
+- When they pick an option ("the second one", "go with Meghana"), call
+  place_order with that option's NUMBER as shown.
+- Before spending money, confirm once in a single line with the item and price,
+  then place it when they agree. Don't make a ceremony of it.
+- After ordering, give the ETA if there is one and let them know they can ask
+  where it is.
 
 MEMORY
 - Save durable preferences with remember (allergies, budget, home/office area,
@@ -64,10 +109,16 @@ CONNECTING ACCOUNTS
 - Don't nag. Mention connecting when it's needed, then let it go.
 
 ONBOARDING
-- If this is a brand new user, introduce yourself in one short line before
-  anything else.
+- First ever message: one short, warm line saying who you are and what you do,
+  then answer what they actually asked. Don't deliver a feature tour.
 - Ask at most ONE profile question per message, and only when it's naturally
   relevant. Everything else you learn by paying attention.
+
+FAILURES
+Something will break. Handle it like a person would: say what happened in plain
+words, never show error codes or internal details, and always offer the next
+best thing. "That restaurant just closed — want me to look at the other two?"
+is good. "Provider returned 502" is not.
 """
 
 TOOLS = [
@@ -103,6 +154,47 @@ TOOLS = [
                 },
                 "required": ["query", "kind"],
             },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_order",
+            "description": (
+                "Order one of the options most recently shown, by its number. Use "
+                "when the user picks one ('the second one', 'go with Meghana', "
+                "'yes' to a confirmation). Only call this once they have chosen."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "selection": {
+                        "type": "integer",
+                        "description": "The option's number exactly as shown to the user (1, 2, 3…).",
+                    },
+                    "quantity": {"type": "integer", "description": "How many. Defaults to 1."},
+                },
+                "required": ["selection"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "check_order",
+            "description": (
+                "Check the user's current order — 'where's my order?', 'how much "
+                "longer?', 'has it left yet?'."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_order",
+            "description": "Cancel the user's active order, when they ask to.",
+            "parameters": {"type": "object", "properties": {}},
         },
     },
     {
@@ -204,6 +296,20 @@ async def _dispatch(call, user, message):
             )
             return result.message
 
+        if call.name == "place_order":
+            result = await skills.place_order(
+                user,
+                selection=args.get("selection"),
+                quantity=args.get("quantity", 1),
+            )
+            return result.message
+
+        if call.name == "check_order":
+            return (await skills.check_order(user)).message
+
+        if call.name == "cancel_order":
+            return (await skills.cancel_order(user)).message
+
         if call.name == "connect_account":
             result = await skills.connect_provider(
                 user, args.get("provider"), pending_message=message
@@ -257,11 +363,29 @@ def _connection_status(user) -> str:
     return "No accounts are currently connected."
 
 
+def _now_context() -> str:
+    """Time and day, so 'Friday night' and 'Tuesday lunch' mean something.
+
+    Local time matters more than UTC here — people eat on their own clock — so
+    this uses the server's local time and states it plainly rather than
+    pretending to know the user's timezone.
+    """
+    now = datetime.now()
+    meal = (
+        "breakfast time" if 5 <= now.hour < 11
+        else "lunchtime" if 11 <= now.hour < 16
+        else "dinner time" if 16 <= now.hour < 22
+        else "late night"
+    )
+    return f"Right now it is {now:%A}, {now:%d %B}, {now:%H:%M} — {meal}."
+
+
 def build_context(user, message):
     """Assemble the prompt: instructions, what we know, the conversation, the
     new message. Memory is injected as data — the model never has to recall it."""
     system = (
         f"{SYSTEM_PROMPT}\n"
+        f"CONTEXT\n{_now_context()}\n\n"
         f"WHAT YOU KNOW ABOUT THIS USER\n{user.describe()}\n"
         f"{_connection_status(user)}"
     )

@@ -87,6 +87,80 @@ class Provider(Protocol):
         ...
 
 
+# Order lifecycle, normalised across platforms. A provider maps its own
+# vocabulary onto these; nothing above the provider layer sees platform states.
+PLACED = "PLACED"
+CONFIRMED = "CONFIRMED"
+PREPARING = "PREPARING"
+ON_THE_WAY = "ON_THE_WAY"
+DELIVERED = "DELIVERED"
+CANCELLED = "CANCELLED"
+UNKNOWN = "UNKNOWN"
+
+# What to say for each state. Kept here so one platform's wording cannot leak
+# upward, and so the model is never left to invent a status.
+STATUS_PHRASING = {
+    PLACED: "placed",
+    CONFIRMED: "confirmed by the restaurant",
+    PREPARING: "being prepared",
+    ON_THE_WAY: "out for delivery",
+    DELIVERED: "delivered",
+    CANCELLED: "cancelled",
+    UNKNOWN: "in progress",
+}
+
+
+@dataclass(frozen=True)
+class PlacedOrder:
+    """The result of spending someone's money. Every field is real or None."""
+    provider: str
+    order_id: str
+    status: str = PLACED
+    eta_minutes: int | None = None
+    total: float | None = None
+    currency: str = "INR"
+    items: tuple = field(default_factory=tuple)
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class OrderStatus:
+    """Live state of an order. `eta_minutes` is None when genuinely unknown —
+    never a guess, because a wrong ETA is worse than no ETA."""
+    order_id: str
+    status: str = UNKNOWN
+    eta_minutes: int | None = None
+    note: str | None = None
+
+    @property
+    def phrasing(self) -> str:
+        return STATUS_PHRASING.get(self.status, STATUS_PHRASING[UNKNOWN])
+
+
+class ProviderError(Exception):
+    """A provider could not complete an operation. Message is for logs only —
+    the user never sees a provider's raw words."""
+
+
+class ItemUnavailable(ProviderError):
+    """The chosen item cannot be ordered right now (sold out, kitchen closed)."""
+
+
+@runtime_checkable
+class OrderingProvider(Provider, Protocol):
+    """A provider that can actually place an order.
+
+    `track` and `cancel` are declared but capability-gated: a platform that
+    exposes no tracking sets `supports_tracking = False` and the layers above
+    say so honestly rather than inventing a status.
+    """
+    supports_tracking: bool
+    supports_cancellation: bool
+
+    async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
+        ...
+
+
 @runtime_checkable
 class LinkableProvider(Provider, Protocol):
     """A provider that acts on behalf of a specific user and therefore needs

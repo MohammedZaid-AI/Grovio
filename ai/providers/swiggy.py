@@ -11,10 +11,19 @@ leaves `rating`/`eta_minutes` as None rather than fabricating them. Restaurant
 search needs a different provider — see MIGRATION.md §0.
 """
 import asyncio
+import json
 
 from core.logger import logger
 
-from ai.providers.base import Offer, ProviderKind, SearchContext
+from ai.providers.base import (
+    PLACED,
+    ItemUnavailable,
+    Offer,
+    PlacedOrder,
+    ProviderError,
+    ProviderKind,
+    SearchContext,
+)
 from ai.providers.oauth import OAuthConfig
 from integrations.swiggy.swiggy_mcp import SwiggyInstamart
 
@@ -35,12 +44,43 @@ def _to_float(value):
     return number if number > 0 else None
 
 
+def _to_int(value):
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return None
+
+
 def _first(product: dict, *keys):
+    if not isinstance(product, dict):
+        return None
     for key in keys:
         value = product.get(key)
         if value not in (None, "", []):
             return value
     return None
+
+
+def _payload_of(result) -> dict:
+    """Pull the data dict out of an MCP result.
+
+    The 2025-11-25 protocol may return structuredContent=None and put JSON in
+    content[0].text instead, so both shapes are handled — the same defensive
+    posture that fixed grocery search.
+    """
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict):
+        return structured.get("data") if isinstance(structured.get("data"), dict) else structured
+
+    content = getattr(result, "content", None)
+    if content and getattr(content[0], "text", None):
+        try:
+            parsed = json.loads(content[0].text)
+        except (TypeError, ValueError):
+            return {}
+        if isinstance(parsed, dict):
+            return parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+    return {}
 
 
 class SwiggyInstamartProvider:
@@ -59,6 +99,16 @@ class SwiggyInstamartProvider:
     name = "swiggy_instamart"
     display_name = "Swiggy"
     kind = ProviderKind.GROCERY
+
+    # Instamart's MCP exposes cart + checkout, but no order-status or
+    # cancellation tool. Declaring that honestly is what lets the layers above
+    # say "I can't see live status" instead of inventing one.
+    supports_tracking = False
+    supports_cancellation = False
+
+    # MVP is cash on delivery: it needs no stored payment instrument and no
+    # UPI intent round-trip through a chat window.
+    PAYMENT_METHOD = "Cash"
 
     oauth = OAuthConfig(
         server_url=INSTAMART_SERVER,
@@ -112,3 +162,39 @@ class SwiggyInstamartProvider:
                 )
             )
         return offers
+
+    # ------------------------------------------------------------------
+    # Ordering
+    # ------------------------------------------------------------------
+    async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
+        """Cart the chosen item and check out with cash on delivery.
+
+        Raises ItemUnavailable when the store or item won't accept it, and
+        ProviderError otherwise — the layers above turn both into plain English.
+        """
+        client = await self._session()
+        address_id = await client.get_address_id()
+
+        cart = await client.update_cart(address_id, [{"spinId": offer.id, "quantity": quantity}])
+        if getattr(cart, "isError", False):
+            raise ItemUnavailable(f"cart rejected {offer.id}")
+
+        result = await client.checkout(address_id, payment_method=self.PAYMENT_METHOD)
+        if getattr(result, "isError", False):
+            raise ProviderError(f"checkout failed for {offer.id}")
+
+        payload = _payload_of(result)
+        order_id = str(_first(payload, "orderId", "order_id", "id") or "")
+        if not order_id:
+            # No id means we cannot prove an order exists. Treat it as a failure
+            # rather than telling someone their food is on the way.
+            raise ProviderError("checkout returned no order id")
+
+        return PlacedOrder(
+            provider=self.name,
+            order_id=order_id,
+            status=PLACED,
+            eta_minutes=_to_int(_first(payload, "etaMinutes", "eta", "deliveryTime")),
+            total=_to_float(_first(payload, "total", "grandTotal", "orderTotal")),
+            items=(offer.title,),
+        )

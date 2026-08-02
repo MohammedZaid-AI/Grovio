@@ -28,9 +28,8 @@ half.
 | 3 | Planner + providers + memory + Cloud API transport | ✅ Done |
 | 3.5 | Product feasibility audit (`FEASIBILITY.md`) | ✅ Done |
 | 4 | Identity + provider account linking (`IDENTITY.md`) | ✅ Done |
-| 5 | Restaurant provider (`/food` adapter) | Blocked on Builders Club access |
-| 6 | Ordering | — |
-| 7 | Tracking | — |
+| 5 | End-to-end journey: recommend → order → track | ✅ Done |
+| 6 | Restaurant provider (`/food` adapter) | Blocked on Builders Club access |
 
 ## Architecture
 
@@ -144,6 +143,13 @@ PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so
   much as name one.
+- **`place_order` takes an INDEX, never a name.** The model can only order from
+  the list actually shown (persisted in `offer_sessions`). This is the
+  money-spending equivalent of not inventing a restaurant — do not "improve" it
+  into accepting a dish name.
+- **Providers declare `supports_tracking` / `supports_cancellation`.** When
+  false, the concierge says so honestly. Never paper over it with a plausible
+  status; a fabricated ETA is worse than no ETA.
 - **`TOKEN_ENCRYPTION_KEY` fails closed.** No key means provider tokens cannot
   be stored at all. There is deliberately no plaintext fallback — do not add one.
 - **Allergy filtering is a backstop, not a guarantee.** `recommendation._is_avoided`
