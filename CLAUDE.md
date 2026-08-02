@@ -26,8 +26,9 @@ half.
 | 1 | Audit + migration plan (`MIGRATION.md`) | ✅ Done |
 | 2 | Delete the ERP | ✅ Done |
 | 3 | Planner + providers + memory + Cloud API transport | ✅ Done |
-| 4 | Memory depth (learning, extraction, habits) | ⏳ Next |
-| 5 | Recommendation engine + a real restaurant provider | Blocked on a data source |
+| 3.5 | Product feasibility audit (`FEASIBILITY.md`) | ✅ Done |
+| 4 | Identity + provider account linking (`IDENTITY.md`) | ✅ Done |
+| 5 | Restaurant provider (`/food` adapter) | Blocked on Builders Club access |
 | 6 | Ordering | — |
 | 7 | Tracking | — |
 
@@ -41,9 +42,12 @@ WhatsApp  →  webhook (verify, enqueue, return 200 in ms)
           ai/concierge.py      turn entry point
                  ↓
           ai/planner.py        LLM orchestrates via tools
+                 ↓             (knows nothing about OAuth or platforms)
+          ai/skills.py         capability + "can this user do it?"
                  ├── ai/memory.py           user model (retrieval + writes)
                  ├── ai/recommendation.py   deterministic scoring + reasons
                  └── ai/providers/registry  routed by CAPABILITY, not by name
+                          └── oauth.py + vault.py   linking, refresh, encryption
                                    ↓
                      Swiggy | Zomato | Blinkit | Zepto
 ```
@@ -65,14 +69,19 @@ backend/
   whatsapp_worker.py    async delivery worker — do not casually modify
 ai/
   concierge.py          turn entry point (run planner, persist, stay friendly)
-  planner.py            orchestration: intent → memory → recommend → execute
+  planner.py            orchestration: intent → memory → skills
+  skills.py             capability layer; converts provider reality into
+                        instructions. Returns NEEDS_LINK, never a token.
+  identity.py           user lifecycle, onboarding status
   memory.py             user model: facts, history, food memory
   recommendation.py     scoring; reasons are derived, never invented
   providers/
-    base.py             Offer + Provider protocol (neutral currency)
+    base.py             Offer + Provider/LinkableProvider protocols
     registry.py         capability routing, fan-out, failure isolation
+    oauth.py            generic OAuth 2.1 + PKCE; discovery per RFC 8414/9728
+    vault.py            the ONLY reader of decrypted tokens
     swiggy.py           the ONLY file allowed to know Swiggy exists
-core/                   llm (async, tool-calling), config, logger, authz
+core/                   llm (async, tool-calling), crypto, config, logger, authz
 whatsapp/
   transport.py          seam: picks the transport, normalises it to async
   cloud_api.py          WhatsApp Cloud API (default)
@@ -105,6 +114,9 @@ PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
 | `WHATSAPP_APP_SECRET` | Webhook signature verification. **Fails closed.** |
 | `WHATSAPP_VERIFY_TOKEN` | Echoed during webhook registration |
 | `WHATSAPP_TRANSPORT` | `cloud` (default) or `twilio` |
+| `TOKEN_ENCRYPTION_KEY` | Fernet key for provider tokens. **Fails closed.** |
+| `PUBLIC_BASE_URL` | Base for OAuth callbacks; must be https in production |
+| `SWIGGY_OAUTH_CLIENT_ID` | Issued with Builders Club production access |
 | `DEBUG` | Gate content logging (default off) |
 
 ## Rules
@@ -122,11 +134,18 @@ PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
 
 ## Landmines
 
-- **There is no restaurant provider.** Only grocery (Instamart) is registered,
-  so `find_food(kind="restaurant")` returns `CAPABILITY_UNAVAILABLE` by design
-  and the concierge says it cannot search yet. Registering a stub that returns
-  invented venues would be the single worst change anyone could make here. See
-  `MIGRATION.md` §0.
+- **There is no restaurant provider yet.** Swiggy's `/food` MCP server exists
+  and does everything we need, but third-party production access is gated on
+  Builders Club approval (`FEASIBILITY.md`). Until then `find_food(kind=
+  "restaurant")` returns `CAPABILITY_UNAVAILABLE` by design. Registering a stub
+  that returns invented venues would be the single worst change anyone could
+  make here.
+- **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
+  that decrypts a credential. `tests/test_identity.py` §10 tokenises
+  `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so
+  much as name one.
+- **`TOKEN_ENCRYPTION_KEY` fails closed.** No key means provider tokens cannot
+  be stored at all. There is deliberately no plaintext fallback — do not add one.
 - **Allergy filtering is a backstop, not a guarantee.** `recommendation._is_avoided`
   matches literal names ("peanuts" → "Peanut Salad") but cannot know lobster IS
   shellfish. The avoid list also goes into the system prompt as MUST AVOID.

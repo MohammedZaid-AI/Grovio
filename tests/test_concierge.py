@@ -21,7 +21,7 @@ _tmp.close()
 db.DB_PATH = _tmp.name
 db.init_db()
 
-from ai import concierge, memory, planner, recommendation
+from ai import concierge, identity, memory, planner, recommendation, skills
 from ai.providers import ProviderKind, SearchContext, registry
 from ai.providers.base import Offer
 from core.llm import LLMReply, ToolCall, _parse_arguments
@@ -177,41 +177,49 @@ rated = recommendation.rank([offer("A", rating=3.0), offer("B", rating=4.9)], us
 check("higher rating wins when that is the only signal", rated[0].offer.title == "B")
 
 # ----------------------------------------------------------------------
-print("\n[5] Planner — anti-hallucination guard")
+def _find(_user, query, kind):
+    """skills.find_food returns a SkillResult; these checks read its message."""
+    async def go():
+        return (await skills.find_food(identity.load(PHONE), query, kind)).message
+    return go()
+
+
+print("\n[5] Skills — anti-hallucination guard")
 registry.clear()
 registry.register(FakeProvider("fake_grocery", ProviderKind.GROCERY, [offer("Milk", kind=ProviderKind.GROCERY, price=60)]))
 
-result = run(planner._find_food(user, "biryani", "restaurant"))
+result = run(_find(user, "biryani", "restaurant"))
 check("no restaurant provider -> CAPABILITY_UNAVAILABLE", result.startswith("CAPABILITY_UNAVAILABLE"))
 check("model is explicitly told not to invent", "do not invent" in result.lower())
 
-grocery_result = run(planner._find_food(user, "milk", "grocery"))
+grocery_result = run(_find(user, "milk", "grocery"))
 check("available capability returns real options", "Milk" in grocery_result)
 check("results are marked as the only usable source", "ONLY these" in grocery_result)
 
-check("unknown kind rejected", run(planner._find_food(user, "x", "spaceship")).startswith("ERROR"))
+check("unknown kind rejected", run(_find(user, "x", "spaceship")).startswith("ERROR"))
 
 registry.clear()
 registry.register(FakeProvider("empty", ProviderKind.RESTAURANT, []))
 check("no results is distinct from no capability",
-      "No restaurant results" in run(planner._find_food(user, "unicorn steak", "restaurant")))
+      "No restaurant results" in run(_find(user, "unicorn steak", "restaurant")))
 
 registry.register(FakeProvider("allergen", ProviderKind.RESTAURANT, [offer("Peanut Curry")]))
-filtered = run(planner._find_food(user, "curry", "restaurant"))
+filtered = run(_find(user, "curry", "restaurant"))
 check("fully-filtered results explained honestly", "filtered out" in filtered)
 
 # ----------------------------------------------------------------------
+IDENTITY = identity.load(PHONE)
 print("\n[6] Planner — tool dispatch never raises")
 check("unknown tool reported, not raised",
-      run(planner._dispatch(ToolCall("1", "no_such_tool", {}), user)).startswith("ERROR"))
+      run(planner._dispatch(ToolCall("1", "no_such_tool", {}), IDENTITY, "m")).startswith("ERROR"))
 check("missing required arg reported",
-      run(planner._dispatch(ToolCall("1", "find_food", {}), user)).startswith("ERROR"))
+      run(planner._dispatch(ToolCall("1", "find_food", {}), IDENTITY, "m")).startswith("ERROR"))
 check("bad sentiment surfaced as a tool error, not a crash",
-      run(planner._dispatch(ToolCall("1", "remember_food", {"item": "x", "sentiment": "NOPE"}), user)).startswith("ERROR"))
+      run(planner._dispatch(ToolCall("1", "remember_food", {"item": "x", "sentiment": "NOPE"}), IDENTITY, "m")).startswith("ERROR"))
 
-run(planner._dispatch(ToolCall("1", "remember", {"key": "cuisine", "value": "South Indian"}), user))
+run(planner._dispatch(ToolCall("1", "remember", {"key": "cuisine", "value": "South Indian"}), IDENTITY, "m"))
 check("remember tool persists a fact", memory.load(PHONE).facts.get("cuisine") == "South Indian")
-run(planner._dispatch(ToolCall("2", "remember_food", {"item": "Dosa", "sentiment": "ORDERED"}), user))
+run(planner._dispatch(ToolCall("2", "remember_food", {"item": "Dosa", "sentiment": "ORDERED"}), IDENTITY, "m"))
 check("remember_food tool persists", any(e["item"] == "Dosa" for e in memory.load(PHONE).food))
 
 # ----------------------------------------------------------------------

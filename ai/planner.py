@@ -22,8 +22,7 @@ import json
 from core.llm import get_llm
 from core.logger import logger
 
-from ai import memory, recommendation
-from ai.providers import ProviderKind, SearchContext, registry
+from ai import identity, memory, skills
 
 # A turn may chain a few tool calls (recall -> search -> answer). Bounded so a
 # confused model cannot loop forever on the user's dime.
@@ -54,6 +53,21 @@ MEMORY
   cuisines they love, dietary rules, gym days). Do not save one-off moods.
 - Record what they order or reject with remember_food.
 - Never ask for something you already know.
+- When they correct you ("actually I hate mushrooms"), save it immediately.
+
+CONNECTING ACCOUNTS
+- To order anything, the user connects their own delivery account once. If a
+  tool says NEEDS_LINK, share the link exactly as given, on its own line, and
+  reassure them you'll continue right where they left off afterwards.
+- Never ask for a password, OTP or card details. You never see their credentials
+  and must never request them — the link handles everything.
+- Don't nag. Mention connecting when it's needed, then let it go.
+
+ONBOARDING
+- If this is a brand new user, introduce yourself in one short line before
+  anything else.
+- Ask at most ONE profile question per message, and only when it's naturally
+  relevant. Everything else you learn by paying attention.
 """
 
 TOOLS = [
@@ -88,6 +102,38 @@ TOOLS = [
                     },
                 },
                 "required": ["query", "kind"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "connect_account",
+            "description": (
+                "Start connecting the user's account with a delivery platform, or "
+                "reconnect one that stopped working. Use when they ask to connect, "
+                "or when they want to order and no account is connected yet."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "provider": {
+                        "type": "string",
+                        "description": "Platform name if they named one; omit otherwise.",
+                    }
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "disconnect_account",
+            "description": "Disconnect a platform the user has connected, on their request.",
+            "parameters": {
+                "type": "object",
+                "properties": {"provider": {"type": "string"}},
+                "required": ["provider"],
             },
         },
     },
@@ -136,47 +182,12 @@ TOOLS = [
 
 
 # ----------------------------------------------------------------------
-# Tool implementations — the only way the model touches anything real
+# Tool dispatch — the only way the model touches anything real
 # ----------------------------------------------------------------------
-async def _find_food(user, query, kind, max_price=None):
-    """Provider execution + recommendation, routed by capability."""
-    try:
-        provider_kind = ProviderKind(kind)
-    except ValueError:
-        return f"ERROR: unknown kind {kind!r}. Use 'restaurant' or 'grocery'."
-
-    if not registry.supports(provider_kind):
-        # Structural anti-hallucination guard: no provider means no data, and the
-        # model is told explicitly not to fill the gap itself.
-        return (
-            f"CAPABILITY_UNAVAILABLE: no {provider_kind.value} provider is connected, "
-            f"so there are no real results to show. Tell the user plainly that you "
-            f"cannot search {provider_kind.value}s yet. Do NOT invent any."
-        )
-
-    offers = await registry.search(
-        provider_kind,
-        query,
-        SearchContext(max_price=max_price, limit=20),
-    )
-    if not offers:
-        return f"No {provider_kind.value} results for {query!r}. Suggest they try something else."
-
-    ranked = recommendation.rank(offers, user)
-    if not ranked:
-        return (
-            f"Every result for {query!r} was filtered out by their allergies or "
-            f"dislikes. Say so and offer an alternative."
-        )
-
-    lines = [f"{i}. {rec.explain()}" for i, rec in enumerate(ranked, 1)]
-    return (
-        "Real options, best first. Use ONLY these, with their stated reasons:\n"
-        + "\n".join(lines)
-    )
-
-
-async def _dispatch(call, user):
+# Every capability goes through ai/skills.py. This module deliberately has no
+# idea that authorisation, tokens or OAuth exist: a skill either returns usable
+# information or an instruction about why it couldn't.
+async def _dispatch(call, user, message):
     """Route one tool call. Never raises — a failure is reported back to the
     model as a tool result so it can recover in-conversation."""
     args = call.arguments
@@ -184,12 +195,23 @@ async def _dispatch(call, user):
         if call.name == "find_food":
             if not args.get("query"):
                 return "ERROR: query is required."
-            return await _find_food(
+            result = await skills.find_food(
                 user,
                 query=args["query"],
                 kind=args.get("kind", "restaurant"),
                 max_price=args.get("max_price"),
+                pending_message=message,
             )
+            return result.message
+
+        if call.name == "connect_account":
+            result = await skills.connect_provider(
+                user, args.get("provider"), pending_message=message
+            )
+            return result.message
+
+        if call.name == "disconnect_account":
+            return skills.disconnect_provider(user, args.get("provider", "")).message
 
         if call.name == "remember":
             return memory.remember_fact(user.phone, args.get("key", ""), args.get("value", ""))
@@ -224,17 +246,32 @@ def _assistant_turn(reply):
     }
 
 
+def _connection_status(user) -> str:
+    """What the model may say about connected accounts — status only, never a
+    credential."""
+    if user.linked_providers:
+        labels = ", ".join(skills._label(name) for name in user.linked_providers)
+        return f"Connected accounts: {labels}."
+    if user.onboarding_status == identity.NEW:
+        return "This user is brand new and has connected no accounts yet."
+    return "No accounts are currently connected."
+
+
 def build_context(user, message):
     """Assemble the prompt: instructions, what we know, the conversation, the
     new message. Memory is injected as data — the model never has to recall it."""
-    system = f"{SYSTEM_PROMPT}\nWHAT YOU KNOW ABOUT THIS USER\n{user.describe()}"
+    system = (
+        f"{SYSTEM_PROMPT}\n"
+        f"WHAT YOU KNOW ABOUT THIS USER\n{user.describe()}\n"
+        f"{_connection_status(user)}"
+    )
     return [{"role": "system", "content": system}, *user.history,
             {"role": "user", "content": message}]
 
 
 async def plan(phone: str, message: str) -> str:
     """Run one turn end to end and return the reply text."""
-    user = memory.load(phone)                      # 1. memory retrieval
+    user = identity.load(phone)                    # 1. identity + memory retrieval
     messages = build_context(user, message)
     llm = get_llm()
 
@@ -245,8 +282,8 @@ async def plan(phone: str, message: str) -> str:
             return reply.text
 
         messages.append(_assistant_turn(reply))
-        for call in reply.tool_calls:                   # 3./4. execution
-            result = await _dispatch(call, user)
+        for call in reply.tool_calls:                   # 3./4. execution via skills
+            result = await _dispatch(call, user, message)
             messages.append(
                 {"role": "tool", "tool_call_id": call.id, "content": result}
             )

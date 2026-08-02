@@ -117,6 +117,53 @@ def init_db():
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_food_memory_phone ON food_memory(phone)")
 
+        # ------------------------------------------------------------------
+        # Identity + provider account linking (Phase 4)
+        # ------------------------------------------------------------------
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            phone TEXT PRIMARY KEY,
+            display_name TEXT,
+            onboarding_status TEXT DEFAULT 'NEW',   -- NEW | LINKED | COMPLETE
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+
+        # One row per (user, provider). Tokens are ENCRYPTED — see core/crypto.py.
+        # Separate from users so revoking one provider cannot disturb another.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS provider_links (
+            phone TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'LINKED',  -- LINKED | REVOKED
+            access_token TEXT,                      -- ENCRYPTED
+            refresh_token TEXT,                     -- ENCRYPTED
+            expires_at TIMESTAMP,                   -- NULL = does not expire
+            scope TEXT,
+            client_id TEXT,
+            linked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (phone, provider)
+        )
+        ''')
+
+        # In-flight OAuth authorisations. Rows are single-use and short-lived;
+        # keeping them in SQLite (not memory) is what lets a link survive a
+        # restart and lets us resume the user's original request afterwards.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS oauth_states (
+            state TEXT PRIMARY KEY,
+            phone TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            code_verifier TEXT,                     -- ENCRYPTED (PKCE)
+            pending_message TEXT,                   -- resumed after linking
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP NOT NULL,
+            used_at TIMESTAMP                       -- NULL until consumed
+        )
+        ''')
+
         conn.commit()
     finally:
         conn.close()
@@ -443,6 +490,176 @@ def get_food_memory(phone, limit=50):
             {"item": item, "venue": venue, "sentiment": sentiment, "at": at}
             for item, venue, sentiment, at in rows
         ]
+    finally:
+        conn.close()
+
+
+# ======================================================================
+# Identity + provider linking helpers (Phase 4)
+# ======================================================================
+# Tokens arrive here ALREADY ENCRYPTED. This layer stores bytes; it does not
+# know what they mean. Encryption lives in core/crypto.py, policy in
+# ai/providers/vault.py.
+
+def get_or_create_user(phone):
+    """Idempotent. Returns the user row as a dict."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO users (phone) VALUES (?) ON CONFLICT(phone) DO NOTHING", (phone,)
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT phone, display_name, onboarding_status, created_at, updated_at "
+            "FROM users WHERE phone = ?", (phone,)
+        ).fetchone()
+    finally:
+        conn.close()
+    keys = ("phone", "display_name", "onboarding_status", "created_at", "updated_at")
+    return dict(zip(keys, row))
+
+
+def update_user(phone, **fields):
+    """Update display_name and/or onboarding_status."""
+    allowed = {"display_name", "onboarding_status"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    assignments = ", ".join(f"{k} = ?" for k in fields)
+    conn = get_connection()
+    try:
+        conn.execute(
+            f"UPDATE users SET {assignments}, updated_at = CURRENT_TIMESTAMP WHERE phone = ?",
+            (*fields.values(), phone),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_provider_link(phone, provider, access_token, refresh_token,
+                       expires_at, scope=None, client_id=None):
+    """Upsert one provider link. Re-linking overwrites — never a second row."""
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO provider_links "
+            "(phone, provider, status, access_token, refresh_token, expires_at, scope, client_id) "
+            "VALUES (?, ?, 'LINKED', ?, ?, ?, ?, ?) "
+            "ON CONFLICT(phone, provider) DO UPDATE SET "
+            "status='LINKED', access_token=excluded.access_token, "
+            "refresh_token=excluded.refresh_token, expires_at=excluded.expires_at, "
+            "scope=excluded.scope, client_id=excluded.client_id, "
+            "updated_at=CURRENT_TIMESTAMP",
+            (phone, provider, access_token, refresh_token, expires_at, scope, client_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_provider_link(phone, provider):
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT phone, provider, status, access_token, refresh_token, expires_at, "
+            "scope, client_id FROM provider_links WHERE phone = ? AND provider = ?",
+            (phone, provider),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    keys = ("phone", "provider", "status", "access_token", "refresh_token",
+            "expires_at", "scope", "client_id")
+    return dict(zip(keys, row))
+
+
+def get_linked_providers(phone):
+    """Names of providers currently usable by this user."""
+    conn = get_connection()
+    try:
+        rows = conn.execute(
+            "SELECT provider FROM provider_links WHERE phone = ? AND status = 'LINKED' "
+            "ORDER BY provider", (phone,)
+        ).fetchall()
+    finally:
+        conn.close()
+    return [r[0] for r in rows]
+
+
+def revoke_provider_link(phone, provider, delete=False):
+    """Mark a link unusable. `delete=True` also removes the stored tokens,
+    which is what an explicit unlink should do."""
+    conn = get_connection()
+    try:
+        if delete:
+            conn.execute(
+                "DELETE FROM provider_links WHERE phone = ? AND provider = ?", (phone, provider)
+            )
+        else:
+            conn.execute(
+                "UPDATE provider_links SET status='REVOKED', access_token=NULL, "
+                "refresh_token=NULL, updated_at=CURRENT_TIMESTAMP "
+                "WHERE phone = ? AND provider = ?",
+                (phone, provider),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def save_oauth_state(state, phone, provider, code_verifier, pending_message, expires_at):
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO oauth_states "
+            "(state, phone, provider, code_verifier, pending_message, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (state, phone, provider, code_verifier, pending_message, expires_at),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def claim_oauth_state(state):
+    """Atomically consume a state token exactly once.
+
+    SECURITY: the single-use claim is what prevents replay. A second callback
+    carrying the same state finds used_at already set and gets nothing back.
+    Returns the row dict, or None if unknown/already used.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE oauth_states SET used_at = CURRENT_TIMESTAMP "
+            "WHERE state = ? AND used_at IS NULL",
+            (state,),
+        )
+        if cursor.rowcount == 0:
+            conn.rollback()
+            return None
+        row = cursor.execute(
+            "SELECT state, phone, provider, code_verifier, pending_message, expires_at "
+            "FROM oauth_states WHERE state = ?", (state,)
+        ).fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    keys = ("state", "phone", "provider", "code_verifier", "pending_message", "expires_at")
+    return dict(zip(keys, row))
+
+
+def delete_expired_oauth_states():
+    """Housekeeping: drop states that were never completed."""
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM oauth_states WHERE expires_at < CURRENT_TIMESTAMP")
+        conn.commit()
+        return cursor.rowcount
     finally:
         conn.close()
 

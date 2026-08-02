@@ -15,7 +15,12 @@ import asyncio
 from core.logger import logger
 
 from ai.providers.base import Offer, ProviderKind, SearchContext
+from ai.providers.oauth import OAuthConfig
 from integrations.swiggy.swiggy_mcp import SwiggyInstamart
+
+# Instamart MCP endpoint. Swiggy also runs /food and /dineout — see
+# FEASIBILITY.md; adding them means new adapters here, nothing above.
+INSTAMART_SERVER = "https://mcp.swiggy.com/im"
 
 
 def _to_float(value):
@@ -39,10 +44,27 @@ def _first(product: dict, *keys):
 
 
 class SwiggyInstamartProvider:
-    """Grocery search over the Instamart MCP endpoint."""
+    """Grocery search over the Instamart MCP endpoint.
+
+    Acts on behalf of an individual user, so it is a LinkableProvider: it
+    declares where its OAuth server lives and lets the generic engine do the
+    rest. Endpoints are DISCOVERED per RFC 8414/9728 — none are hardcoded here,
+    because inventing them would be inventing an API.
+
+    SWIGGY_OAUTH_CLIENT_ID is issued with Builders Club production access. Until
+    then discovery may offer dynamic registration, or local prototyping runs
+    against a whitelisted localhost redirect. See FEASIBILITY.md.
+    """
 
     name = "swiggy_instamart"
+    display_name = "Swiggy"
     kind = ProviderKind.GROCERY
+
+    oauth = OAuthConfig(
+        server_url=INSTAMART_SERVER,
+        client_id_env="SWIGGY_OAUTH_CLIENT_ID",
+        client_secret_env="SWIGGY_OAUTH_CLIENT_SECRET",
+    )
 
     def __init__(self):
         self._client = None

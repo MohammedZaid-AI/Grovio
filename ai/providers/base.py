@@ -13,7 +13,7 @@ provider or None — there are no defaults that could be mistaken for facts. A
 rating of None means "unknown", never "unrated", and the recommendation layer
 must not invent one.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Protocol, runtime_checkable
 
@@ -27,10 +27,19 @@ class ProviderKind(str, Enum):
 @dataclass(frozen=True)
 class SearchContext:
     """Everything a provider needs to answer a search, with no user model
-    leaking through — providers get requirements, not a person's profile."""
+    leaking through — providers get requirements, not a person's profile.
+
+    `access_token` is populated by the registry for providers that act on a
+    user's behalf. It is the ONLY credential a provider ever sees, and the
+    provider never learns whose it is.
+    """
     address_id: str | None = None
     max_price: float | None = None
     limit: int = 10
+    access_token: str | None = None
+
+    def with_token(self, token: str | None) -> "SearchContext":
+        return replace(self, access_token=token)
 
 
 @dataclass(frozen=True)
@@ -76,3 +85,16 @@ class Provider(Protocol):
 
     async def search(self, query: str, ctx: SearchContext) -> list[Offer]:
         ...
+
+
+@runtime_checkable
+class LinkableProvider(Provider, Protocol):
+    """A provider that acts on behalf of a specific user and therefore needs
+    that user's authorisation.
+
+    A provider declares `oauth` (an OAuthConfig) and nothing else — the flow,
+    storage and refresh are handled generically. Providers that need no
+    per-user credentials simply omit this and stay plain `Provider`s.
+    """
+    oauth: object          # ai.providers.oauth.OAuthConfig
+    display_name: str      # what to call it when asking the user to connect

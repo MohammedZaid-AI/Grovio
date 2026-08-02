@@ -6,7 +6,7 @@ queue, worker, delivery); everything below is the concierge.
 
 Thin by design: run the planner, persist the turn, keep failures friendly.
 """
-from ai import memory
+from ai import identity, memory
 from ai.planner import plan
 from core.logger import logger
 
@@ -33,6 +33,9 @@ async def respond(phone: str, message: str) -> str:
     # Persist only completed turns, so a failed turn cannot poison future context.
     try:
         memory.record_turn(phone, message, reply)
+        # Onboarding finishes by conversation, not by interrogation: once the
+        # essentials have surfaced naturally, stop treating them as open.
+        identity.refresh_onboarding_status(phone)
     except Exception:
         logger.error(f"[concierge] could not persist turn for {phone}", exc_info=True)
 
