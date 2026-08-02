@@ -4,15 +4,18 @@ Dump a Swiggy MCP server's real tool surface.
 Run this to find out exactly what a server exposes, so adapters are written
 against real tools instead of guesses.
 
-    PYTHONPATH=. python integrations/swiggy/inspect_tools.py food
-    PYTHONPATH=. python integrations/swiggy/inspect_tools.py im
-    PYTHONPATH=. python integrations/swiggy/inspect_tools.py dineout
+    python integrations/swiggy/inspect_tools.py food
+    python integrations/swiggy/inspect_tools.py im
+    python integrations/swiggy/inspect_tools.py dineout
 
 Paste the output when asking for an adapter to be written.
 """
 import asyncio
-import json
+import os
 import sys
+
+# Run from anywhere, in any shell, without setting PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from mcp_use import MCPClient
 

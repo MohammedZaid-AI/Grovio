@@ -96,7 +96,7 @@ pip install -r requirements.txt
 
 uvicorn backend.app:app --reload --port 8000     # from repo root
 
-PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
+python tests/test_whatsapp_async_delivery.py     # no PYTHONPATH needed
 ```
 
 `uvicorn --reload` does **not** watch `.env` — restart fully after changing it.

@@ -4,11 +4,15 @@ Find out whether a provider's OAuth can actually be discovered from here.
 Answers one question: can a real user link this provider through WhatsApp today,
 or are we blocked on the provider whitelisting us?
 
-    PYTHONPATH=. python scripts/probe_oauth.py
-    PYTHONPATH=. python scripts/probe_oauth.py https://mcp.swiggy.com/food
+    python scripts/probe_oauth.py
+    python scripts/probe_oauth.py https://mcp.swiggy.com/food
 """
 import asyncio
+import os
 import sys
+
+# Run from anywhere, in any shell, without setting PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 

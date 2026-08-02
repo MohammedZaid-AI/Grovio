@@ -5,9 +5,13 @@ The Instamart adapter's search() does not use the stored token — the MCP clien
 authenticates itself. This satisfies the vault's gate so you can exercise the
 full journey locally without a whitelisted OAuth callback.
 
-    PYTHONPATH=. python scripts/dev_link.py whatsapp:+919876543210
+    python scripts/dev_link.py whatsapp:+919876543210
 """
+import os
 import sys
+
+# Run from anywhere, in any shell, without setting PYTHONPATH.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from dotenv import load_dotenv
 

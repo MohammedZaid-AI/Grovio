@@ -80,15 +80,19 @@ ngrok http 8000
 No framework — each suite is a plain script that exits non-zero on failure.
 
 ```bash
-PYTHONPATH=. python tests/test_journey.py      # the whole user journey
-PYTHONPATH=. python tests/test_identity.py     # identity, OAuth, tokens
-PYTHONPATH=. python tests/test_concierge.py    # planner, providers, ranking
-PYTHONPATH=. python tests/test_cloud_api_transport.py
-PYTHONPATH=. python tests/test_whatsapp_async_delivery.py
+python tests/test_journey.py      # the whole user journey
+python tests/test_identity.py     # identity, OAuth, tokens
+python tests/test_concierge.py    # planner, providers, ranking
+python tests/test_cloud_api_transport.py
+python tests/test_whatsapp_async_delivery.py
 ```
 
-295 checks, no network, no API keys required. On Windows set
-`PYTHONIOENCODING=utf-8` first — the output contains ₹ and emoji.
+296 checks, no network, no API keys required. Tests and scripts add the repo
+root to `sys.path` themselves, so no `PYTHONPATH` is needed in any shell.
+
+On Windows, if ₹ or emoji raise an encoding error, set
+`$env:PYTHONIOENCODING="utf-8"` first — PowerShell has no `VAR=value cmd`
+prefix syntax.
 
 Several tests assert **architecture**, not behaviour: they tokenise the upper
 layers and fail the build if the planner can so much as name a credential or a
