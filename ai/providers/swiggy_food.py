@@ -58,6 +58,21 @@ def _first(obj, *keys):
     return None
 
 
+# Swiggy needs a restaurant id AND a menu item id to build a cart, but `Offer.id`
+# is a single opaque handle by design. Packing both here keeps every layer above
+# provider-agnostic — nothing else knows or parses this format.
+_ID_SEP = "::"
+
+
+def _pack_id(restaurant_id, item_id) -> str:
+    return f"{restaurant_id}{_ID_SEP}{item_id}"
+
+
+def _unpack_id(packed: str):
+    restaurant_id, _, item_id = str(packed).partition(_ID_SEP)
+    return (restaurant_id, item_id) if item_id else (None, restaurant_id)
+
+
 def _rating(entry):
     """Ratings arrive as a number or nested under an object. Anything outside a
     plausible 0–5 range is discarded rather than shown."""
@@ -119,10 +134,9 @@ class SwiggyFoodProvider:
         try:
             client = await self._session()
             address_id = ctx.address_id or await client.default_address_id()
-            payload = await client.search(query, address_id)
-        except mcp.ToolSurfaceMismatch as e:
+            payload = await client.search_dishes(query, address_id)
+        except (mcp.ToolSurfaceMismatch, mcp.NoDeliveryAddress) as e:
             self._drop_session()
-            # Actionable: names exactly what to fix, and never fabricates a result.
             logger.error(f"[{self.name}] {e}")
             raise
         except Exception as e:
@@ -130,52 +144,60 @@ class SwiggyFoodProvider:
             logger.error(f"[{self.name}] search failed: {e!r}")
             raise
 
-        entries = mcp.items_of(payload, "restaurants", "results", "items", "cards", "dishes")
+        entries = mcp.items_of(payload, "items", "dishes", "results", "menuItems", "cards")
         offers = []
         for entry in entries[: ctx.limit]:
             if not isinstance(entry, dict):
                 continue
 
-            title = _first(entry, "name", "displayName", "title", "restaurantName")
-            if not title:
+            title = _first(entry, "name", "displayName", "itemName", "title")
+            restaurant_id = _first(entry, "restaurantId", "restaurant_id", "resId")
+            item_id = _first(entry, "itemId", "menuItemId", "id", "dishId")
+            if not (title and restaurant_id and item_id):
+                # Cannot be ordered without both ids, so it is not an offer.
                 continue
 
-            price = _num(_first(entry, "price", "costForTwo", "defaultPrice", "finalPrice"))
+            price = _num(_first(entry, "price", "finalPrice", "defaultPrice", "displayPrice"))
             if ctx.max_price is not None and price is not None and price > ctx.max_price:
                 continue
 
             offers.append(Offer(
                 provider=self.name,
                 kind=self.kind,
-                id=str(_first(entry, "id", "restaurantId", "itemId", "menuItemId") or title),
+                # Opaque composite handle: ordering needs BOTH ids, and only
+                # this module knows how to read it. Nothing above parses it.
+                id=_pack_id(restaurant_id, item_id),
                 title=str(title),
                 venue=_first(entry, "restaurantName", "restaurant", "storeName"),
                 price=price,
                 rating=_rating(entry),
                 eta_minutes=_eta(entry),
                 distance_km=_num(_first(entry, "distanceKm", "distance")),
-                available=_first(entry, "isOpen", "available", "isServiceable") is not False,
-                tags=tuple(t for t in (_first(entry, "cuisine", "cuisines", "category"),) if t),
+                available=_first(entry, "inStock", "isAvailable", "available") is not False,
+                tags=tuple(t for t in (_first(entry, "cuisine", "category", "variantName"),) if t),
             ))
         return offers
 
     async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
         client = await self._session()
         address_id = ctx.address_id or await client.default_address_id()
+        restaurant_id, item_id = _unpack_id(offer.id)
 
-        cart = await client.call("update_cart", {
-            "addressId": address_id,
-            "items": [{"itemId": offer.id, "quantity": quantity}],
-        })
+        if not restaurant_id:
+            raise ProviderError(f"offer {offer.id!r} carries no restaurant id")
+
+        cart = await client.add_to_cart(
+            address_id=address_id,
+            restaurant_id=restaurant_id,
+            cart_items=[{"itemId": item_id, "quantity": max(1, quantity)}],
+            restaurant_name=offer.venue,
+        )
         if getattr(cart, "isError", False):
-            raise ItemUnavailable(f"cart rejected {offer.id}")
+            raise ItemUnavailable(f"cart rejected {item_id}")
 
-        result = await client.call("checkout", {
-            "addressId": address_id,
-            "paymentMethod": self.PAYMENT_METHOD,
-        })
+        result = await client.place_order(address_id)
         if getattr(result, "isError", False):
-            raise ProviderError("checkout rejected")
+            raise ProviderError("order rejected at checkout")
 
         payload = mcp.payload_of(result)
         order_id = str(_first(payload, "orderId", "order_id", "id") or "")
@@ -198,7 +220,7 @@ class SwiggyFoodProvider:
         if not client.supports("order_status"):
             return OrderStatus(order_id=order_id, status=UNKNOWN)
 
-        payload = mcp.payload_of(await client.call("order_status", {"orderId": order_id}))
+        payload = await client.track(order_id)
         raw = str(_first(payload, "status", "orderStatus", "state") or "").upper()
 
         # Map the platform's vocabulary onto ours; anything unrecognised stays

@@ -4,14 +4,18 @@ Swiggy Food MCP client — restaurants.
 Separate from the Instamart client because it is a different server with a
 different tool surface.
 
-⚠️ TOOL NAMES ARE UNVERIFIED. The names in TOOLS below are placeholders following
-Instamart's naming convention. Confirm them with:
+Tool names below are VERIFIED against the live server (18 tools, confirmed
+2026-08-02 via inspect_tools.py). The client still re-checks them on connect and
+refuses to run if the surface changes — it will never silently call a wrong tool
+or invent a result.
 
-    PYTHONPATH=. python integrations/swiggy/inspect_tools.py food
+Swiggy's own tool descriptions state a required workflow: **get_addresses must
+be called first**, and every subsequent call carries that addressId.
 
-and correct TOOLS. The client VERIFIES them against the server on connect and
-refuses to run if they don't exist — it will never silently call a wrong tool or
-invent a result. `missing_tools` on the raised error names exactly what to fix.
+Ordering path:
+    get_addresses → search_menu → update_food_cart → place_food_order
+`search_menu` is the primary search rather than `search_restaurants`, because it
+returns individual dishes with prices — the things a cart can actually hold.
 """
 import json
 import os
@@ -23,19 +27,33 @@ from core.logger import logger
 SERVER_URL = os.getenv("SWIGGY_FOOD_MCP_URL", "https://mcp.swiggy.com/food")
 
 # ---------------------------------------------------------------------------
-# The ONLY place tool names live. Correct these from inspect_tools.py output.
+# The ONLY place tool names live. Verified against the live server.
 # ---------------------------------------------------------------------------
 TOOLS = {
-    "addresses":  os.getenv("SWIGGY_FOOD_TOOL_ADDRESSES",  "get_addresses"),
-    "search":     os.getenv("SWIGGY_FOOD_TOOL_SEARCH",     "search_restaurants"),
-    "menu":       os.getenv("SWIGGY_FOOD_TOOL_MENU",       "get_menu"),
-    "update_cart": os.getenv("SWIGGY_FOOD_TOOL_CART",      "update_cart"),
-    "checkout":   os.getenv("SWIGGY_FOOD_TOOL_CHECKOUT",   "checkout"),
-    "order_status": os.getenv("SWIGGY_FOOD_TOOL_STATUS",   "get_order_status"),
+    "addresses":    "get_addresses",        # must be called first
+    "search":       "search_menu",          # dishes with prices — orderable
+    "restaurants":  "search_restaurants",   # restaurant-level results
+    "menu":         "get_restaurant_menu",
+    "cart":         "get_food_cart",
+    "update_cart":  "update_food_cart",
+    "flush_cart":   "flush_food_cart",
+    "checkout":     "place_food_order",
+    "orders":       "get_food_orders",
+    "order_status": "track_food_order",
+    "coupons":      "fetch_food_coupons",
 }
 
 # Without these the provider cannot do its job; the rest are optional niceties.
-REQUIRED = ("search", "update_cart", "checkout")
+REQUIRED = ("addresses", "search", "update_cart", "checkout")
+
+# COD only for now. Swiggy's UPI path involves a polling widget plus
+# check_payment_status/confirm_order, which does not fit a chat window.
+PAYMENT_METHOD = "Cash"
+
+
+class NoDeliveryAddress(RuntimeError):
+    """The account has no saved address, so nothing can be searched or ordered.
+    Recoverable by the user — they add one in the Swiggy app."""
 
 
 class ToolSurfaceMismatch(RuntimeError):
@@ -101,6 +119,7 @@ class SwiggyFood:
         self.client = MCPClient.from_dict({"mcpServers": {"food": {"url": self.url}}})
         self.session = None
         self.available = ()
+        self._address_id = None
 
     async def initialize(self):
         sessions = await self.client.create_all_sessions()
@@ -129,14 +148,49 @@ class SwiggyFood:
 
     # -- convenience wrappers -------------------------------------------------
     async def default_address_id(self):
-        if not self.supports("addresses"):
-            return None
-        payload = payload_of(await self.call("addresses", {}))
-        addresses = items_of(payload, "addresses", "items")
-        return (addresses[0].get("id") if addresses and isinstance(addresses[0], dict) else None)
+        """Swiggy requires this before anything else; results are sorted with
+        the most recently used address first, which is the right default."""
+        if self._address_id:
+            return self._address_id
 
-    async def search(self, query: str, address_id=None):
-        args = {"query": query}
-        if address_id:
-            args["addressId"] = address_id
+        payload = payload_of(await self.call("addresses", {}))
+        addresses = items_of(payload, "addresses", "items", "results")
+        if not addresses or not isinstance(addresses[0], dict):
+            raise NoDeliveryAddress(
+                "This Swiggy account has no saved delivery address."
+            )
+
+        first = addresses[0]
+        self._address_id = str(
+            first.get("id") or first.get("addressId") or first.get("address_id") or ""
+        )
+        if not self._address_id:
+            raise NoDeliveryAddress("Swiggy returned an address without an id.")
+        return self._address_id
+
+    async def search_dishes(self, query: str, address_id: str, offset: int = 0):
+        """Dishes matching a craving, across restaurants."""
+        args = {"addressId": address_id, "query": query}
+        if offset:
+            args["offset"] = offset
         return payload_of(await self.call("search", args))
+
+    async def add_to_cart(self, address_id: str, restaurant_id: str, cart_items: list,
+                          restaurant_name: str = None):
+        args = {
+            "addressId": address_id,
+            "restaurantId": restaurant_id,
+            "cartItems": cart_items,
+        }
+        if restaurant_name:
+            args["restaurantName"] = restaurant_name
+        return await self.call("update_cart", args)
+
+    async def place_order(self, address_id: str, payment_method: str = PAYMENT_METHOD):
+        return await self.call("checkout", {
+            "addressId": address_id,
+            "paymentMethod": payment_method,
+        })
+
+    async def track(self, order_id: str):
+        return payload_of(await self.call("order_status", {"orderId": order_id}))
