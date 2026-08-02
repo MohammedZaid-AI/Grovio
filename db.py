@@ -8,14 +8,31 @@ suppliers, sales bills — 21 tables) was removed in the concierge pivot.
 
 Concierge memory (user preferences, order history) lands here in Phase 4.
 """
+import os
 import sqlite3
 
-DB_PATH = 'database/orders.db'
+DB_PATH = os.getenv("DATABASE_PATH", "database/orders.db")
+
+# Concurrent workers (one per phone) all write here. Without these, a second
+# writer gets "database is locked" immediately and the default rollback journal
+# blocks readers for the whole write.
+BUSY_TIMEOUT_MS = 5000
 
 
 def get_connection():
-    conn = sqlite3.connect(DB_PATH)
+    # A fresh clone has no database/ directory — .gitignore excludes it — and
+    # sqlite3 will not create the parent. Creating it here means `git clone &&
+    # uvicorn` just works, which is the first thing any reviewer tries.
+    directory = os.path.dirname(DB_PATH)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+
+    conn = sqlite3.connect(DB_PATH, timeout=BUSY_TIMEOUT_MS / 1000)
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
+    # WAL lets readers proceed during a write — the single biggest cheap win for
+    # concurrent workers. It is a persistent property of the database file.
+    conn.execute("PRAGMA journal_mode = WAL")
     return conn
 
 
@@ -450,11 +467,19 @@ def get_user_facts(phone):
         conn.close()
 
 
+# Facts are written into the system prompt every turn, so an unbounded value is
+# both a cost problem and a prompt-injection surface. Real preferences are short.
+MAX_FACT_KEY_LENGTH = 64
+MAX_FACT_VALUE_LENGTH = 200
+
+
 def set_user_fact(phone, key, value):
     """Upsert one preference. Storing an empty value forgets it."""
-    key = (key or "").strip().lower()
+    key = (key or "").strip().lower()[:MAX_FACT_KEY_LENGTH]
     if not key:
         return
+    if value is not None:
+        value = str(value)[:MAX_FACT_VALUE_LENGTH]
     conn = get_connection()
     try:
         if value is None or not str(value).strip():

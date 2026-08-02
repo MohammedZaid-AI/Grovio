@@ -8,6 +8,8 @@ modes, and it is the one URL a provider must whitelist.
 The user sees a plain confirmation page here; the real continuation happens back
 in WhatsApp, where their original request is answered without them repeating it.
 """
+import hashlib
+
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
@@ -62,10 +64,13 @@ async def _resume_conversation(phone: str, pending_message: str) -> None:
     from backend.whatsapp_worker import enqueue_and_wake
 
     try:
-        # A deterministic id keeps the queue's dedup honest if a provider
-        # somehow delivers the same callback twice.
+        # Deterministic id so the queue's dedup still holds if a provider
+        # delivers the same callback twice. sha256, NOT hash(): Python salts
+        # hash() per process, so a restart would produce a different id for the
+        # same message and the duplicate would slip through.
+        digest = hashlib.sha256(f"{phone}:{pending_message}".encode()).hexdigest()[:16]
         await enqueue_and_wake(
-            message_sid=f"resume-{phone}-{abs(hash(pending_message)) % 10**10}",
+            message_sid=f"resume-{digest}",
             phone=phone,
             body=pending_message,
             num_media=0,

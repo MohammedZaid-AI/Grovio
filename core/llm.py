@@ -10,6 +10,7 @@ Groq is reached through its OpenAI-compatible endpoint, so there is exactly one
 client and one code path regardless of provider.
 """
 import json
+import os
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -19,6 +20,11 @@ from core.config import Config
 from core.logger import logger
 
 GROQ_OPENAI_BASE_URL = "https://api.groq.com/openai/v1"
+
+# Someone is waiting on WhatsApp. Fail fast enough to apologise, and let the
+# SDK absorb transient 429/5xx itself.
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("LLM_TIMEOUT_SECONDS", "45"))
+MAX_RETRIES = int(os.getenv("LLM_MAX_RETRIES", "2"))
 
 
 @dataclass(frozen=True)
@@ -61,7 +67,15 @@ class LLM:
         else:
             raise RuntimeError("No LLM credentials: set OPENAI_API_KEY or GROQ_API_KEY.")
 
-        self._client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+        # The SDK default read timeout is 600s. A hung call would pin that
+        # phone's worker for ten minutes and strand every message behind it, so
+        # cap it well under any human's patience and retry transient failures.
+        self._client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+            max_retries=MAX_RETRIES,
+        )
         self.base_url = base_url
 
     async def chat(
