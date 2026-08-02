@@ -189,7 +189,12 @@ async def test_processing_error_still_replies():
         await drain(phone)
     rows = outbound_rows(phone)
     check("inbound marked FAILED", inbound_status(phone) == ["FAILED"])
-    check("error reply queued and sent", rows and rows[0][2] == "SENT" and "error" in rows[0][1].lower())
+    # Assert against the constant, not its wording — user-facing copy is tuned
+    # for tone and must not be pinned by a test.
+    check("error reply queued and sent",
+          rows and rows[0][2] == "SENT" and rows[0][1] == worker._ERROR_REPLY)
+    check("apology names neither the product nor the fault",
+          not any(w in worker._ERROR_REPLY.lower() for w in ("grovio", "exception", "error code")))
 
 
 async def test_restart_recovery():

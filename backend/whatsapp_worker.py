@@ -47,12 +47,14 @@ SEND_BACKOFF_BASE_SECONDS = 2
 
 # Attachments aren't understood yet (images/voice land in a later phase).
 MEDIA_REDIRECT_MESSAGE = (
-    "I can't read attachments yet — tell me what you're in the mood for and "
-    "I'll take it from there."
+    "I can't open attachments yet — but tell me what you're in the mood for and "
+    "I'll take it from there 🙂"
 )
 
-_FALLBACK_REPLY = "Sorry, I couldn't generate a response."
-_ERROR_REPLY = "❌ Grovio encountered an unexpected error."
+# Never name the product or the failure in an apology: the user has no use for
+# either, and a stack-trace tone erodes trust faster than the fault itself.
+_FALLBACK_REPLY = "Sorry — I lost my train of thought there. Say that again?"
+_ERROR_REPLY = "Something went wrong on my end — mind trying that again?"
 
 # phone -> asyncio.Task. Guarded by _registry_lock together with each worker's
 # exit decision so a message can never be stranded without a running worker.

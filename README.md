@@ -174,11 +174,30 @@ what remains.
 
 ## Documentation
 
+**Start here**
+
 | Document | Read it for |
 |---|---|
-| [LAUNCH.md](LAUNCH.md) | What's done, what's blocked, what's left before launch |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | One-page system design |
+| [SECURITY.md](SECURITY.md) | OAuth, encryption, isolation, threat model |
+| [DEPLOYMENT.md](DEPLOYMENT.md) | Clean machine → running service |
+| [CHECKLIST.md](CHECKLIST.md) | Production readiness, with the real blockers marked |
+
+**Product & business**
+
+| Document | Read it for |
+|---|---|
+| [DEMO.md](DEMO.md) | The end-to-end journey, as a demo script |
+| [PARTNERSHIP.md](PARTNERSHIP.md) | Swiggy Builders Club proposal |
+| [LAUNCH.md](LAUNCH.md) | What's done, what's blocked, what's left |
 | [FEASIBILITY.md](FEASIBILITY.md) | Which providers can legally and technically be integrated |
-| [IDENTITY.md](IDENTITY.md) | User, OAuth and token lifecycles |
+
+**Engineering**
+
+| Document | Read it for |
+|---|---|
 | [TECHDEBT.md](TECHDEBT.md) | Known debt, ranked, with what blocks production |
+| [IDENTITY.md](IDENTITY.md) | User, OAuth and token lifecycles |
 | [MIGRATION.md](MIGRATION.md) | How this repo became the concierge |
+| [README-OSS.md](README-OSS.md) | Extracting the framework as open source |
 | [CLAUDE.md](CLAUDE.md) | Conventions and landmines for contributors |

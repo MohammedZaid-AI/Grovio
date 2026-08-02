@@ -122,8 +122,8 @@ async def oauth_callback(provider: str, request: Request):
 
     label = getattr(registry.get(result["provider"]), "display_name", result["provider"])
     body = (
-        "You're all set. Head back to WhatsApp — I'm already picking up where we left off."
+        "You're all set — head back to WhatsApp. I'm already working on what you asked."
         if result["pending_message"]
-        else "You're all set. Head back to WhatsApp and tell me what you feel like eating."
+        else "You're all set — head back to WhatsApp and tell me what you feel like eating."
     )
     return _page("✓", f"{label} connected", body)
