@@ -24,6 +24,7 @@ SECURITY
 import base64
 import hashlib
 import os
+import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,11 @@ DISCOVERY_TIMEOUT = 10
 TOKEN_TIMEOUT = 20
 
 _metadata_cache: dict = {}
+_client_cache: dict = {}
+
+# Sent during dynamic client registration; this is how we appear in a user's
+# consent screen and in the provider's dashboard.
+CLIENT_NAME = os.getenv("OAUTH_CLIENT_NAME", "AI Food Concierge")
 
 
 class OAuthError(Exception):
@@ -89,10 +95,41 @@ async def _fetch_json(client, url):
     return None
 
 
+async def _challenge_resource_metadata(client, server_url: str):
+    """Ask the MCP server itself where its authorization server lives.
+
+    The MCP authorization spec says an unauthenticated request is answered with
+    401 and a `WWW-Authenticate: Bearer resource_metadata="<url>"` header. This
+    is the authoritative path — guessing well-known URLs only works when the
+    resource server happens to host them itself.
+    """
+    try:
+        response = await client.post(
+            server_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            headers={"Accept": "application/json, text/event-stream"},
+        )
+    except Exception as e:
+        logger.info(f"[oauth] challenge probe failed: {type(e).__name__}")
+        return None
+
+    if response.status_code not in (401, 403):
+        return None
+
+    header = response.headers.get("www-authenticate", "")
+    match = re.search(r'resource_metadata="?([^",\s]+)"?', header)
+    if not match:
+        logger.info(f"[oauth] {response.status_code} carried no resource_metadata hint")
+        return None
+    return match.group(1)
+
+
 async def discover(config: OAuthConfig) -> dict:
     """Resolve authorize/token endpoints. Cached per server URL.
 
-    Explicit configuration wins; otherwise walk the two standard documents.
+    Order: explicit configuration, then the server's own 401 challenge, then
+    well-known probing. The challenge is authoritative; the probes are a
+    fallback for servers that don't implement it.
     """
     if config.authorize_url and config.token_url:
         return {
@@ -106,8 +143,15 @@ async def discover(config: OAuthConfig) -> dict:
 
     server = config.server_url.rstrip("/")
     async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT, follow_redirects=True) as client:
-        # RFC 9728: the resource server names its authorization server.
+        # RFC 9728 protected-resource metadata, however we can reach it.
         resource_meta = await _fetch_json(client, f"{server}/.well-known/oauth-protected-resource")
+
+        if not resource_meta:
+            hinted = await _challenge_resource_metadata(client, server)
+            if hinted:
+                logger.info("[oauth] discovered resource metadata via 401 challenge")
+                resource_meta = await _fetch_json(client, hinted)
+
         issuers = (resource_meta or {}).get("authorization_servers") or []
         candidates = [issuer.rstrip("/") for issuer in issuers] or [server]
 
@@ -122,18 +166,67 @@ async def discover(config: OAuthConfig) -> dict:
 
     raise OAuthError(
         f"Could not discover OAuth endpoints for {config.server_url}. The provider "
-        f"may not publish RFC 8414/9728 metadata — declare authorize_url and "
-        f"token_url on its OAuthConfig instead."
+        f"publishes no RFC 8414/9728 metadata and returned no 401 challenge — "
+        f"declare authorize_url and token_url on its OAuthConfig instead."
     )
 
 
 def clear_discovery_cache():
     _metadata_cache.clear()
+    _client_cache.clear()
 
 
 # ----------------------------------------------------------------------
 # Flow
 # ----------------------------------------------------------------------
+async def _register_client(metadata: dict, provider: str) -> str | None:
+    """Dynamic client registration (RFC 7591).
+
+    Without a client_id the authorization request is rejected, and providers
+    only issue one manually as part of an approval process. Servers that support
+    DCR let us self-register, which is what makes linking work before any
+    paperwork exists.
+
+    Cached in memory: a restart re-registers, which is harmless but wasteful.
+    Persist it if registration ever becomes rate-limited.
+    """
+    endpoint = metadata.get("registration_endpoint")
+    if not endpoint:
+        return None
+
+    cached = _client_cache.get(endpoint)
+    if cached:
+        return cached
+
+    try:
+        async with httpx.AsyncClient(timeout=TOKEN_TIMEOUT) as client:
+            response = await client.post(endpoint, json={
+                "client_name": CLIENT_NAME,
+                "redirect_uris": [redirect_uri(provider)],
+                "grant_types": ["authorization_code", "refresh_token"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "none",   # public client + PKCE
+            })
+    except Exception as e:
+        logger.info(f"[oauth] dynamic registration failed: {type(e).__name__}")
+        return None
+
+    if response.status_code not in (200, 201):
+        logger.info(f"[oauth] dynamic registration rejected (HTTP {response.status_code})")
+        return None
+
+    client_id = (response.json() or {}).get("client_id")
+    if client_id:
+        _client_cache[endpoint] = client_id
+        logger.info(f"[oauth] registered dynamically with {provider}")
+    return client_id
+
+
+async def _resolve_client_id(config: OAuthConfig, metadata: dict, provider: str) -> str | None:
+    """A configured client id always wins; otherwise try to self-register."""
+    return config.client_id or await _register_client(metadata, provider)
+
+
 def _pkce():
     verifier = secrets.token_urlsafe(64)[:128]
     digest = hashlib.sha256(verifier.encode()).digest()
@@ -170,8 +263,9 @@ async def begin(phone: str, provider: str, config: OAuthConfig,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    if config.client_id:
-        params["client_id"] = config.client_id
+    client_id = await _resolve_client_id(config, metadata, provider)
+    if client_id:
+        params["client_id"] = client_id
     if config.scopes:
         params["scope"] = " ".join(config.scopes)
 
@@ -190,9 +284,11 @@ def _expiry_from(payload: dict):
     return (datetime.now(timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%d %H:%M:%S")
 
 
-async def _post_token(metadata: dict, config: OAuthConfig, form: dict) -> dict:
-    if config.client_id:
-        form["client_id"] = config.client_id
+async def _post_token(metadata: dict, config: OAuthConfig, form: dict,
+                      client_id: str | None = None) -> dict:
+    client_id = client_id or config.client_id
+    if client_id:
+        form["client_id"] = client_id
     if config.client_secret:
         form["client_secret"] = config.client_secret
 
@@ -245,12 +341,13 @@ async def complete(state: str, code: str, config_for) -> dict:
         raise OAuthError("stored PKCE verifier could not be read")
 
     metadata = await discover(config)
+    client_id = await _resolve_client_id(config, metadata, provider)
     payload = await _post_token(metadata, config, {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": redirect_uri(provider),
         "code_verifier": verifier,
-    })
+    }, client_id=client_id)
 
     db.save_provider_link(
         phone=row["phone"],
@@ -259,7 +356,7 @@ async def complete(state: str, code: str, config_for) -> dict:
         refresh_token=encrypt(payload.get("refresh_token")),
         expires_at=_expiry_from(payload),
         scope=payload.get("scope"),
-        client_id=config.client_id,
+        client_id=client_id,
     )
 
     logger.info(f"[oauth] link completed provider={provider}")
@@ -275,10 +372,11 @@ async def refresh(phone: str, provider: str, config: OAuthConfig, refresh_token:
     rejected it, which means the user must re-link."""
     try:
         metadata = await discover(config)
+        client_id = await _resolve_client_id(config, metadata, provider)
         payload = await _post_token(metadata, config, {
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
-        })
+        }, client_id=client_id)
     except OAuthError as e:
         logger.info(f"[oauth] refresh failed provider={provider}: {e}")
         return False

@@ -110,11 +110,19 @@ async def find_food(user, query: str, kind: str, max_price: float | None = None,
 
     if not registry.supports(provider_kind):
         # Structural anti-hallucination guard: no provider means no data.
+        #
+        # The instruction not to offer account linking matters: connecting an
+        # account does NOT enable a capability nobody can serve, and a model that
+        # offers it sends the user through a pointless flow that ends in the same
+        # refusal. Observed in live testing.
+        available = ", ".join(k.value for k in registry.available_kinds()) or "nothing"
         return SkillResult(
             SkillStatus.CAPABILITY_UNAVAILABLE,
-            f"CAPABILITY_UNAVAILABLE: no {provider_kind.value} provider is connected, "
-            f"so there are no real results. Tell the user plainly that you cannot "
-            f"search {provider_kind.value}s yet. Do NOT invent any.",
+            f"CAPABILITY_UNAVAILABLE: nothing can search {provider_kind.value}s — this "
+            f"is not a connection problem and connecting an account will NOT fix it. "
+            f"Tell the user plainly that you can't do {provider_kind.value}s yet, do "
+            f"NOT offer to connect anything, and do NOT invent options. "
+            f"You CAN currently help with: {available}. Offer that instead.",
         )
 
     # Anything needing authorisation this user hasn't granted? Ask for it first —
