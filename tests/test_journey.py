@@ -31,7 +31,7 @@ _tmp.close()
 db.DB_PATH = _tmp.name
 db.init_db()
 
-from ai import concierge, identity, memory, planner, skills
+from ai import concierge, conversation, identity, memory, planner, skills
 from ai.providers import ProviderKind, oauth, registry
 from ai.providers.base import (
     CANCELLED, ON_THE_WAY, PLACED, ItemUnavailable, Offer, OrderStatus,
@@ -197,7 +197,7 @@ check("favourite ranked first", result.offers[0].offer.title == "Chicken Biryani
 check("reason is derived, not invented", any("regularly" in r for r in result.offers[0].reasons))
 check("model told to use ONLY these", "ONLY these" in result.message)
 
-stored = json.loads(db.get_offer_session(DINER)["offers"])
+stored = conversation.load(DINER).offers
 check("what was shown is persisted for selection", [o["title"] for o in stored] ==
       [r.offer.title for r in result.offers])
 
@@ -215,7 +215,7 @@ saved = db.get_latest_order(DINER)
 check("order persisted", saved["title"] == second and saved["provider_order_id"] == "ORD-1")
 check("ordering is recorded in food memory",
       any(e["item"] == second and e["sentiment"] == memory.ORDERED for e in memory.load(DINER).food))
-check("offers cleared so a stale 'second one' can't re-order", db.get_offer_session(DINER) is None)
+check("offers cleared so a stale 'second one' can't re-order", not conversation.load(DINER).has_offers)
 
 print("\n[6] The model cannot order something it never offered")
 run(skills.find_food(identity.load(DINER), "biryani", "restaurant"))
@@ -227,7 +227,7 @@ check("nothing was ordered", len(kitchen.placed) == 1)
 nonsense = run(skills.place_order(identity.load(DINER), selection="the tasty one"))
 check("non-numeric selection refused", nonsense.status == skills.SkillStatus.ERROR)
 
-db.clear_offer_session(DINER)
+conversation.reset(DINER)
 stale = run(skills.place_order(identity.load(DINER), selection=1))
 check("ordering with nothing on the table refuses", stale.status == skills.SkillStatus.STALE)
 check("told to search again rather than guess", "find_food" in stale.message)
@@ -267,7 +267,7 @@ run(skills.find_food(identity.load(DINER), "biryani", "restaurant"))
 broke = run(skills.place_order(identity.load(DINER), selection=1))
 check("provider failure handled", broke.status == skills.SkillStatus.ERROR)
 check("no internal detail leaks to the model", "500" not in broke.message and "boom" not in broke.message)
-check("explicitly says nothing was charged", "nothing was charged" in broke.message)
+check("explicitly says nothing was charged", "nothing was charged" in broke.message.lower())
 check("explicitly forbids claiming success", "not claim it succeeded" in broke.message.lower())
 kitchen.fail_with = None
 
@@ -297,10 +297,10 @@ registry.clear()
 registry.register(kitchen)
 db.revoke_provider_link(DINER, kitchen.name)
 run(skills.find_food(identity.load(DINER), "biryani", "restaurant"))
-db.save_offer_session(DINER, json.dumps([{
+conversation.show_offers(DINER, [{
     "provider": kitchen.name, "id": "sku-meghana", "title": "Chicken Biryani",
     "venue": "Meghana Foods", "price": 340, "currency": "INR",
-    "eta_minutes": 22, "kind": "restaurant"}]), "biryani")
+    "eta_minutes": 22, "kind": "restaurant"}], "biryani")
 with patch.object(oauth, "discover", new=AsyncMock(return_value=METADATA)):
     relink = run(skills.place_order(identity.load(DINER), selection=1))
 check("revoked account mid-order asks to reconnect", relink.status == skills.SkillStatus.NEEDS_LINK)
@@ -315,7 +315,7 @@ check("no order to cancel", run(skills.cancel_order(identity.load(FRESH))).statu
 # ----------------------------------------------------------------------
 print("\n[11] Full loop through the planner, end to end")
 link(DINER, kitchen.name)
-db.clear_offer_session(DINER)
+conversation.reset(DINER)
 script = use(Script(
     LLMReply(tool_calls=[ToolCall("f1", "find_food", {"query": "biryani", "kind": "restaurant"})]),
     LLMReply(text="1. Meghana Foods\n⭐ 4.6 · ₹340 · 22 min\nYour usual pick.\n\n2. Empire\n⭐ 4.3 · ₹280 · 18 min\n\nWhich one?"),
@@ -324,11 +324,11 @@ shown = run(concierge.respond(DINER, "I'm craving biryani"))
 check("options reach the user", "Meghana" in shown and "2." in shown)
 
 script = use(Script(
-    LLMReply(tool_calls=[ToolCall("o1", "place_order", {"selection": 2})]),
     LLMReply(text="Done — Mutton Biryani from Empire, ₹280, about 18 minutes 🎉"),
 ))
 placed = run(concierge.respond(DINER, "order the second one"))
 check("ordering works through the planner", "Empire" in placed)
+check("selection resolved WITHOUT a tool call (deterministic)", len(script.calls) == 1)
 check("the right item was ordered", kitchen.placed[-1][0] == "sku-empire")
 
 script = use(Script(

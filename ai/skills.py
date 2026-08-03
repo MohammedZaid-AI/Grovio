@@ -14,20 +14,14 @@ capability, nothing found — into plain instructions the model can speak.
 
 No skill ever returns a token.
 """
-import json
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from enum import Enum
 
 import db
 from core.logger import logger
 
-from ai import recommendation
+from ai import conversation, recommendation
 from ai.providers import ProviderKind, SearchContext, base, oauth, registry
-
-# How long a shown list stays orderable. Long enough to think, short enough that
-# "the second one" can't mean yesterday's list.
-OFFER_TTL_MINUTES = 45
 
 
 class SkillStatus(str, Enum):
@@ -166,7 +160,7 @@ async def find_food(user, query: str, kind: str, max_price: float | None = None,
 # Ordering
 # ----------------------------------------------------------------------
 def _remember_offers(phone: str, ranked: list, query: str) -> None:
-    """Persist exactly what was shown, in order.
+    """Persist exactly what was shown, in order, as conversation state.
 
     SAFETY: this is what makes "order the second one" resolve to a REAL offer.
     The model picks an index into this list; it can never name its way into
@@ -185,24 +179,7 @@ def _remember_offers(phone: str, ranked: list, query: str) -> None:
         }
         for rec in ranked
     ]
-    db.save_offer_session(phone, json.dumps(payload), query)
-
-
-def _recall_offers(phone: str):
-    """The offers still in play, or None if there are none or they went stale."""
-    session = db.get_offer_session(phone)
-    if not session:
-        return None
-    try:
-        created = datetime.strptime(str(session["created_at"])[:19], "%Y-%m-%d %H:%M:%S")
-    except ValueError:
-        return None
-    if created + timedelta(minutes=OFFER_TTL_MINUTES) < datetime.now(timezone.utc).replace(tzinfo=None):
-        return None
-    try:
-        return json.loads(session["offers"])
-    except (TypeError, ValueError):
-        return None
+    conversation.show_offers(phone, payload, query)
 
 
 def _offer_from(entry: dict):
@@ -225,8 +202,8 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
     never offered, which is the money-spending equivalent of not inventing a
     restaurant.
     """
-    offers = _recall_offers(user.phone)
-    if not offers:
+    state = conversation.load(user.phone)
+    if not state.has_offers:
         return SkillResult(
             SkillStatus.STALE,
             "No options are currently on the table (nothing shown recently, or it "
@@ -234,22 +211,104 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
             "user you're refreshing the options.",
         )
 
-    try:
-        index = int(selection) - 1
-    except (TypeError, ValueError):
-        index = -1
-    if index < 0 or index >= len(offers):
+    entry = state.offer_at(selection) if str(selection).strip().lstrip("-").isdigit() else None
+    if entry is None:
         return SkillResult(
             SkillStatus.ERROR,
-            f"ERROR: there is no option {selection}. Only 1–{len(offers)} were shown. "
-            f"Ask which one they meant.",
+            f"ERROR: there is no option {selection}. Only 1–{len(state.offers)} were "
+            f"shown. Ask which one they meant.",
         )
 
-    entry = offers[index]
+    pending = conversation.PendingOrder(
+        provider=entry["provider"],
+        offer_id=entry["id"],
+        title=entry["title"],
+        venue=entry.get("venue"),
+        price=entry.get("price"),
+        currency=entry.get("currency") or "INR",
+        eta_minutes=entry.get("eta_minutes"),
+        quantity=max(1, int(quantity or 1)),
+        selection=int(selection),
+    )
+    conversation.begin_order(user.phone, pending)
+    return await _execute_pending(user, entry)
+
+
+async def retry_pending_order(user) -> SkillResult:
+    """Retry the order already chosen — never a fresh search.
+
+    This is the whole point of the state machine: 'yes' after a failure must
+    resolve to THIS order, deterministically, without the model re-deciding.
+    """
+    state = conversation.load(user.phone)
+    if not state.pending:
+        return SkillResult(
+            SkillStatus.STALE,
+            "There is no order waiting to be retried. Ask what they'd like instead.",
+        )
+
+    if state.pending.retries_exhausted:
+        return _exhausted(user, state)
+
+    conversation.begin_retry(user.phone)
+    entry = state.offer_at(state.pending.selection or 0) or {
+        "provider": state.pending.provider,
+        "id": state.pending.offer_id,
+        "title": state.pending.title,
+        "venue": state.pending.venue,
+        "price": state.pending.price,
+        "currency": state.pending.currency,
+        "eta_minutes": state.pending.eta_minutes,
+        "kind": ProviderKind.RESTAURANT.value,
+    }
+    return await _execute_pending(user, entry, quantity=state.pending.quantity)
+
+
+def _exhausted(user, state) -> SkillResult:
+    conversation.give_up(user.phone)
+    alternatives = [
+        f"{i}. {o['title']}" + (f" from {o['venue']}" if o.get("venue") else "")
+        for i, o in enumerate(state.offers, 1)
+        if o["id"] != state.pending.offer_id
+    ][:3]
+    listing = ("\nThe other options still available:\n" + "\n".join(alternatives)) if alternatives else ""
+    return SkillResult(
+        SkillStatus.ERROR,
+        f"RETRY LIMIT REACHED for '{state.pending.title}' — it failed "
+        f"{state.pending.retry_count + 1} times. Tell the user it still couldn't be "
+        f"placed and that nothing was charged, then offer them a choice: try one of "
+        f"the other options, search for something different, or leave it.{listing}",
+    )
+
+
+async def cancel_pending_order(user) -> SkillResult:
+    """User declined the retry. Keep the offer list — they may want another."""
+    state = conversation.load(user.phone)
+    if not state.pending:
+        return SkillResult(SkillStatus.OK, "Nothing pending. Carry on naturally.")
+
+    title = state.pending.title
+    conversation.cancel_pending(user.phone)
+    remaining = len(state.offers)
+    extra = (f" The {remaining} options from before are still on the table if they "
+             f"want a different one.") if remaining else ""
+    return SkillResult(
+        SkillStatus.OK,
+        f"Dropped the pending order for '{title}'. Confirm briefly, no fuss, and "
+        f"make clear nothing was charged.{extra}",
+    )
+
+
+async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResult:
+    """Place the order described by `entry`, driving the state machine on the
+    outcome. Shared by the first attempt and every retry so both paths behave
+    identically."""
     offer = _offer_from(entry)
     provider = registry.get(offer.provider)
+    quantity = quantity or 1
 
     if provider is None or not hasattr(provider, "place"):
+        conversation.order_failed(user.phone, "no ordering provider")
         return SkillResult(
             SkillStatus.CAPABILITY_UNAVAILABLE,
             "CAPABILITY_UNAVAILABLE: ordering isn't available for this option yet. "
@@ -259,23 +318,32 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
 
     ctx, reason = await _ordering_context(user, provider)
     if ctx is None:
-        return await _link_prompt(user, provider.name, f"order option {selection}")
+        conversation.order_failed(user.phone, f"not linked: {reason}")
+        return await _link_prompt(user, provider.name, f"order {offer.title}")
 
     try:
-        placed = await provider.place(offer, max(1, int(quantity or 1)), ctx)
-    except base.ItemUnavailable:
+        placed = await provider.place(offer, max(1, int(quantity)), ctx)
+    except base.ItemUnavailable as e:
+        state = conversation.order_failed(user.phone, str(e))
+        if state.state == conversation.State.ORDER_FAILED:
+            return _exhausted(user, state)
         return SkillResult(
             SkillStatus.UNAVAILABLE_ITEM,
             f"'{offer.title}' can't be ordered right now — it's unavailable or the "
-            f"store is closed. Say so, and offer the other options already shown.",
+            f"store is closed. Say so, offer the other options already shown, and "
+            f"ask if they want you to try this one again anyway.",
         )
     except Exception as e:
         logger.error(f"[skills] order failed on {offer.provider}: {e!r}", exc_info=True)
+        state = conversation.order_failed(user.phone, repr(e))
+        if state.state == conversation.State.ORDER_FAILED:
+            return _exhausted(user, state)
         return SkillResult(
             SkillStatus.ERROR,
-            "ERROR: the order could not be placed. Apologise briefly, say nothing was "
-            "charged, and offer to try again. Do NOT expose technical details and do "
-            "NOT claim it succeeded.",
+            f"ORDER FAILED for '{offer.title}'. Nothing was charged. Apologise in one "
+            f"line and ask if they'd like you to try again — a plain 'yes' will retry "
+            f"THIS same order. Do NOT expose technical details, do NOT claim it "
+            f"succeeded, and do NOT search for anything new.",
         )
 
     order_id = db.save_order(
@@ -289,7 +357,7 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
         currency=placed.currency,
         eta_minutes=placed.eta_minutes,
     )
-    db.clear_offer_session(user.phone)
+    conversation.order_succeeded(user.phone)
 
     from ai import memory
     memory.remember_food(user.phone, offer.title, memory.ORDERED, offer.venue)

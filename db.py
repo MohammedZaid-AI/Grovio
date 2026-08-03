@@ -184,14 +184,23 @@ def init_db():
         # ------------------------------------------------------------------
         # Ordering (Phase 5)
         # ------------------------------------------------------------------
-        # What we last showed this user, so "order the second one" resolves to
-        # a REAL offer instead of whatever the model thinks it said.
+        # Conversation state — DISTINCT from long-term memory.
+        #
+        # Long-term memory (user_facts, food_memory, conversation_history) is who
+        # someone is. This is what we are in the MIDDLE of: what was last shown,
+        # what they picked, and whether an order is waiting to be retried.
+        #
+        # It lives here rather than being re-inferred from chat prose, because a
+        # model reading English cannot be relied on to know that a retry is
+        # pending — it will sometimes start over instead.
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS offer_sessions (
+        CREATE TABLE IF NOT EXISTS conversation_state (
             phone TEXT PRIMARY KEY,
-            offers TEXT NOT NULL,              -- JSON list, in the order shown
+            state TEXT NOT NULL DEFAULT 'IDLE',
+            offers TEXT,                       -- JSON list, in the order shown
             query TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            pending TEXT,                      -- JSON pending order, if any
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
 
@@ -725,39 +734,44 @@ def delete_expired_oauth_states():
 # Ordering helpers (Phase 5)
 # ======================================================================
 
-def save_offer_session(phone, offers_json, query=None):
-    """Remember exactly what we showed, in the order we showed it."""
+def get_conversation_state(phone):
+    """Raw row. Interpretation belongs to ai/conversation.py, not here."""
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT state, offers, query, pending, updated_at "
+            "FROM conversation_state WHERE phone = ?", (phone,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row:
+        return None
+    keys = ("state", "offers", "query", "pending", "updated_at")
+    return dict(zip(keys, row))
+
+
+def save_conversation_state(phone, state, offers=None, query=None, pending=None):
+    """Upsert the whole row. Callers pass the complete intended state, so a
+    partial write can never leave a half-applied transition behind."""
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO offer_sessions (phone, offers, query, created_at) "
-            "VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
-            "ON CONFLICT(phone) DO UPDATE SET offers=excluded.offers, "
-            "query=excluded.query, created_at=CURRENT_TIMESTAMP",
-            (phone, offers_json, query),
+            "INSERT INTO conversation_state (phone, state, offers, query, pending, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(phone) DO UPDATE SET state=excluded.state, "
+            "offers=excluded.offers, query=excluded.query, pending=excluded.pending, "
+            "updated_at=CURRENT_TIMESTAMP",
+            (phone, state, offers, query, pending),
         )
         conn.commit()
     finally:
         conn.close()
 
 
-def get_offer_session(phone):
+def clear_conversation_state(phone):
     conn = get_connection()
     try:
-        row = conn.execute(
-            "SELECT offers, query, created_at FROM offer_sessions WHERE phone = ?", (phone,)
-        ).fetchone()
-    finally:
-        conn.close()
-    if not row:
-        return None
-    return {"offers": row[0], "query": row[1], "created_at": row[2]}
-
-
-def clear_offer_session(phone):
-    conn = get_connection()
-    try:
-        conn.execute("DELETE FROM offer_sessions WHERE phone = ?", (phone,))
+        conn.execute("DELETE FROM conversation_state WHERE phone = ?", (phone,))
         conn.commit()
     finally:
         conn.close()

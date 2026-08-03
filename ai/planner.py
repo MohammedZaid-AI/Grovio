@@ -23,7 +23,7 @@ from datetime import datetime
 from core.llm import get_llm
 from core.logger import logger
 
-from ai import identity, memory, skills
+from ai import conversation, identity, memory, skills
 
 # A turn may chain a few tool calls (recall -> search -> answer). Bounded so a
 # confused model cannot loop forever on the user's dime.
@@ -181,6 +181,29 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "retry_order",
+            "description": (
+                "Retry the order that just failed, using the SAME item already "
+                "chosen. Use whenever they want another attempt. Never call "
+                "find_food to 'refresh' before retrying — the item is remembered."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "abandon_order",
+            "description": (
+                "Drop a failed order the user no longer wants to retry. Their "
+                "earlier options stay available."
+            ),
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "check_order",
             "description": (
                 "Check the user's current order — 'where's my order?', 'how much "
@@ -304,6 +327,12 @@ async def _dispatch(call, user, message):
             )
             return result.message
 
+        if call.name == "retry_order":
+            return (await skills.retry_pending_order(user)).message
+
+        if call.name == "abandon_order":
+            return (await skills.cancel_pending_order(user)).message
+
         if call.name == "check_order":
             return (await skills.check_order(user)).message
 
@@ -380,6 +409,28 @@ def _now_context() -> str:
     return f"Right now it is {now:%A}, {now:%d %B}, {now:%H:%M} — {meal}."
 
 
+def _state_context(user) -> str:
+    """Tell the model what is in flight — as DATA, not as something to infer
+    from the transcript. Tool results vanish at the end of a turn, so without
+    this the model has only prose to go on."""
+    state = conversation.load(user.phone)
+
+    if state.awaiting_retry and state.pending:
+        remaining = conversation.MAX_RETRIES - state.pending.retry_count
+        return (
+            f"IN FLIGHT: an order for {state.pending.describe()} FAILED and is "
+            f"waiting on their answer. If they agree, retry THAT order — never "
+            f"search again. Retries left: {remaining}."
+        )
+    if state.state == conversation.State.AWAITING_SELECTION and state.has_offers:
+        return (f"IN FLIGHT: {len(state.offers)} options were just shown and they "
+                f"haven't chosen yet.")
+    if state.state == conversation.State.ORDER_FAILED and state.pending:
+        return (f"IN FLIGHT: '{state.pending.title}' could not be placed after "
+                f"repeated attempts. Do not retry it again; offer alternatives.")
+    return "Nothing is in flight."
+
+
 def build_context(user, message):
     """Assemble the prompt: instructions, what we know, the conversation, the
     new message. Memory is injected as data — the model never has to recall it."""
@@ -387,17 +438,73 @@ def build_context(user, message):
         f"{SYSTEM_PROMPT}\n"
         f"CONTEXT\n{_now_context()}\n\n"
         f"WHAT YOU KNOW ABOUT THIS USER\n{user.describe()}\n"
-        f"{_connection_status(user)}"
+        f"{_connection_status(user)}\n"
+        f"{_state_context(user)}"
     )
     return [{"role": "system", "content": system}, *user.history,
             {"role": "user", "content": message}]
 
 
+async def _resolve_state_first(user, message: str):
+    """Handle turns whose meaning is determined by conversation STATE, not by
+    interpretation.
+
+    When we have asked a closed question ("shall I retry?"), the answer is
+    classified in code and the matching action executed directly. Letting the
+    model choose here is what caused it to launch a fresh search instead of
+    retrying — the failure this state machine exists to prevent.
+
+    Returns a tool-result string for the model to phrase, or None to fall
+    through to ordinary planning.
+    """
+    state = conversation.load(user.phone)
+
+    if state.awaiting_retry:
+        intent = conversation.classify_reply(message)
+
+        if intent == conversation.AFFIRMATIVE:
+            logger.info("[planner] retry confirmed — reusing the pending order")
+            return (await skills.retry_pending_order(user)).message
+
+        if intent == conversation.NEGATIVE:
+            return (await skills.cancel_pending_order(user)).message
+
+        if intent == conversation.ALTERNATIVE:
+            await skills.cancel_pending_order(user)
+            return None      # they want something else; let the model search
+
+        # Not a yes/no — maybe they named a different option from the same list.
+        picked = conversation.resolve_selection(message, len(state.offers))
+        if picked:
+            await skills.cancel_pending_order(user)
+            return (await skills.place_order(user, selection=picked)).message
+        return None
+
+    # Waiting on a choice: resolve "first one" / "option 2" deterministically.
+    if state.state == conversation.State.AWAITING_SELECTION and state.has_offers:
+        picked = conversation.resolve_selection(message, len(state.offers))
+        if picked:
+            logger.info(f"[planner] selection resolved to option {picked}")
+            return (await skills.place_order(user, selection=picked)).message
+
+    return None
+
+
 async def plan(phone: str, message: str) -> str:
     """Run one turn end to end and return the reply text."""
     user = identity.load(phone)                    # 1. identity + memory retrieval
-    messages = build_context(user, message)
     llm = get_llm()
+
+    # State-driven turns are resolved before the model is consulted, so the
+    # outcome is deterministic. The model still writes the words.
+    forced = await _resolve_state_first(user, message)
+    if forced is not None:
+        messages = build_context(user, message)
+        messages.append({"role": "user", "content": f"[system: {forced}]"})
+        reply = await llm.chat(messages)
+        return reply.text
+
+    messages = build_context(user, message)
 
     for _ in range(MAX_STEPS):
         reply = await llm.chat(messages, tools=TOOLS)   # 2. intent detection
