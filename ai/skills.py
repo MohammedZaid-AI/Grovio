@@ -223,6 +223,7 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
         provider=entry["provider"],
         offer_id=entry["id"],
         title=entry["title"],
+        kind=entry.get("kind") or ProviderKind.RESTAURANT.value,
         venue=entry.get("venue"),
         price=entry.get("price"),
         currency=entry.get("currency") or "INR",
@@ -259,7 +260,7 @@ async def retry_pending_order(user) -> SkillResult:
         "price": state.pending.price,
         "currency": state.pending.currency,
         "eta_minutes": state.pending.eta_minutes,
-        "kind": ProviderKind.RESTAURANT.value,
+        "kind": state.pending.kind,
     }
     return await _execute_pending(user, entry, quantity=state.pending.quantity)
 
@@ -362,16 +363,26 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     from ai import memory
     memory.remember_food(user.phone, offer.title, memory.ORDERED, offer.venue)
 
-    eta = f"about {placed.eta_minutes} minutes" if placed.eta_minutes is not None \
-        else "no ETA available yet"
-    total = f"{placed.currency} {placed.total:g}" if placed.total is not None else "amount not returned"
+    # Fall back to what the offer stated. The user was shown that price and ETA
+    # a moment ago; repeating them beats "amount not returned" on a confirmation.
+    minutes = placed.eta_minutes if placed.eta_minutes is not None else offer.eta_minutes
+    amount = placed.total if placed.total is not None else offer.price
+
+    eta = f"about {minutes} minutes" if minutes is not None else "no ETA available yet"
+    total = f"{placed.currency} {amount:g}" if amount is not None else "amount not returned"
+    # The provider's own order id — what they'd quote to the platform. The
+    # internal row id is ours and stays out of the conversation.
+    reference = f" Order ID {placed.order_id}." if placed.order_id else ""
+    logger.info(f"[skills] order #{order_id} placed on {placed.provider} as {placed.order_id!r}")
+
     return SkillResult(
         SkillStatus.OK,
         f"ORDER PLACED. {offer.title}"
         + (f" from {offer.venue}" if offer.venue else "")
-        + f". Total: {total}. ETA: {eta}. Internal reference #{order_id}.\n"
-        f"Confirm it warmly in one or two lines, state the ETA if there is one, and "
-        f"mention they can ask where it is any time. Do NOT invent a delivery time.",
+        + f". Total: {total}. ETA: {eta}.{reference}\n"
+        f"Confirm it warmly in one or two lines: say it's placed, give the total, "
+        f"the ETA if there is one, and the Order ID if there is one. Mention they "
+        f"can ask where it is any time. Do NOT invent a delivery time.",
         offers=[offer],
     )
 

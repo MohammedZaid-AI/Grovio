@@ -62,9 +62,24 @@ then the facts that came back, then one short line of why it suits THEM:
 
   Which one?
 
-Only include a rating, price or ETA if the tool actually returned it. Omit what
-you don't have — never write "N/A", never guess, never round a missing number
-into existence.
+Groceries work the same way — number, name, then brand, price and pack size:
+
+  1. Daawat Biryani Kit
+  Daawat · ₹249 · 500 g
+  The one you bought last time.
+
+  2. Cookd Ambur Biryani Kit
+  Cookd · ₹199 · 400 g
+  Cheaper, and you liked Ambur-style before.
+
+  Which one?
+
+Always show the price the tool returned. Only include a rating, ETA or pack size
+if the tool actually returned it — omit what you don't have, never write "N/A",
+never guess, never round a missing number into existence.
+
+The flow is identical for food and groceries: search, numbered list, they pick a
+number, you order it. Never re-run find_food because they picked something.
 
 TRUTHFULNESS — THIS IS ABSOLUTE
 - You may only mention a restaurant, dish, price, rating or delivery time that
@@ -427,12 +442,12 @@ def _state_context(user) -> str:
             f"waiting on their answer. If they agree, retry THAT order — never "
             f"search again. Retries left: {remaining}."
         )
-    if state.state == conversation.State.AWAITING_SELECTION and state.has_offers:
-        return (f"IN FLIGHT: {len(state.offers)} options were just shown and they "
-                f"haven't chosen yet.")
     if state.state == conversation.State.ORDER_FAILED and state.pending:
         return (f"IN FLIGHT: '{state.pending.title}' could not be placed after "
                 f"repeated attempts. Do not retry it again; offer alternatives.")
+    if state.has_offers:
+        return (f"IN FLIGHT: {len(state.offers)} options are on the table. If they "
+                f"pick one, call place_order with its number — never search again.")
     return "Nothing is in flight."
 
 
@@ -485,8 +500,11 @@ async def _resolve_state_first(user, message: str):
             return (await skills.place_order(user, selection=picked)).message
         return None
 
-    # Waiting on a choice: resolve "first one" / "option 2" deterministically.
-    if state.state == conversation.State.AWAITING_SELECTION and state.has_offers:
+    # A list is on the table: resolve "1" / "first one" / "option 2" / "the
+    # Meghana one" here and order it directly. Any state with live offers
+    # counts, including after a failure — picking a different option off a list
+    # they can still see must never restart the search.
+    if state.has_offers:
         picked = conversation.resolve_selection(message, len(state.offers))
         if picked:
             logger.info(f"[planner] selection resolved to option {picked}")

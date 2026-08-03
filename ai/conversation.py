@@ -60,10 +60,15 @@ ALLOWED = {
     # Terminal states accept themselves: asking again after giving up is a
     # normal thing for a person to do, and must be idempotent rather than an
     # error.
+    # ORDERING is reachable from both: picking a different option off a list
+    # that is still on the table is the normal move after a failure, and after a
+    # success ("actually add the second one too").
     State.ORDER_COMPLETE:              {State.IDLE, State.AWAITING_SELECTION,
-                                        State.RECOMMENDING, State.ORDER_COMPLETE},
+                                        State.RECOMMENDING, State.ORDERING,
+                                        State.ORDER_COMPLETE},
     State.ORDER_FAILED:                {State.IDLE, State.AWAITING_SELECTION,
-                                        State.RECOMMENDING, State.ORDER_FAILED},
+                                        State.RECOMMENDING, State.ORDERING,
+                                        State.ORDER_FAILED},
 }
 
 
@@ -77,6 +82,9 @@ class PendingOrder:
     provider: str
     offer_id: str
     title: str
+    # What was ordered — restaurant or grocery. Needed to rebuild the offer on a
+    # retry; assuming one kind silently mislabels the other provider's orders.
+    kind: str = "restaurant"
     venue: str | None = None
     price: float | None = None
     currency: str = "INR"
@@ -206,9 +214,6 @@ def begin_order(phone: str, pending: PendingOrder) -> Conversation:
     conversation = load(phone)
     pending.created_at = pending.created_at or datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     conversation.pending = pending
-    if conversation.stale:
-        conversation.state = State.IDLE
-        conversation.state = State.AWAITING_SELECTION   # begin_order follows a selection
     return _save(conversation, State.ORDERING)
 
 
@@ -336,6 +341,12 @@ def resolve_selection(text: str, count: int):
     "go with the first", "let's do the first one", "the top one", "the last one".
     Returns None when genuinely ambiguous rather than guessing — an ambiguous
     guess here spends someone's money on the wrong thing.
+
+    Matching an offer by NAME was tried and removed: "need milk" while a list
+    containing "Milk" is on the table is a new search, not a selection, and
+    resolving it as a selection spends money on the wrong thing. Naming an
+    option instead of its number goes through the model, which calls
+    place_order with the number.
     """
     if count <= 0:
         return None

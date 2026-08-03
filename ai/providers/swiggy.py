@@ -92,8 +92,12 @@ def _pick_variant_first(product: dict, *keys):
 def _price_of(product: dict):
     """Instamart nests price as variations[0].price.offerPrice — an OBJECT, not
     a number. Passing that object to a float conversion yields None, which is
-    why options rendered with no ₹ at all."""
-    raw = _pick(product, "price", "offerPrice", "storePrice", "mrp")
+    why options rendered with no ₹ at all.
+
+    Variant first, for the same reason skuId is: the price of the pack being
+    bought, not the parent product's headline number.
+    """
+    raw = _pick_variant_first(product, "price", "offerPrice", "storePrice", "mrp")
     if isinstance(raw, dict):
         raw = _first(raw, "offerPrice", "storePrice", "price", "mrp")
     return _to_float(raw)
@@ -133,6 +137,21 @@ def _cart_has_items(payload: dict) -> bool:
     return False
 
 
+# Swiggy states the real reason in prose. Classifying it decides whether a
+# retry is worth anything: an out-of-stock item will fail identically three
+# times, so it must surface as ItemUnavailable rather than a generic error.
+_ITEM_PROBLEMS = (
+    "out of stock", "unavailable", "sold out", "not serviceable",
+    "max per item quantity limit", "quantity limit", "store is closed",
+    "partially available",
+)
+
+
+def _is_item_problem(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(needle in lowered for needle in _ITEM_PROBLEMS)
+
+
 def _error_text(result) -> str:
     """Pull a provider's own error message out of an MCP result.
 
@@ -148,6 +167,19 @@ def _error_text(result) -> str:
     return "<no error detail returned>"
 
 
+def _flatten(obj) -> dict:
+    """Merge a payload with its nested `data` object.
+
+    Swiggy wraps the order under `data` but leaves some fields — notably the
+    order id — at the TOP level. Returning only one of the two loses whichever
+    half the id happens to be in, and a lost id reads as a failed order.
+    """
+    if not isinstance(obj, dict):
+        return {}
+    inner = obj.get("data")
+    return {**obj, **inner} if isinstance(inner, dict) else dict(obj)
+
+
 def _payload_of(result) -> dict:
     """Pull the data dict out of an MCP result.
 
@@ -156,17 +188,19 @@ def _payload_of(result) -> dict:
     posture that fixed grocery search.
     """
     structured = getattr(result, "structuredContent", None)
-    if isinstance(structured, dict):
-        return structured.get("data") if isinstance(structured.get("data"), dict) else structured
+    if isinstance(structured, dict) and structured:
+        return _flatten(structured)
 
     content = getattr(result, "content", None)
     if content and getattr(content[0], "text", None):
-        try:
-            parsed = json.loads(content[0].text)
-        except (TypeError, ValueError):
-            return {}
-        if isinstance(parsed, dict):
-            return parsed.get("data") if isinstance(parsed.get("data"), dict) else parsed
+        text = content[0].text
+        # Only parse what actually looks like JSON: a human-readable
+        # confirmation put through json.loads used to raise and lose the order.
+        if str(text).lstrip()[:1] in ("{", "["):
+            try:
+                return _flatten(json.loads(text))
+            except (TypeError, ValueError):
+                return {}
     return {}
 
 
@@ -251,7 +285,11 @@ class SwiggyInstamartProvider:
                     venue=_first(product, "brand", "storeName"),
                     price=price,
                     available=bool(_pick(product, "inStock", "available") is not False),
-                    tags=tuple(filter(None, [_pick(product, "quantity", "packSize", "weight")])),
+                    # quantityDescription ("500 g") is Instamart's own pack-size
+                    # field and the one the pre-pivot listing showed. Without it
+                    # every option renders as a bare name.
+                    tags=tuple(filter(None, [_pick_variant_first(
+                        product, "quantityDescription", "quantity", "packSize", "weight")])),
                 )
             )
 
@@ -310,21 +348,32 @@ class SwiggyInstamartProvider:
 
         result = await client.checkout(address_id, payment_method=self.PAYMENT_METHOD)
         if getattr(result, "isError", False):
-            logger.error(f"[{self.name}] checkout failed: {_error_text(result)}")
+            detail = _error_text(result)
+            logger.error(f"[{self.name}] checkout failed: {detail}")
+            if _is_item_problem(detail):
+                raise ItemUnavailable(f"checkout rejected {offer.id}: item problem")
             raise ProviderError(f"checkout failed for {offer.id}")
 
+        # isError is False, so Swiggy ACCEPTED the order. Everything below is
+        # about how much detail we can report — never about whether it happened.
+        # Raising here because an id could not be parsed is what turned placed
+        # orders into "that failed, shall I retry?" and risked ordering twice.
         payload = _payload_of(result)
         order_id = str(_first(payload, "orderId", "order_id", "id") or "")
         if not order_id:
-            # No id means we cannot prove an order exists. Treat it as a failure
-            # rather than telling someone their food is on the way.
-            raise ProviderError("checkout returned no order id")
+            logger.warning(
+                f"[{self.name}] order accepted but no id in the response. "
+                f"Keys: {list(payload.keys())[:12]}"
+            )
 
         return PlacedOrder(
             provider=self.name,
             order_id=order_id,
             status=PLACED,
             eta_minutes=_to_int(_first(payload, "etaMinutes", "eta", "deliveryTime")),
-            total=_to_float(_first(payload, "total", "grandTotal", "orderTotal")),
+            # cartTotal first: it is the key Swiggy actually returns. Dropping it
+            # is why confirmations reported no amount.
+            total=_to_float(_first(payload, "cartTotal", "orderTotal", "grandTotal",
+                                   "total", "amount")),
             items=(offer.title,),
         )

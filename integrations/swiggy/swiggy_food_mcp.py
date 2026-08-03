@@ -75,23 +75,31 @@ def payload_of(result) -> dict:
     Handles both shapes: structuredContent, and JSON-in-text under content[0]
     (the 2025-11-25 protocol returns structuredContent=None), with or without a
     "data" wrapper.
+
+    Payload and nested `data` are MERGED rather than one being chosen: Swiggy
+    wraps the body under `data` but leaves fields — notably the order id — at
+    the top level, and returning only one half loses whichever it landed in.
     """
     def unwrap(obj):
         if not isinstance(obj, dict):
             return None
         inner = obj.get("data")
-        return inner if isinstance(inner, dict) else obj
+        return {**obj, **inner} if isinstance(inner, dict) else dict(obj)
 
-    unwrapped = unwrap(getattr(result, "structuredContent", None))
-    if unwrapped is not None:
-        return unwrapped
+    structured = getattr(result, "structuredContent", None)
+    if isinstance(structured, dict) and structured:
+        return unwrap(structured)
 
     content = getattr(result, "content", None)
     if content and getattr(content[0], "text", None):
-        try:
-            return unwrap(json.loads(content[0].text)) or {}
-        except (TypeError, ValueError):
-            return {}
+        text = content[0].text
+        # Only parse what looks like JSON — a human-readable confirmation put
+        # through json.loads raises and loses the order.
+        if str(text).lstrip()[:1] in ("{", "["):
+            try:
+                return unwrap(json.loads(text)) or {}
+            except (TypeError, ValueError):
+                return {}
     return {}
 
 

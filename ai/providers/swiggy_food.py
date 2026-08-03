@@ -73,6 +73,79 @@ def _unpack_id(packed: str):
     return (restaurant_id, item_id) if item_id else (None, restaurant_id)
 
 
+# Swiggy states the real reason in prose. Classifying it decides whether a retry
+# is worth anything: a sold-out dish fails identically every time, so it must
+# surface as ItemUnavailable rather than a generic error.
+_ITEM_PROBLEMS = (
+    "out of stock", "unavailable", "sold out", "not serviceable", "closed",
+    "quantity limit", "partially available",
+)
+
+
+def _is_item_problem(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(needle in lowered for needle in _ITEM_PROBLEMS)
+
+
+def _error_text(result) -> str:
+    """A provider's own error message, for LOGS only — never shown to a user.
+    Without it a failure is just isError=True, which nobody can act on."""
+    content = getattr(result, "content", None)
+    if content and getattr(content[0], "text", None):
+        return str(content[0].text)[:400]
+    structured = getattr(result, "structuredContent", None)
+    return str(structured)[:400] if structured else "<no error detail returned>"
+
+
+def _price_of(entry):
+    """A dish price, wherever Swiggy put it.
+
+    Same shape hazards as Instamart: the number may be nested in a price object,
+    or live on the first variant rather than the item. A price that fails to
+    extract renders as a blank option, so this tries the item, its price object
+    and its first variant before giving up.
+    """
+    raw = _first(entry, "price", "finalPrice", "defaultPrice", "displayPrice", "offerPrice")
+    if isinstance(raw, dict):
+        raw = _first(raw, "offerPrice", "finalPrice", "price", "displayPrice", "mrp")
+    value = _num(raw)
+    if value is not None:
+        return value
+
+    variants = entry.get("variants") or entry.get("variations")
+    if isinstance(variants, list) and variants and isinstance(variants[0], dict):
+        return _price_of(variants[0])
+    return None
+
+
+def _entries(payload):
+    """Flatten a menu search into (item, restaurant) pairs.
+
+    Swiggy returns dishes either flat — each carrying a nested restaurant
+    object — or grouped under a restaurant card holding its matching items.
+    Handling only the flat shape drops every result of the grouped one, which
+    reads to the user as "nothing found". Anything else yields nothing rather
+    than a guess.
+    """
+    pairs = []
+    for entry in mcp.items_of(payload, "items", "dishes", "results", "menuItems",
+                              "cards", "restaurants"):
+        if not isinstance(entry, dict):
+            continue
+
+        nested = next(
+            (entry[key] for key in ("items", "menuItems", "dishes", "menu")
+             if isinstance(entry.get(key), list) and entry[key]),
+            None,
+        )
+        if nested:
+            pairs.extend((item, entry) for item in nested if isinstance(item, dict))
+        else:
+            restaurant = entry.get("restaurant")
+            pairs.append((entry, restaurant if isinstance(restaurant, dict) else entry))
+    return pairs
+
+
 def _rating(entry):
     """Ratings arrive as a number or nested under an object. Anything outside a
     plausible 0–5 range is discarded rather than shown."""
@@ -144,20 +217,21 @@ class SwiggyFoodProvider:
             logger.error(f"[{self.name}] search failed: {e!r}")
             raise
 
-        entries = mcp.items_of(payload, "items", "dishes", "results", "menuItems", "cards")
-        offers = []
-        for entry in entries[: ctx.limit]:
-            if not isinstance(entry, dict):
-                continue
-
+        pairs = _entries(payload)
+        offers, unpriced = [], 0
+        for entry, restaurant in pairs[: ctx.limit]:
             title = _first(entry, "name", "displayName", "itemName", "title")
-            restaurant_id = _first(entry, "restaurantId", "restaurant_id", "resId")
-            item_id = _first(entry, "itemId", "menuItemId", "id", "dishId")
+            # The restaurant id may be on the dish or on the card grouping it.
+            restaurant_id = (_first(entry, "restaurantId", "restaurant_id", "resId")
+                             or _first(restaurant, "restaurantId", "resId", "id"))
+            item_id = _first(entry, "itemId", "menuItemId", "dishId", "id")
             if not (title and restaurant_id and item_id):
                 # Cannot be ordered without both ids, so it is not an offer.
                 continue
 
-            price = _num(_first(entry, "price", "finalPrice", "defaultPrice", "displayPrice"))
+            price = _price_of(entry)
+            if price is None:
+                unpriced += 1
             if ctx.max_price is not None and price is not None and price > ctx.max_price:
                 continue
 
@@ -168,14 +242,33 @@ class SwiggyFoodProvider:
                 # this module knows how to read it. Nothing above parses it.
                 id=_pack_id(restaurant_id, item_id),
                 title=str(title),
-                venue=_first(entry, "restaurantName", "restaurant", "storeName"),
+                # Rating and ETA describe the restaurant, so they usually live on
+                # the card rather than the dish. Check both.
+                venue=(_first(entry, "restaurantName", "storeName")
+                       or _first(restaurant, "name", "restaurantName", "storeName")),
                 price=price,
-                rating=_rating(entry),
-                eta_minutes=_eta(entry),
-                distance_km=_num(_first(entry, "distanceKm", "distance")),
+                rating=_rating(entry) or _rating(restaurant),
+                eta_minutes=_eta(entry) or _eta(restaurant),
+                distance_km=(_num(_first(entry, "distanceKm", "distance"))
+                             or _num(_first(restaurant, "distanceKm", "distance"))),
                 available=_first(entry, "inStock", "isAvailable", "available") is not False,
                 tags=tuple(t for t in (_first(entry, "cuisine", "category", "variantName"),) if t),
             ))
+
+        if unpriced:
+            # A menu item always has a price. If we couldn't read one, OUR key
+            # list is wrong — say so loudly instead of shipping blank options.
+            sample = pairs[0][0] if pairs else {}
+            logger.warning(
+                f"[{self.name}] {unpriced}/{len(offers)} dishes had no readable "
+                f"price. Item keys: {list(sample.keys())[:15]}"
+            )
+        if pairs and not offers:
+            logger.warning(
+                f"[{self.name}] {len(pairs)} entries returned, none orderable "
+                f"(missing restaurant/item id). Keys: "
+                f"{list(pairs[0][0].keys())[:15]}"
+            )
         return offers
 
     async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
@@ -193,25 +286,35 @@ class SwiggyFoodProvider:
             restaurant_name=offer.venue,
         )
         if getattr(cart, "isError", False):
+            logger.error(f"[{self.name}] cart rejected {item_id}: {_error_text(cart)}")
             raise ItemUnavailable(f"cart rejected {item_id}")
 
         result = await client.place_order(address_id)
         if getattr(result, "isError", False):
+            detail = _error_text(result)
+            logger.error(f"[{self.name}] checkout failed: {detail}")
+            if _is_item_problem(detail):
+                raise ItemUnavailable(f"checkout rejected {item_id}: item problem")
             raise ProviderError("order rejected at checkout")
 
+        # isError is False, so Swiggy ACCEPTED the order. An unparseable id is a
+        # reporting gap, never grounds to call a placed order failed — doing that
+        # sends the user into the retry flow and risks ordering twice.
         payload = mcp.payload_of(result)
         order_id = str(_first(payload, "orderId", "order_id", "id") or "")
         if not order_id:
-            # No id means we cannot prove an order exists. Never tell someone
-            # their food is coming on the strength of an ambiguous response.
-            raise ProviderError("checkout returned no order id")
+            logger.warning(
+                f"[{self.name}] order accepted but no id in the response. "
+                f"Keys: {list(payload.keys())[:12]}"
+            )
 
         return PlacedOrder(
             provider=self.name,
             order_id=order_id,
             status=PLACED,
             eta_minutes=_eta(payload) or offer.eta_minutes,
-            total=_num(_first(payload, "total", "grandTotal", "orderTotal")) or offer.price,
+            total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
+                              "total", "amount")) or offer.price,
             items=(offer.title,),
         )
 

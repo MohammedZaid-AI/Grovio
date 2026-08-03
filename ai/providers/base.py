@@ -65,11 +65,15 @@ class Offer:
         if self.venue:
             bits.append(f"from {self.venue}")
         if self.price is not None:
-            bits.append(f"{self.currency} {self.price:g}")
+            symbol = "₹" if self.currency == "INR" else f"{self.currency} "
+            bits.append(f"{symbol}{self.price:g}")
         if self.rating is not None:
             bits.append(f"rated {self.rating}")
         if self.eta_minutes is not None:
             bits.append(f"{self.eta_minutes} min")
+        # Pack size for groceries, cuisine for restaurants. Shown because a
+        # grocery option without its pack size is not a choosable thing.
+        bits.extend(str(tag) for tag in self.tags if tag)
         return " · ".join(bits)
 
 
