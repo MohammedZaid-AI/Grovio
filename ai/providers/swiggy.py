@@ -79,6 +79,41 @@ def _pick(product: dict, *keys):
     return _first(product, *keys) or _first(_variant(product), *keys)
 
 
+def _pick_variant_first(product: dict, *keys):
+    """Read from the VARIANT first, then the product.
+
+    Ordering ids must resolve this way round: the variant's skuId identifies the
+    specific pack being bought, while the product-level one is its parent. Taking
+    the parent adds the wrong thing — or nothing — to the cart.
+    """
+    return _first(_variant(product), *keys) or _first(product, *keys)
+
+
+def _price_of(product: dict):
+    """Instamart nests price as variations[0].price.offerPrice — an OBJECT, not
+    a number. Passing that object to a float conversion yields None, which is
+    why options rendered with no ₹ at all."""
+    raw = _pick(product, "price", "offerPrice", "storePrice", "mrp")
+    if isinstance(raw, dict):
+        raw = _first(raw, "offerPrice", "storePrice", "price", "mrp")
+    return _to_float(raw)
+
+
+# Ordering needs BOTH ids: update_cart silently adds nothing when skuId is
+# missing, and the emptiness only surfaces as a checkout failure. Offer.id is a
+# single opaque handle, so both are packed into it and only this module reads it.
+_ID_SEP = "::"
+
+
+def _pack_id(spin_id, sku_id) -> str:
+    return f"{spin_id}{_ID_SEP}{sku_id or ''}"
+
+
+def _unpack_id(packed: str):
+    spin_id, _, sku_id = str(packed).partition(_ID_SEP)
+    return spin_id, (sku_id or None)
+
+
 def _cart_has_items(payload: dict) -> bool:
     """True if the cart payload shows at least one line item, whatever the
     provider chose to call the list."""
@@ -199,11 +234,11 @@ class SwiggyInstamartProvider:
             title = _first(product, "name", "displayName", "productName")
             # The cart is keyed by spinId. Anything without one cannot be
             # ordered, so it is not a real offer no matter how good it looks.
-            spin_id = _pick(product, "spinId", "spin_id")
+            spin_id = _pick_variant_first(product, "spinId", "spin_id")
             if not (title and spin_id):
                 continue
 
-            price = _to_float(_pick(product, "offerPrice", "price", "storePrice", "mrp"))
+            price = _price_of(product)
             if ctx.max_price is not None and price is not None and price > ctx.max_price:
                 continue
 
@@ -211,7 +246,7 @@ class SwiggyInstamartProvider:
                 Offer(
                     provider=self.name,
                     kind=self.kind,
-                    id=str(spin_id),
+                    id=_pack_id(spin_id, _pick_variant_first(product, "skuId", "sku_id")),
                     title=str(title),
                     venue=_first(product, "brand", "storeName"),
                     price=price,
@@ -239,10 +274,27 @@ class SwiggyInstamartProvider:
         """
         client = await self._session()
         address_id = await client.get_address_id()
+        spin_id, sku_id = _unpack_id(offer.id)
 
-        cart = await client.update_cart(address_id, [{"spinId": offer.id, "quantity": quantity}])
+        # Start from an empty cart: a leftover line from a previous failed
+        # attempt makes checkout fail in ways that look like this item's fault.
+        try:
+            await client.clear_cart()
+        except Exception as e:
+            logger.info(f"[{self.name}] clear_cart before add failed (continuing): {e!r}")
+
+        # skuId is REQUIRED alongside spinId. Without it update_cart reports
+        # success while adding nothing, and the empty cart only surfaces later
+        # as an opaque checkout error.
+        item = {"spinId": spin_id, "quantity": quantity}
+        if sku_id:
+            item["skuId"] = sku_id
+        else:
+            logger.warning(f"[{self.name}] no skuId for {spin_id} — the add may silently fail")
+
+        cart = await client.update_cart(address_id, [item])
         if getattr(cart, "isError", False):
-            logger.error(f"[{self.name}] cart rejected {offer.id}: {_error_text(cart)}")
+            logger.error(f"[{self.name}] cart rejected {item}: {_error_text(cart)}")
             raise ItemUnavailable(f"cart rejected {offer.id}")
 
         # Confirm the item actually landed. update_cart can return success while

@@ -143,8 +143,13 @@ TOOLS = [
                         "type": "string",
                         "enum": ["restaurant", "grocery"],
                         "description": (
-                            "'restaurant' for prepared meals/takeaway, 'grocery' for "
-                            "ingredients and household items."
+                            "'restaurant' when they want a cooked meal delivered — "
+                            "biryani, pizza, burgers, dinner, 'something to eat'. "
+                            "'grocery' when they want ingredients or household items "
+                            "— milk, onions, bread, eggs, 'groceries'. "
+                            "If they name a dish, it is 'restaurant'. If they name a "
+                            "raw ingredient, it is 'grocery'. When genuinely "
+                            "ambiguous, ask in one short line."
                         ),
                     },
                     "max_price": {

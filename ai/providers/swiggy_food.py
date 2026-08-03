@@ -244,7 +244,11 @@ class SwiggyFoodProvider:
 
 
 def enabled() -> bool:
-    """Off unless explicitly switched on, because the tool names are unverified.
-    Registering a restaurant provider that cannot actually search would make the
-    concierge claim a capability it does not have."""
-    return os.getenv("SWIGGY_FOOD_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    """On by default now that the tool surface is verified against the live
+    server, and the client re-checks it on every connect.
+
+    Set SWIGGY_FOOD_ENABLED=0 to run grocery-only. The failure mode if a
+    response shape is wrong is zero offers — an honest "no results" — never an
+    invented restaurant.
+    """
+    return os.getenv("SWIGGY_FOOD_ENABLED", "1").strip().lower() not in ("0", "false", "no")
