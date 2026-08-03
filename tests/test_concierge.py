@@ -110,7 +110,7 @@ check("history is oldest-first for prompting", memory.load(PHONE).history[0]["ro
 print("\n[2] Provider abstraction — routed by capability, never by name")
 registry.clear()
 check("no providers -> capability unsupported", not registry.supports(ProviderKind.RESTAURANT))
-check("unsupported search returns nothing", run(registry.search(ProviderKind.RESTAURANT, "biryani")) == [])
+check("unsupported search returns nothing", run(registry.search(ProviderKind.RESTAURANT, "biryani")) == ([], []))
 
 grocery = FakeProvider("fake_grocery", ProviderKind.GROCERY, [offer("Milk", kind=ProviderKind.GROCERY)])
 restaurant = FakeProvider("fake_resto", ProviderKind.RESTAURANT, [offer("Biryani")])
@@ -118,20 +118,21 @@ registry.register(grocery)
 registry.register(restaurant)
 
 check("registered kinds reported", set(registry.available_kinds()) == {ProviderKind.GROCERY, ProviderKind.RESTAURANT})
-check("search routes to the matching kind only", len(run(registry.search(ProviderKind.GROCERY, "milk"))) == 1)
+check("search routes to the matching kind only", len(run(registry.search(ProviderKind.GROCERY, "milk"))[0]) == 1)
 check("grocery provider received the query", grocery.queries == ["milk"])
 check("restaurant provider untouched by a grocery search", restaurant.queries == [])
 
 second = FakeProvider("fake_resto_2", ProviderKind.RESTAURANT, [offer("Kebab")])
 registry.register(second)
-merged = run(registry.search(ProviderKind.RESTAURANT, "dinner"))
+merged, _ = run(registry.search(ProviderKind.RESTAURANT, "dinner"))
 check("multiple providers of one kind are merged", {o.title for o in merged} == {"Biryani", "Kebab"})
 
 registry.clear()
 registry.register(FakeProvider("broken", ProviderKind.RESTAURANT, [], fail=True))
 registry.register(FakeProvider("healthy", ProviderKind.RESTAURANT, [offer("Pizza")]))
-survived = run(registry.search(ProviderKind.RESTAURANT, "food"))
+survived, broke = run(registry.search(ProviderKind.RESTAURANT, "food"))
 check("one broken provider cannot break the turn", [o.title for o in survived] == ["Pizza"])
+check("but the failure is reported, not swallowed", len(broke) == 1)
 
 # ----------------------------------------------------------------------
 print("\n[3] Offers never fabricate data")

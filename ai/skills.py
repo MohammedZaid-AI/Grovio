@@ -21,7 +21,8 @@ import db
 from core.logger import logger
 
 from ai import conversation, recommendation
-from ai.providers import ProviderKind, SearchContext, base, oauth, registry
+from ai.providers import ProviderKind, SearchContext, base, failures, oauth, registry
+from ai.providers.failures import Failure
 
 
 class SkillStatus(str, Enum):
@@ -32,6 +33,7 @@ class SkillStatus(str, Enum):
     FILTERED = "filtered"                  # found things, all unsuitable
     STALE = "stale"                        # the offered list expired
     UNAVAILABLE_ITEM = "item_unavailable"  # chosen thing can't be ordered now
+    CONFIGURATION = "configuration"        # OUR setup is incomplete, not theirs
     ERROR = "error"
 
 
@@ -67,12 +69,21 @@ async def _link_prompt(user, provider_name: str, pending_message: str) -> SkillR
 
     try:
         url = await oauth.begin(user.phone, provider_name, config, pending_message)
-    except oauth.OAuthError as e:
-        logger.error(f"[skills] could not start link for {provider_name}: {e}")
+    except Exception as e:
+        # NOT all the same thing. A missing OAuth endpoint is a configuration
+        # mistake of ours that no amount of retrying will fix, and reporting it
+        # as "the provider is temporarily unavailable" tells the user something
+        # false about a service that is working fine.
+        failure, instruction = failures.instruction_for(e)
+        logger.error(
+            f"[skills] link for {provider_name} failed — classified as "
+            f"{failure.value}: {e}",
+            exc_info=failure in (Failure.UNKNOWN, Failure.PARSING),
+        )
         return SkillResult(
-            SkillStatus.ERROR,
-            f"ERROR: the {label} connection is temporarily unavailable. Apologise "
-            f"briefly and suggest trying again shortly.",
+            SkillStatus.CONFIGURATION if failure is Failure.CONFIGURATION else SkillStatus.ERROR,
+            f"{instruction} (This concerns their {label} account.)",
+            provider_label=label,
         )
 
     return SkillResult(
@@ -125,10 +136,19 @@ async def find_food(user, query: str, kind: str, max_price: float | None = None,
     if gaps:
         return await _link_prompt(user, gaps[0], pending_message or query)
 
-    offers = await registry.search(
+    offers, errors = await registry.search(
         provider_kind, query, SearchContext(max_price=max_price, limit=20), phone=user.phone
     )
     if not offers:
+        if errors:
+            # Nothing came back AND something broke: report what actually broke,
+            # rather than "no results", which would read as an empty catalogue.
+            failure, instruction = failures.instruction_for(errors[0])
+            logger.error(f"[skills] search for {query!r} failed — {failure.value}: {errors[0]!r}")
+            return SkillResult(
+                SkillStatus.CONFIGURATION if failure is Failure.CONFIGURATION else SkillStatus.ERROR,
+                instruction,
+            )
         return SkillResult(
             SkillStatus.EMPTY,
             f"No {provider_kind.value} results for {query!r}. Suggest they try something else.",
@@ -343,15 +363,26 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
             f"ask if they want you to try this one again anyway.",
         )
     except Exception as e:
-        logger.error(f"[skills] order failed on {offer.provider}: {e!r}", exc_info=True)
+        failure, instruction = failures.instruction_for(e)
+        logger.error(
+            f"[skills] order failed on {offer.provider} — classified as "
+            f"{failure.value}: {e!r}", exc_info=True
+        )
         state = conversation.order_failed(user.phone, repr(e))
         if state.state == conversation.State.ORDER_FAILED:
             return _exhausted(user, state)
+
+        if failure is Failure.CONFIGURATION:
+            # Retrying cannot help, so do not offer it.
+            return SkillResult(
+                SkillStatus.CONFIGURATION,
+                f"{instruction} Nothing was charged for '{offer.title}'.",
+            )
         return SkillResult(
             SkillStatus.ERROR,
-            f"ORDER FAILED for '{offer.title}'. Nothing was charged. Apologise in one "
-            f"line and ask if they'd like you to try again — a plain 'yes' will retry "
-            f"THIS same order. Do NOT expose technical details, do NOT claim it "
+            f"ORDER FAILED for '{offer.title}'. Nothing was charged. {instruction}\n"
+            f"Ask if they'd like you to try again — a plain 'yes' will retry THIS "
+            f"same order. Do NOT expose technical details, do NOT claim it "
             f"succeeded, and do NOT search for anything new.",
         )
 

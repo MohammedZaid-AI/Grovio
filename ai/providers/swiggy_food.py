@@ -29,6 +29,7 @@ from ai.providers.base import (
     SearchContext,
     UNKNOWN,
 )
+from ai.providers import swiggy
 from ai.providers.oauth import OAuthConfig
 from integrations.swiggy import swiggy_food_mcp as mcp
 
@@ -181,10 +182,19 @@ class SwiggyFoodProvider:
 
     PAYMENT_METHOD = "Cash"   # COD only, per Swiggy's MCP documentation
 
+    # Same authorization server as Instamart — Swiggy publishes one, at the
+    # origin root, shared by every MCP server it runs. See ai/providers/swiggy.py
+    # for the verification note.
     oauth = OAuthConfig(
         server_url=mcp.SERVER_URL,
+        scopes=swiggy.SWIGGY_SCOPES,
         client_id_env="SWIGGY_OAUTH_CLIENT_ID",
         client_secret_env="SWIGGY_OAUTH_CLIENT_SECRET",
+        authorize_url_env="SWIGGY_OAUTH_AUTHORIZE_URL",
+        token_url_env="SWIGGY_OAUTH_TOKEN_URL",
+        authorize_url=swiggy.SWIGGY_AUTHORIZE_URL,
+        token_url=swiggy.SWIGGY_TOKEN_URL,
+        registration_url=swiggy.SWIGGY_REGISTRATION_URL,
     )
 
     def __init__(self):

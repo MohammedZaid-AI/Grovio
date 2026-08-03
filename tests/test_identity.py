@@ -22,6 +22,7 @@ from cryptography.fernet import Fernet
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
 os.environ["WHATSAPP_TRANSPORT"] = "twilio"   # avoid Cloud API config in this suite
+os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
 
 import db
 
@@ -376,8 +377,9 @@ oauth.clear_discovery_cache()
 calls = []
 
 
-async def fake_fetch(client, url):
+async def fake_fetch(client, url, trail):
     calls.append(url)
+    trail.append(url)
     if url.endswith("/.well-known/oauth-protected-resource"):
         return {"authorization_servers": ["https://auth.example"]}
     if url == "https://auth.example/.well-known/oauth-authorization-server":
@@ -394,20 +396,42 @@ check("RFC 8414 authorization-server metadata consulted",
 check("endpoints resolved from discovery", found["token_endpoint"] == METADATA["token_endpoint"])
 
 oauth.clear_discovery_cache()
-explicit = run(oauth.discover(oauth.OAuthConfig(
-    server_url="https://x.example",
-    authorize_url="https://x.example/a",
-    token_url="https://x.example/t",
-)))
-check("explicit endpoints bypass discovery", explicit["authorization_endpoint"] == "https://x.example/a")
+with patch.object(oauth, "_fetch_json", new=AsyncMock(return_value=None)):
+    declared = run(oauth.discover(oauth.OAuthConfig(
+        server_url="https://x.example",
+        authorize_url="https://x.example/a",
+        token_url="https://x.example/t",
+    )))
+check("declared endpoints take over when discovery finds nothing",
+      declared["authorization_endpoint"] == "https://x.example/a")
 
 oauth.clear_discovery_cache()
+
+
+async def responds_but_publishes_nothing(client, url, trail):
+    trail.append(f"{url} -> HTTP 404")
+    trail.responded = True      # the server IS up, it just has no metadata
+    return None
+
+
 try:
-    with patch.object(oauth, "_fetch_json", new=AsyncMock(return_value=None)):
+    with patch.object(oauth, "_fetch_json", new=responds_but_publishes_nothing), \
+         patch.object(oauth, "_challenge_resource_metadata", new=AsyncMock(return_value=None)):
         run(oauth.discover(oauth.OAuthConfig(server_url="https://silent.example")))
     check("undiscoverable provider raises a clear error", False)
-except oauth.OAuthError as e:
-    check("undiscoverable provider raises a clear error", "discover" in str(e).lower())
+except oauth.OAuthNotConfigured as e:
+    check("undiscoverable provider raises a clear error", "endpoints" in str(e).lower())
+
+# A server that never answers is DOWN — a different error, and a different
+# thing to tell the user.
+oauth.clear_discovery_cache()
+try:
+    with patch.object(oauth, "_fetch_json", new=AsyncMock(return_value=None)), \
+         patch.object(oauth, "_challenge_resource_metadata", new=AsyncMock(return_value=None)):
+        run(oauth.discover(oauth.OAuthConfig(server_url="https://silent.example")))
+    check("a silent server is UNREACHABLE, not misconfigured", False)
+except oauth.OAuthUnreachable:
+    check("a silent server is UNREACHABLE, not misconfigured", True)
 
 # ----------------------------------------------------------------------
 print("\n[10] ARCHITECTURE: the planner never learns OAuth exists")

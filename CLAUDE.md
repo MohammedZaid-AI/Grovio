@@ -115,7 +115,8 @@ python tests/test_whatsapp_async_delivery.py     # no PYTHONPATH needed
 | `WHATSAPP_TRANSPORT` | `cloud` (default) or `twilio` |
 | `TOKEN_ENCRYPTION_KEY` | Fernet key for provider tokens. **Fails closed.** |
 | `PUBLIC_BASE_URL` | Base for OAuth callbacks; must be https in production |
-| `SWIGGY_OAUTH_CLIENT_ID` | Issued with Builders Club production access |
+| `SWIGGY_OAUTH_CLIENT_ID` | Optional — Swiggy issues client ids by dynamic registration |
+| `SWIGGY_OAUTH_AUTHORIZE_URL` / `_TOKEN_URL` | Pin OAuth endpoints; beats discovery. See `OAUTH.md` |
 | `DEBUG` | Gate content logging (default off) |
 
 ## Rules
@@ -139,6 +140,13 @@ python tests/test_whatsapp_async_delivery.py     # no PYTHONPATH needed
   "restaurant")` returns `CAPABILITY_UNAVAILABLE` by design. Registering a stub
   that returns invented venues would be the single worst change anyone could
   make here.
+- **Never report a failure as an outage unless it is one.** Every exception used
+  to become "the provider is temporarily unavailable", so a wrong OAuth URL —
+  our bug, unfixable by waiting — told the user Swiggy was down. Classify via
+  `ai/providers/failures.py`; only `UNAVAILABLE` may say "try again shortly".
+- **OAuth metadata may live at the ORIGIN ROOT**, not under the server path.
+  `_metadata_urls` probes the RFC 8414 §3.1 form, the appended form and the
+  root. Swiggy serves only the root. See `OAUTH.md`.
 - **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so

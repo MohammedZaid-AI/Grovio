@@ -23,6 +23,7 @@ from cryptography.fernet import Fernet
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
 os.environ["WHATSAPP_TRANSPORT"] = "twilio"
+os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
 
 import db
 

@@ -33,6 +33,7 @@ from cryptography.fernet import Fernet
 
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["WHATSAPP_TRANSPORT"] = "cloud"
+os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
 
 import db
 

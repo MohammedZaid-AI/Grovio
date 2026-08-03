@@ -4,7 +4,7 @@ Provider layer.
 Import from here, never from a platform module directly:
 
     from ai.providers import ProviderKind, registry
-    offers = await registry.search(ProviderKind.GROCERY, "milk")
+    offers, errors = await registry.search(ProviderKind.GROCERY, "milk")
 
 `setup()` wires the concrete platforms. It is the single place that decides
 which providers exist, so the rest of the system stays free of platform names.

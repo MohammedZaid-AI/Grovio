@@ -98,18 +98,22 @@ async def _context_for(provider, ctx: SearchContext, phone: str | None):
 
 
 async def search(kind: ProviderKind, query: str, ctx: SearchContext | None = None,
-                 phone: str | None = None) -> list[Offer]:
+                 phone: str | None = None) -> tuple:
     """Fan out across every provider of this kind and merge the results.
 
-    Providers requiring authorisation this user hasn't granted are skipped
-    silently — `link_gaps()` is how a caller learns to prompt for them. A
-    provider that fails is logged and skipped: one broken platform must never
-    take down the conversation. Callers distinguish "nothing found" from
-    "cannot search" via `supports()`.
+    Returns `(offers, errors)`. Providers requiring authorisation this user
+    hasn't granted are skipped silently — `link_gaps()` is how a caller learns
+    to prompt for them. A provider that fails is logged and skipped: one broken
+    platform must never take down the conversation.
+
+    The errors come back rather than being swallowed so the caller can tell
+    "nobody sells this" from "the search itself broke". Reporting the second as
+    the first is how a configuration failure became "no results", and how any
+    failure became "the provider is down".
     """
     providers = for_kind(kind)
     if not providers:
-        return []
+        return [], []
 
     ctx = ctx or SearchContext()
 
@@ -123,16 +127,18 @@ async def search(kind: ProviderKind, query: str, ctx: SearchContext | None = Non
         contexts.append(provider_ctx)
 
     if not usable:
-        return []
+        return [], []
 
     results = await asyncio.gather(
         *(p.search(query, c) for p, c in zip(usable, contexts)), return_exceptions=True
     )
 
     offers: list[Offer] = []
+    errors: list[BaseException] = []
     for provider, result in zip(usable, results):
         if isinstance(result, BaseException):
             logger.error(f"[providers] {provider.name} search failed: {result!r}")
+            errors.append(result)
             continue
         offers.extend(result)
-    return offers
+    return offers, errors

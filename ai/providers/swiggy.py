@@ -31,6 +31,29 @@ from integrations.swiggy.swiggy_mcp import SwiggyInstamart
 # FEASIBILITY.md; adding them means new adapters here, nothing above.
 INSTAMART_SERVER = "https://mcp.swiggy.com/im"
 
+# OAuth endpoints, used only as a fallback when discovery finds nothing.
+#
+# NOT guessed. Documented at mcp.swiggy.com/builders/docs/start/authenticate/
+# and verified 2026-08-03 against the live metadata document at
+# https://mcp.swiggy.com/.well-known/oauth-authorization-server, which returns:
+#   issuer                 https://mcp.swiggy.com/auth
+#   authorization_endpoint https://mcp.swiggy.com/auth/authorize
+#   token_endpoint         https://mcp.swiggy.com/auth/token
+#   registration_endpoint  https://mcp.swiggy.com/auth/register
+#
+# Note the metadata lives at the ORIGIN ROOT, not under /im or /food. Both
+# Swiggy servers therefore share one authorization server.
+SWIGGY_AUTHORIZE_URL = "https://mcp.swiggy.com/auth/authorize"
+SWIGGY_TOKEN_URL = "https://mcp.swiggy.com/auth/token"
+# Swiggy issues client ids by dynamic registration only — "you don't need to
+# apply for or manage a client identity". Without this the fallback would build
+# an authorize URL with no client_id, which Swiggy rejects.
+SWIGGY_REGISTRATION_URL = "https://mcp.swiggy.com/auth/register"
+
+# `mcp:tools` is the scope that permits calling tools — the only thing we do.
+# mcp:resources and mcp:prompts exist but we need neither, so we don't ask.
+SWIGGY_SCOPES = ("mcp:tools",)
+
 
 def _to_float(value):
     """Prices arrive as numbers, strings, or paise. Unparseable -> None (unknown)
@@ -233,8 +256,14 @@ class SwiggyInstamartProvider:
 
     oauth = OAuthConfig(
         server_url=INSTAMART_SERVER,
+        scopes=SWIGGY_SCOPES,
         client_id_env="SWIGGY_OAUTH_CLIENT_ID",
         client_secret_env="SWIGGY_OAUTH_CLIENT_SECRET",
+        authorize_url_env="SWIGGY_OAUTH_AUTHORIZE_URL",
+        token_url_env="SWIGGY_OAUTH_TOKEN_URL",
+        authorize_url=SWIGGY_AUTHORIZE_URL,
+        token_url=SWIGGY_TOKEN_URL,
+        registration_url=SWIGGY_REGISTRATION_URL,
     )
 
     def __init__(self):

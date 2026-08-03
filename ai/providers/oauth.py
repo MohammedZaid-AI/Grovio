@@ -28,13 +28,16 @@ import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
 import httpx
 
 import db
 from core.crypto import decrypt, encrypt
 from core.logger import logger
+
+from ai.providers import failures
+from ai.providers.failures import Failure
 
 STATE_TTL_MINUTES = 10
 DISCOVERY_TIMEOUT = 10
@@ -51,6 +54,25 @@ CLIENT_NAME = os.getenv("OAUTH_CLIENT_NAME", "AI Food Concierge")
 class OAuthError(Exception):
     """Linking could not be completed. The message is safe to log, never to
     show a user verbatim."""
+    failure = Failure.UNKNOWN
+
+
+class OAuthNotConfigured(OAuthError):
+    """We do not know where this provider's OAuth endpoints are.
+
+    OUR problem, not theirs. The server answered fine — it simply does not
+    publish metadata where we looked, and no explicit endpoints were declared.
+    Retrying changes nothing, so the user must never be told to try again.
+    """
+    failure = Failure.CONFIGURATION
+
+
+class OAuthUnreachable(OAuthError):
+    """The provider could not be reached, or returned a server error.
+
+    The one case where "temporarily unavailable, try shortly" is honest.
+    """
+    failure = Failure.UNAVAILABLE
 
 
 @dataclass(frozen=True)
@@ -60,16 +82,56 @@ class OAuthConfig:
     scopes: tuple = ()
     client_id_env: str | None = None     # env var holding a pre-issued client id
     client_secret_env: str | None = None
-    authorize_url: str | None = None     # set only if discovery is unavailable
+
+    # Declared endpoints, used when discovery finds nothing. A provider fills
+    # these in from its VENDOR DOCUMENTATION — never from a guess — so that a
+    # server which publishes no metadata is a configuration detail, not an
+    # outage. Discovery still runs first, so a provider that moves its
+    # endpoints keeps working without a code change.
+    authorize_url: str | None = None
     token_url: str | None = None
+    # Carried through the fallback because a provider that issues client ids by
+    # dynamic registration cannot be linked without it: the authorization
+    # request would go out with no client_id and be rejected. Omitting this is
+    # a fallback that only appears to work.
+    registration_url: str | None = None
+
+    # Operator overrides. Set these to pin endpoints without touching code;
+    # they beat both discovery and the declared defaults.
+    authorize_url_env: str | None = None
+    token_url_env: str | None = None
+
+    @staticmethod
+    def _env(name: str | None) -> str | None:
+        return os.getenv(name, "").strip() or None if name else None
 
     @property
     def client_id(self) -> str | None:
-        return os.getenv(self.client_id_env, "").strip() or None if self.client_id_env else None
+        return self._env(self.client_id_env)
 
     @property
     def client_secret(self) -> str | None:
-        return os.getenv(self.client_secret_env, "").strip() or None if self.client_secret_env else None
+        return self._env(self.client_secret_env)
+
+    def _metadata(self, authorize: str, token: str) -> dict:
+        metadata = {"authorization_endpoint": authorize, "token_endpoint": token}
+        if self.registration_url:
+            metadata["registration_endpoint"] = self.registration_url
+        return metadata
+
+    @property
+    def override(self) -> dict | None:
+        """Operator-pinned endpoints, if both were supplied."""
+        authorize = self._env(self.authorize_url_env)
+        token = self._env(self.token_url_env)
+        return self._metadata(authorize, token) if authorize and token else None
+
+    @property
+    def declared(self) -> dict | None:
+        """The provider's documented endpoints, if it declared both."""
+        if self.authorize_url and self.token_url:
+            return self._metadata(self.authorize_url, self.token_url)
+        return None
 
 
 def redirect_uri(provider: str) -> str:
@@ -85,17 +147,71 @@ def redirect_uri(provider: str) -> str:
 # ----------------------------------------------------------------------
 # Discovery
 # ----------------------------------------------------------------------
-async def _fetch_json(client, url):
+class Trail(list):
+    """The discovery attempt log.
+
+    Also records whether the server answered AT ALL. That is the difference
+    between "they are down" (nothing responded) and "they publish no metadata
+    where we looked" (404s — our configuration problem, not their outage), and
+    the two must never be reported to a user the same way.
+    """
+    responded = False
+
+
+async def _fetch_json(client, url, trail: Trail):
+    """GET a metadata document, recording exactly what happened.
+
+    Every attempt lands in `trail`, so a discovery failure can be explained —
+    which URL, and why — instead of just "could not discover".
+    """
     try:
         response = await client.get(url)
-        if response.status_code == 200:
-            return response.json()
+    except httpx.TimeoutException:
+        trail.append(f"{url} -> TIMEOUT")
+        return None
     except Exception as e:
-        logger.info(f"[oauth] discovery miss {url}: {type(e).__name__}")
-    return None
+        trail.append(f"{url} -> {type(e).__name__}")
+        return None
+
+    trail.responded = True      # they are up; the document just isn't here
+    if response.status_code != 200:
+        trail.append(f"{url} -> HTTP {response.status_code}")
+        return None
+
+    try:
+        payload = response.json()
+    except Exception:
+        trail.append(f"{url} -> HTTP 200 but the body is not JSON")
+        return None
+
+    trail.append(f"{url} -> HTTP 200 ✓")
+    return payload
 
 
-async def _challenge_resource_metadata(client, server_url: str):
+def _metadata_urls(url: str, document: str) -> list:
+    """Every place a server might publish `document`, best first.
+
+    RFC 8414 §3.1 and RFC 9728 §3.1 both say the well-known segment goes
+    BETWEEN the host and the path — `https://host/.well-known/doc/im` — not
+    appended to the end of it. Servers also commonly publish at the origin root.
+
+    Probing only the appended form is what broke Swiggy linking: they serve
+    `https://mcp.swiggy.com/.well-known/oauth-authorization-server` (the root),
+    and 404 the `https://mcp.swiggy.com/im/.well-known/...` form we asked for.
+    """
+    parsed = urlsplit(url)
+    root = f"{parsed.scheme}://{parsed.netloc}"
+    path = parsed.path.rstrip("/")
+
+    candidates = []
+    if path:
+        candidates.append(f"{root}/.well-known/{document}{path}")   # RFC form
+        candidates.append(f"{root}{path}/.well-known/{document}")   # appended
+    candidates.append(f"{root}/.well-known/{document}")             # origin root
+    return list(dict.fromkeys(candidates))
+
+
+async def _challenge_resource_metadata(client, server_url: str, trail: list):
     """Ask the MCP server itself where its authorization server lives.
 
     The MCP authorization spec says an unauthenticated request is answered with
@@ -110,64 +226,115 @@ async def _challenge_resource_metadata(client, server_url: str):
             headers={"Accept": "application/json, text/event-stream"},
         )
     except Exception as e:
-        logger.info(f"[oauth] challenge probe failed: {type(e).__name__}")
+        trail.append(f"401-challenge {server_url} -> {type(e).__name__}")
         return None
 
     if response.status_code not in (401, 403):
+        trail.append(f"401-challenge {server_url} -> HTTP {response.status_code}, no challenge")
         return None
 
     header = response.headers.get("www-authenticate", "")
     match = re.search(r'resource_metadata="?([^",\s]+)"?', header)
     if not match:
-        logger.info(f"[oauth] {response.status_code} carried no resource_metadata hint")
+        trail.append(f"401-challenge {server_url} -> {response.status_code} with no "
+                     f"resource_metadata hint")
         return None
+    trail.append(f"401-challenge {server_url} -> hint {match.group(1)} ✓")
     return match.group(1)
 
 
 async def discover(config: OAuthConfig) -> dict:
     """Resolve authorize/token endpoints. Cached per server URL.
 
-    Order: explicit configuration, then the server's own 401 challenge, then
-    well-known probing. The challenge is authoritative; the probes are a
-    fallback for servers that don't implement it.
+    Four tiers, most authoritative first:
+
+      1. operator override  — env vars, a deliberate pin
+      2. discovery          — RFC 9728 resource metadata, the 401 challenge,
+                              then RFC 8414 / OIDC metadata
+      3. declared defaults  — the provider's documented endpoints
+      4. OAuthNotConfigured — a CONFIGURATION error, never an outage
+
+    Discovery outranks the declared defaults so a provider that moves its
+    endpoints keeps working with no code change; the defaults outrank failing,
+    so a provider that publishes nothing still links.
     """
-    if config.authorize_url and config.token_url:
-        return {
-            "authorization_endpoint": config.authorize_url,
-            "token_endpoint": config.token_url,
-        }
+    override = config.override
+    if override:
+        logger.info(f"[oauth] using operator-pinned endpoints for {config.server_url}")
+        return override
 
     cached = _metadata_cache.get(config.server_url)
     if cached:
         return cached
 
     server = config.server_url.rstrip("/")
+    trail = Trail()
+
     async with httpx.AsyncClient(timeout=DISCOVERY_TIMEOUT, follow_redirects=True) as client:
         # RFC 9728 protected-resource metadata, however we can reach it.
-        resource_meta = await _fetch_json(client, f"{server}/.well-known/oauth-protected-resource")
+        resource_meta = None
+        for url in _metadata_urls(server, "oauth-protected-resource"):
+            resource_meta = await _fetch_json(client, url, trail)
+            if resource_meta:
+                break
 
         if not resource_meta:
-            hinted = await _challenge_resource_metadata(client, server)
+            hinted = await _challenge_resource_metadata(client, server, trail)
             if hinted:
-                logger.info("[oauth] discovered resource metadata via 401 challenge")
-                resource_meta = await _fetch_json(client, hinted)
+                resource_meta = await _fetch_json(client, hinted, trail)
 
-        issuers = (resource_meta or {}).get("authorization_servers") or []
-        candidates = [issuer.rstrip("/") for issuer in issuers] or [server]
+        # Where the authorization server lives. The resource document names it;
+        # failing that, the resource server's own origin is the usual answer.
+        issuers = [i.rstrip("/") for i in (resource_meta or {}).get("authorization_servers") or []]
+        if resource_meta and not issuers:
+            trail.append("resource metadata found but lists no authorization_servers")
 
-        for issuer in candidates:
-            # RFC 8414, plus the OIDC-style path some servers use instead.
-            for path in ("/.well-known/oauth-authorization-server",
-                         "/.well-known/openid-configuration"):
-                metadata = await _fetch_json(client, f"{issuer}{path}")
-                if metadata and metadata.get("authorization_endpoint") and metadata.get("token_endpoint"):
-                    _metadata_cache[config.server_url] = metadata
-                    return metadata
+        for issuer in issuers or [server]:
+            for document in ("oauth-authorization-server", "openid-configuration"):
+                for url in _metadata_urls(issuer, document):
+                    metadata = await _fetch_json(client, url, trail)
+                    if metadata and metadata.get("authorization_endpoint") \
+                            and metadata.get("token_endpoint"):
+                        logger.info(f"[oauth] discovered endpoints for {config.server_url} at {url}")
+                        _metadata_cache[config.server_url] = metadata
+                        return metadata
 
-    raise OAuthError(
-        f"Could not discover OAuth endpoints for {config.server_url}. The provider "
-        f"publishes no RFC 8414/9728 metadata and returned no 401 challenge — "
-        f"declare authorize_url and token_url on its OAuthConfig instead."
+    # Discovery found nothing. Say exactly what was tried before falling back —
+    # "could not discover" alone is unactionable.
+    logger.warning(
+        f"[oauth] discovery FAILED for {config.server_url}. Attempts:\n  "
+        + "\n  ".join(trail or ["(none)"])
+    )
+
+    declared = config.declared
+    if declared:
+        logger.warning(
+            f"[oauth] falling back to the endpoints declared by the provider: "
+            f"authorize={declared['authorization_endpoint']} "
+            f"token={declared['token_endpoint']} — fallback SUCCEEDED, linking "
+            f"can proceed. Discovery is preferred; check the trail above."
+        )
+        _metadata_cache[config.server_url] = declared
+        return declared
+
+    logger.error(
+        f"[oauth] no fallback endpoints declared for {config.server_url} — "
+        f"fallback UNAVAILABLE. Set authorize_url/token_url on its OAuthConfig "
+        f"from the vendor's documentation, or pin them via env."
+    )
+    if not trail.responded:
+        # Nothing answered at all. That IS an outage, and reporting it as our
+        # misconfiguration would be as wrong as the reverse.
+        raise OAuthUnreachable(
+            f"{config.server_url} never responded. Tried: {'; '.join(trail)}"
+        )
+
+    # They answered — 404s, mostly. The server is up; we simply do not know
+    # where its OAuth endpoints are. That is configuration, not an outage.
+    raise OAuthNotConfigured(
+        f"No OAuth endpoints for {config.server_url}: the server responded but "
+        f"publishes no metadata we could find, and declares no fallback. "
+        f"Tried: {'; '.join(trail) or '(nothing)'}"
     )
 
 
@@ -292,21 +459,39 @@ async def _post_token(metadata: dict, config: OAuthConfig, form: dict,
     if config.client_secret:
         form["client_secret"] = config.client_secret
 
-    async with httpx.AsyncClient(timeout=TOKEN_TIMEOUT) as client:
-        response = await client.post(
-            metadata["token_endpoint"],
-            data=form,
-            headers={"Accept": "application/json"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=TOKEN_TIMEOUT) as client:
+            response = await client.post(
+                metadata["token_endpoint"],
+                data=form,
+                headers={"Accept": "application/json"},
+            )
+    except Exception as e:
+        logger.error(f"[oauth] token endpoint unreachable: {type(e).__name__}")
+        raise OAuthUnreachable(f"token endpoint unreachable: {type(e).__name__}") from e
 
     if response.status_code != 200:
-        # Never surface a provider body to a user; log for us, raise generically.
-        logger.error(f"[oauth] token endpoint returned {response.status_code}")
-        raise OAuthError(f"token exchange failed (HTTP {response.status_code})")
+        # Never surface a provider body to a user; log for us, raise classified.
+        logger.error(
+            f"[oauth] token endpoint {metadata['token_endpoint']} returned "
+            f"{response.status_code}: {response.text[:300]}"
+        )
+        error = OAuthError(f"token exchange failed (HTTP {response.status_code})")
+        # A 4xx here is our request being wrong; a 5xx is theirs being broken.
+        error.failure = failures.from_status(response.status_code)
+        raise error
 
-    payload = response.json()
+    try:
+        payload = response.json()
+    except Exception as e:
+        error = OAuthError("token response was not JSON")
+        error.failure = Failure.PARSING
+        raise error from e
+
     if not payload.get("access_token"):
-        raise OAuthError("token response contained no access_token")
+        error = OAuthError("token response contained no access_token")
+        error.failure = Failure.PARSING
+        raise error
     return payload
 
 
