@@ -232,7 +232,11 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
         selection=int(selection),
     )
     conversation.begin_order(user.phone, pending)
-    return await _execute_pending(user, entry)
+    logger.info(
+        f"[skills] selection {selection} -> {entry['title']!r} on "
+        f"{entry['provider']} (offer_id={entry['id']!r}, qty={pending.quantity})"
+    )
+    return await _execute_pending(user, entry, quantity=pending.quantity)
 
 
 async def retry_pending_order(user) -> SkillResult:
@@ -322,6 +326,10 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
         conversation.order_failed(user.phone, f"not linked: {reason}")
         return await _link_prompt(user, provider.name, f"order {offer.title}")
 
+    logger.info(
+        f"[skills] placing {offer.title!r} on {provider.name} — offer_id="
+        f"{offer.id!r} quantity={quantity} price={offer.price}"
+    )
     try:
         placed = await provider.place(offer, max(1, int(quantity)), ctx)
     except base.ItemUnavailable as e:
@@ -347,7 +355,38 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
             f"succeeded, and do NOT search for anything new.",
         )
 
-    order_id = db.save_order(
+    # ------------------------------------------------------------------
+    # PAST THIS LINE THE ORDER EXISTS. The provider took it and someone's money
+    # is committed. Everything below is bookkeeping — saving the row, closing
+    # the conversation, noting what they ate. If any of it fails, the user is
+    # STILL told their order was placed, because it was.
+    #
+    # This is not defensive padding. It is the bug that shipped: the `orders`
+    # table was still the pre-pivot ERP one, so save_order raised
+    # "no such column: provider" AFTER Swiggy had accepted the order. The
+    # exception escaped plan() and the user was told it failed — for an order
+    # sitting in their Swiggy account. Bookkeeping must never speak for the
+    # provider.
+    # ------------------------------------------------------------------
+    logger.info(
+        f"[skills] {provider.name} ACCEPTED the order — provider_order_id="
+        f"{placed.order_id!r} status={placed.status} total={placed.total} "
+        f"eta={placed.eta_minutes}"
+    )
+
+    def bookkeeping(label, work):
+        try:
+            return work()
+        except Exception:
+            logger.error(
+                f"[skills] post-order {label} failed for a PLACED order "
+                f"({provider.name} {placed.order_id!r}). The order stands; the "
+                f"user is being told it succeeded.",
+                exc_info=True,
+            )
+            return None
+
+    order_id = bookkeeping("save_order", lambda: db.save_order(
         phone=user.phone,
         provider=placed.provider,
         provider_order_id=placed.order_id,
@@ -357,11 +396,15 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
         total=placed.total if placed.total is not None else offer.price,
         currency=placed.currency,
         eta_minutes=placed.eta_minutes,
-    )
-    conversation.order_succeeded(user.phone)
+    ))
+
+    # Closing the conversation matters most of the three: leaving it in ORDERING
+    # strands the user mid-flow. Still not worth contradicting the provider over.
+    bookkeeping("conversation close", lambda: conversation.order_succeeded(user.phone))
 
     from ai import memory
-    memory.remember_food(user.phone, offer.title, memory.ORDERED, offer.venue)
+    bookkeeping("food memory", lambda: memory.remember_food(
+        user.phone, offer.title, memory.ORDERED, offer.venue))
 
     # Fall back to what the offer stated. The user was shown that price and ETA
     # a moment ago; repeating them beats "amount not returned" on a confirmation.
@@ -373,7 +416,6 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     # The provider's own order id — what they'd quote to the platform. The
     # internal row id is ours and stays out of the conversation.
     reference = f" Order ID {placed.order_id}." if placed.order_id else ""
-    logger.info(f"[skills] order #{order_id} placed on {placed.provider} as {placed.order_id!r}")
 
     return SkillResult(
         SkillStatus.OK,

@@ -478,6 +478,136 @@ result = run(skills.place_order(identity.load(phone), 1))
 check("ordering from an empty list is refused", result.status == skills.SkillStatus.STALE)
 check("nothing was ordered", not spy.placed)
 
+# ======================================================================
+print("\n[11] A PLACED order is never reported as failed")
+# The bug that shipped: the live database still had the pre-pivot ERP `orders`
+# table, so save_order raised "no such column: provider" AFTER Swiggy had
+# accepted the order. The exception escaped plan() and the user was told it
+# failed — for an order sitting in their Swiggy account.
+import sqlite3
+
+legacy = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+legacy.close()
+raw = sqlite3.connect(legacy.name)
+raw.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, product_name TEXT, "
+            "spin_id TEXT, quantity INTEGER, order_type TEXT, status TEXT, "
+            "total REAL, phone TEXT)")
+raw.execute("INSERT INTO orders (product_name, phone) VALUES ('ERP leftover', '91')")
+raw.commit()
+raw.close()
+
+_live = db.DB_PATH
+db.DB_PATH = legacy.name
+db.init_db()
+
+columns = {r[1] for r in sqlite3.connect(legacy.name).execute("PRAGMA table_info(orders)")}
+check("the ERP orders table is retired, not reused", "provider_order_id" in columns)
+check("the concierge schema is what remains", "provider" in columns and "venue" in columns)
+kept = sqlite3.connect(legacy.name).execute(
+    "SELECT product_name FROM orders_legacy_erp").fetchone()
+check("ERP rows are preserved, not destroyed", kept[0] == "ERP leftover")
+check("save_order now works", db.save_order(
+    phone="91", provider="p", provider_order_id="X-1", status="PLACED", title="Milk") > 0)
+
+db.init_db()   # must be idempotent — a second run cannot retire the good table
+check("re-running init_db leaves the concierge table alone",
+      db.get_latest_order("91")["provider_order_id"] == "X-1")
+db.DB_PATH = _live
+
+# Now the guarantee itself: bookkeeping fails, the order still stands.
+for label, break_it in (
+    ("save_order", "save_order"),
+    ("conversation close", "order_succeeded"),
+    ("food memory", "remember_food"),
+):
+    phone = f"91977700{len(label)}"
+    registry.clear()
+    spy = Spy("spy_grocery", ProviderKind.GROCERY)
+    registry.register(spy)
+    identity.load(phone)
+    show(phone, "spy_grocery", ProviderKind.GROCERY.value,
+         [("SPIN-1::SKU-1", "Amul Taaza Milk", "Amul", 33, None)])
+
+    def explode(*a, **k):
+        raise sqlite3.OperationalError("table orders has no column named provider")
+
+    from ai import memory as _memory
+    targets = {"save_order": (db, "save_order"),
+               "order_succeeded": (conversation, "order_succeeded"),
+               "remember_food": (_memory, "remember_food")}
+    module, attr = targets[break_it]
+    original = getattr(module, attr)
+    setattr(module, attr, explode)
+    try:
+        result = run(skills.place_order(identity.load(phone), 1))
+    finally:
+        setattr(module, attr, original)
+
+    check(f"{label} failure still reports the order as PLACED",
+          result.status == skills.SkillStatus.OK)
+    check(f"{label} failure still confirms it to the user",
+          "ORDER PLACED" in result.message)
+    check(f"{label} failure did not stop the order reaching the provider",
+          len(spy.placed) == 1)
+
+# And the whole turn, through the planner, with the real ERP schema in place.
+phone = "919777000999"
+registry.clear()
+spy = Spy("spy_grocery", ProviderKind.GROCERY)
+registry.register(spy)
+identity.load(phone)
+show(phone, "spy_grocery", ProviderKind.GROCERY.value,
+     [("SPIN-1::SKU-1", "Amul Taaza Milk", "Amul", 33, None)])
+
+original_save = db.save_order
+db.save_order = lambda **k: (_ for _ in ()).throw(
+    sqlite3.OperationalError("table orders has no column named provider"))
+
+
+class Echo:
+    """Returns the tool result verbatim, so the reply reflects what the skill said."""
+
+    def __init__(self):
+        self.seen = []
+
+    async def chat(self, messages, tools=None, temperature=None):
+        self.seen.append(messages[-1]["content"])
+        return LLMReply(text="Ordered! 🎉")
+
+
+echo = Echo()
+planner.get_llm = lambda: echo
+try:
+    reply = run(planner.plan(phone, "1"))
+finally:
+    db.save_order = original_save
+
+check("the turn did NOT raise out of plan()", reply == "Ordered! 🎉")
+check("the model was handed a success, not an error",
+      any("ORDER PLACED" in s for s in echo.seen))
+check("the order really was placed", len(spy.placed) == 1)
+
+# ======================================================================
+print("\n[12] A conversation stranded mid-order can recover")
+phone = "919777001111"
+conversation.reset(phone)
+db.save_conversation_state(phone=phone, state=conversation.State.ORDERING,
+                           offers=None, query="milk", pending=None)
+try:
+    conversation.show_offers(phone, [{"provider": "p", "id": "1", "title": "Milk",
+                                      "venue": None, "price": 33, "currency": "INR",
+                                      "eta_minutes": None, "kind": "grocery"}], "milk")
+    check("a new search from ORDERING is allowed, not an IllegalTransition", True)
+except conversation.IllegalTransition:
+    check("a new search from ORDERING is allowed, not an IllegalTransition", False)
+check("and it lands in AWAITING_SELECTION",
+      conversation.load(phone).state == conversation.State.AWAITING_SELECTION)
+
+try:
+    os.unlink(legacy.name)
+except OSError:
+    pass
+
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:

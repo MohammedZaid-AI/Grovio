@@ -53,8 +53,13 @@ ALLOWED = {
     State.IDLE:                        {State.RECOMMENDING, State.AWAITING_SELECTION, State.IDLE},
     State.RECOMMENDING:                {State.AWAITING_SELECTION, State.IDLE},
     State.AWAITING_SELECTION:          {State.ORDERING, State.AWAITING_SELECTION, State.IDLE},
+    # AWAITING_SELECTION and RECOMMENDING are reachable from ORDERING so a turn
+    # that died mid-order can be recovered. Without them a crash between
+    # begin_order and its outcome strands the conversation forever: every later
+    # search raises IllegalTransition and the user can never get another list.
     State.ORDERING:                    {State.ORDER_COMPLETE, State.AWAITING_RETRY_CONFIRMATION,
-                                        State.ORDER_FAILED, State.IDLE},
+                                        State.ORDER_FAILED, State.AWAITING_SELECTION,
+                                        State.RECOMMENDING, State.IDLE},
     State.AWAITING_RETRY_CONFIRMATION: {State.ORDERING, State.ORDER_FAILED,
                                         State.AWAITING_SELECTION, State.IDLE},
     # Terminal states accept themselves: asking again after giving up is a

@@ -313,6 +313,10 @@ class SwiggyInstamartProvider:
         client = await self._session()
         address_id = await client.get_address_id()
         spin_id, sku_id = _unpack_id(offer.id)
+        logger.info(
+            f"[{self.name}] ordering {offer.title!r}: spinId={spin_id!r} "
+            f"skuId={sku_id!r} quantity={quantity} address={address_id!r}"
+        )
 
         # Start from an empty cart: a leftover line from a previous failed
         # attempt makes checkout fail in ways that look like this item's fault.
@@ -330,7 +334,12 @@ class SwiggyInstamartProvider:
         else:
             logger.warning(f"[{self.name}] no skuId for {spin_id} — the add may silently fail")
 
+        logger.info(f"[{self.name}] update_cart payload: {[item]}")
         cart = await client.update_cart(address_id, [item])
+        logger.info(
+            f"[{self.name}] update_cart isError={getattr(cart, 'isError', None)} "
+            f"body={_error_text(cart)}"
+        )
         if getattr(cart, "isError", False):
             logger.error(f"[{self.name}] cart rejected {item}: {_error_text(cart)}")
             raise ItemUnavailable(f"cart rejected {offer.id}")
@@ -339,6 +348,7 @@ class SwiggyInstamartProvider:
         # adding nothing (an id the catalogue doesn't recognise), and the failure
         # then surfaces as an opaque checkout error several calls later.
         cart_payload = _payload_of(await client.get_cart())
+        logger.info(f"[{self.name}] get_cart: {str(cart_payload)[:600]}")
         if not _cart_has_items(cart_payload):
             logger.error(
                 f"[{self.name}] cart empty after adding {offer.id} — the item id "
@@ -346,7 +356,19 @@ class SwiggyInstamartProvider:
             )
             raise ItemUnavailable(f"{offer.id} could not be added to the cart")
 
+        logger.info(
+            f"[{self.name}] checkout payload: addressId={address_id!r} "
+            f"paymentMethod={self.PAYMENT_METHOD!r}"
+        )
         result = await client.checkout(address_id, payment_method=self.PAYMENT_METHOD)
+        # The COMPLETE response, not a summary: this is the last thing that
+        # happens before money is committed, and a truncated log here is the
+        # difference between a five-minute diagnosis and a five-hour one.
+        logger.info(
+            f"[{self.name}] checkout isError={getattr(result, 'isError', None)} "
+            f"structured={getattr(result, 'structuredContent', None)!r} "
+            f"text={_error_text(result)}"
+        )
         if getattr(result, "isError", False):
             detail = _error_text(result)
             logger.error(f"[{self.name}] checkout failed: {detail}")

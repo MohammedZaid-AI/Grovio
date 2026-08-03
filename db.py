@@ -11,6 +11,8 @@ Concierge memory (user preferences, order history) lands here in Phase 4.
 import os
 import sqlite3
 
+from core.logger import logger
+
 DB_PATH = os.getenv("DATABASE_PATH", "database/orders.db")
 
 # Concurrent workers (one per phone) all write here. Without these, a second
@@ -34,6 +36,26 @@ def get_connection():
     # concurrent workers. It is a persistent property of the database file.
     conn.execute("PRAGMA journal_mode = WAL")
     return conn
+
+
+def _retire_legacy_orders_table(cursor):
+    """Rename a pre-pivot ERP `orders` table out of the way.
+
+    Renamed rather than dropped: it is dead ERP data, but destroying someone's
+    rows to fix a schema is not our call. Anything left in `orders_legacy_erp`
+    can be deleted by hand once it has been looked at.
+    """
+    columns = {row[1] for row in cursor.execute("PRAGMA table_info(orders)")}
+    if not columns or "provider_order_id" in columns:
+        return          # absent, or already the concierge's shape
+
+    cursor.execute("DROP TABLE IF EXISTS orders_legacy_erp")
+    cursor.execute("ALTER TABLE orders RENAME TO orders_legacy_erp")
+    logger.warning(
+        "[db] found a pre-pivot ERP `orders` table (columns: "
+        f"{sorted(columns)}). Renamed to orders_legacy_erp so the concierge "
+        "schema can be created. Its rows are ERP leftovers — safe to delete."
+    )
 
 
 def init_db():
@@ -203,6 +225,13 @@ def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
+
+        # The ERP had its own `orders` table (product_name, spin_id, order_type,
+        # recurrence…). Phase 2 deleted the ERP code but not its tables, and
+        # CREATE TABLE IF NOT EXISTS then silently kept the old shape — so every
+        # concierge order INSERT failed with "no such column: provider" AFTER the
+        # order had already been placed at the provider. Retire it by name.
+        _retire_legacy_orders_table(cursor)
 
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS orders (

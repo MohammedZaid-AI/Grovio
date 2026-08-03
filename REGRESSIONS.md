@@ -1,5 +1,86 @@
 # Ordering regressions — what broke in the pivot, and how it was restored
 
+## R0 — The order was placed, and the user was told it failed
+
+**The live bug.** Reported as: Instamart search works, products display with
+prices, user replies `1`, bot says *"Something went wrong on my end — mind
+trying that again?"* — **while the order appears in their Swiggy account.**
+
+### The exact line
+
+```
+ai/skills.py  _execute_pending()      order_id = db.save_order(...)
+  └─ db.py:806  save_order()          INSERT INTO orders (phone, provider, ...)
+       └─ sqlite3.OperationalError: table orders has no column named provider
+```
+
+### Why
+
+The live `database/orders.db` still had the **ERP's** `orders` table:
+
+```
+id · product_name · spin_id · quantity · order_type · schedule_time
+recurrence · status · order_id · items · total · phone · created_at
+```
+
+`init_db()` creates the concierge's `orders` table with
+`CREATE TABLE IF NOT EXISTS`. The table already existed, so the statement was a
+no-op and the new schema was **never applied**. Phase 2 deleted the ERP's *code*
+but not its *tables*, and `IF NOT EXISTS` hid that for four phases — because
+nothing had ever successfully placed an order against this database before.
+
+### Why it surfaced as a generic error
+
+`save_order` runs **after** `provider.place()` returns, outside the `try` that
+guards it. Nothing else catches it on that path:
+
+```
+concierge.respond()          except Exception -> ERROR_REPLY   ← the user's message
+  plan()                     no guard
+    _resolve_state_first()   no guard   ← the deterministic selection path
+      skills.place_order()   no guard
+        _execute_pending()   guards provider.place() only
+          db.save_order()    raises
+```
+
+`_dispatch` has a try/except, but a resolved selection never goes through
+`_dispatch` — it is handled in code before the model is consulted.
+
+Two further consequences: `conversation.order_succeeded()` never ran, so the
+conversation was stranded in `ORDERING` with five live offers and a pending
+order for milk **that had already been delivered**. Replying `1` again would
+have placed a second real order.
+
+### Fixed three ways
+
+1. **Root cause** — `_retire_legacy_orders_table()` in `db.py` detects a
+   pre-pivot `orders` table (no `provider_order_id`) and renames it to
+   `orders_legacy_erp` before the concierge's table is created. Renamed, not
+   dropped: destroying someone's rows to fix a schema is not our call. Idempotent.
+2. **Structural** — past `provider.place()` the order **exists**. Saving the
+   row, closing the conversation and noting the food are bookkeeping: each is
+   wrapped, failures are logged with a full traceback, and the user is still
+   told their order was placed. Bookkeeping must never speak for the provider.
+3. **Recovery** — `ORDERING → AWAITING_SELECTION / RECOMMENDING` added to
+   `ALLOWED`. Without it a turn that died mid-order stranded the conversation
+   permanently: every later search raised `IllegalTransition`.
+
+Logging now covers the whole path — spinId, skuId, quantity, the `update_cart`
+payload and response, the `get_cart` body, the checkout payload and the
+**complete** checkout response including `structuredContent`.
+
+**Tests:** `test_ordering_flow.py` §11 (16 checks — the migration, and each of
+the three bookkeeping steps failing without the user ever being told it failed),
+§12 (recovery from a stranded `ORDERING`).
+
+**Live database:** migrated, 11 ERP rows preserved in `orders_legacy_erp`,
+backup at `database/orders_backup_pre_schema_fix.db`. The stranded conversation
+was cleared and the milk order recorded with an empty provider order id — it
+was never returned to us, so it is not invented.
+
+---
+
+
 The ERP→concierge pivot deleted `ai/services/swiggy_service.py` and
 `ai/shopping/shopping_session.py` in Phase 2, and Phase 5 rewrote ordering from
 the raw MCP client. The rewrite was structurally better and factually worse: it
