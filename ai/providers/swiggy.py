@@ -61,6 +61,58 @@ def _first(product: dict, *keys):
     return None
 
 
+def _variant(product: dict) -> dict:
+    """The orderable variant of a product.
+
+    Instamart returns a product with one or more `variations` (pack sizes), and
+    the fields that matter for ordering — spinId, price, stock — live on the
+    VARIANT, not the product. Looking only at the top level silently loses them.
+    """
+    variations = product.get("variations")
+    if isinstance(variations, list) and variations and isinstance(variations[0], dict):
+        return variations[0]
+    return {}
+
+
+def _pick(product: dict, *keys):
+    """Read a field from the product, falling back to its first variant."""
+    return _first(product, *keys) or _first(_variant(product), *keys)
+
+
+def _cart_has_items(payload: dict) -> bool:
+    """True if the cart payload shows at least one line item, whatever the
+    provider chose to call the list."""
+    if not isinstance(payload, dict):
+        return False
+    for key in ("items", "cartItems", "products", "lineItems"):
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            return True
+    for value in payload.values():
+        if isinstance(value, dict) and _cart_has_items(value):
+            return True
+    # Some carts report only a count/total.
+    for key in ("itemCount", "totalItems", "count"):
+        if _to_float(payload.get(key)):
+            return True
+    return False
+
+
+def _error_text(result) -> str:
+    """Pull a provider's own error message out of an MCP result.
+
+    For logs only — never shown to a user. Without this a failure is just
+    `isError=True`, which is impossible to act on.
+    """
+    content = getattr(result, "content", None)
+    if content and getattr(content[0], "text", None):
+        return str(content[0].text)[:400]
+    structured = getattr(result, "structuredContent", None)
+    if structured:
+        return str(structured)[:400]
+    return "<no error detail returned>"
+
+
 def _payload_of(result) -> dict:
     """Pull the data dict out of an MCP result.
 
@@ -143,23 +195,36 @@ class SwiggyInstamartProvider:
         for product in products[: ctx.limit]:
             if not isinstance(product, dict):
                 continue
-            price = _to_float(_first(product, "price", "offerPrice", "mrp"))
+
+            title = _first(product, "name", "displayName", "productName")
+            # The cart is keyed by spinId. Anything without one cannot be
+            # ordered, so it is not a real offer no matter how good it looks.
+            spin_id = _pick(product, "spinId", "spin_id")
+            if not (title and spin_id):
+                continue
+
+            price = _to_float(_pick(product, "offerPrice", "price", "storePrice", "mrp"))
             if ctx.max_price is not None and price is not None and price > ctx.max_price:
                 continue
-            title = _first(product, "name", "displayName", "productName")
-            if not title:
-                continue
+
             offers.append(
                 Offer(
                     provider=self.name,
                     kind=self.kind,
-                    id=str(_first(product, "skuId", "id", "productId") or title),
+                    id=str(spin_id),
                     title=str(title),
                     venue=_first(product, "brand", "storeName"),
                     price=price,
-                    available=bool(_first(product, "inStock", "available") is not False),
-                    tags=tuple(filter(None, [_first(product, "quantity", "packSize")])),
+                    available=bool(_pick(product, "inStock", "available") is not False),
+                    tags=tuple(filter(None, [_pick(product, "quantity", "packSize", "weight")])),
                 )
+            )
+
+        if products and not offers:
+            logger.warning(
+                f"[{self.name}] {len(products)} products returned but none were "
+                f"orderable (no spinId found). First product keys: "
+                f"{list(products[0].keys()) if isinstance(products[0], dict) else type(products[0])}"
             )
         return offers
 
@@ -177,10 +242,23 @@ class SwiggyInstamartProvider:
 
         cart = await client.update_cart(address_id, [{"spinId": offer.id, "quantity": quantity}])
         if getattr(cart, "isError", False):
+            logger.error(f"[{self.name}] cart rejected {offer.id}: {_error_text(cart)}")
             raise ItemUnavailable(f"cart rejected {offer.id}")
+
+        # Confirm the item actually landed. update_cart can return success while
+        # adding nothing (an id the catalogue doesn't recognise), and the failure
+        # then surfaces as an opaque checkout error several calls later.
+        cart_payload = _payload_of(await client.get_cart())
+        if not _cart_has_items(cart_payload):
+            logger.error(
+                f"[{self.name}] cart empty after adding {offer.id} — the item id "
+                f"was not accepted. Cart keys: {list(cart_payload.keys())[:12]}"
+            )
+            raise ItemUnavailable(f"{offer.id} could not be added to the cart")
 
         result = await client.checkout(address_id, payment_method=self.PAYMENT_METHOD)
         if getattr(result, "isError", False):
+            logger.error(f"[{self.name}] checkout failed: {_error_text(result)}")
             raise ProviderError(f"checkout failed for {offer.id}")
 
         payload = _payload_of(result)
