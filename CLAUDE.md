@@ -90,13 +90,25 @@ db.py                   delivery queue + user model
 
 ## Local development
 
-```bash
-python -m venv venv && source venv/Scripts/activate
+```powershell
+python -m venv venv
+venv\Scripts\Activate.ps1          # PowerShell. Bash: source venv/Scripts/activate
 pip install -r requirements.txt
 
 uvicorn backend.app:app --reload --port 8000     # from repo root
 
-python tests/test_whatsapp_async_delivery.py     # no PYTHONPATH needed
+python tests\test_whatsapp_async_delivery.py     # no PYTHONPATH needed
+```
+
+**Activate the venv first, or use its interpreter directly.** There are several
+Pythons on a typical Windows box and a bare `uvicorn`/`python` usually resolves
+to the global one, which has none of these dependencies — the symptom is
+`ModuleNotFoundError: No module named 'mcp_use'` at startup, or two test suites
+failing to import `twilio`. Without activating:
+
+```powershell
+venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000
+venv\Scripts\python.exe tests\test_ordering_flow.py
 ```
 
 `uvicorn --reload` does **not** watch `.env` — restart fully after changing it.
