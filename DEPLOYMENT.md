@@ -82,19 +82,102 @@ warns explicitly about a missing encryption key or a non-https public URL.
 
 ## 5. Connect WhatsApp
 
-In the Meta App Dashboard → WhatsApp → Configuration:
+Four values come out of the Meta dashboard, and they land in four env vars.
+
+### 5.1 Create the app
+
+[developers.facebook.com/apps](https://developers.facebook.com/apps) → **Create
+App** → use case **"Connect with customers through WhatsApp"** (or type
+**Business**) → add the **WhatsApp** product.
+
+### 5.2 Collect three of the four values
+
+**WhatsApp → API Setup** gives you:
+
+| Screen | Goes to |
+|---|---|
+| **Phone number ID** (under "From") | `WHATSAPP_PHONE_NUMBER_ID` |
+| **Temporary access token** | `WHATSAPP_ACCESS_TOKEN` — expires in **24 hours** |
+
+⚠️ The number under "From" is not the same as its **ID**. Copy the ID.
+
+**App Settings → Basic → App Secret → Show**:
+
+| Screen | Goes to |
+|---|---|
+| **App Secret** | `WHATSAPP_APP_SECRET` |
+
+The fourth is yours to invent — any random string, the same one on both sides:
+
+```
+WHATSAPP_VERIFY_TOKEN=any-random-string-you-choose
+```
+
+### 5.3 Add yourself as a test recipient
+
+Still in **API Setup**, under "To": **Manage phone number list** → add your
+number → confirm the code WhatsApp sends you.
+
+The free test number will only message numbers on this list — **5 maximum**.
+Until you register a real business number, nobody else can use the product.
+
+Also make sure your number is in `AUTHORIZED_PHONES` (digits are compared, so
+`+91 97…` and `9197…` both work).
+
+### 5.4 Point the webhook at your server
+
+**Start the server first.** Meta calls `GET /webhook` the moment you click save,
+and it fails if nothing answers — the single most common setup failure.
+
+**WhatsApp → Configuration → Webhook → Edit**:
 
 | Field | Value |
 |---|---|
-| Callback URL | `https://your-domain.com/webhook` |
-| Verify token | the `WHATSAPP_VERIFY_TOKEN` from your `.env` |
-| Subscribe to | `messages` |
+| Callback URL | `https://your-host/webhook` |
+| Verify token | exactly your `WHATSAPP_VERIFY_TOKEN` |
 
-Meta calls `GET /webhook` once to verify. If it fails, the token does not match
-or the URL is not reachable over https — the server logs which.
+Click **Verify and Save**, then **Manage** → subscribe to **`messages`**.
 
-Send a message to your WhatsApp number. You should see it queued in the logs and
-get a reply.
+Subscribe to `messages` only. That single field carries inbound messages,
+delivery receipts and read receipts — the others are for template and account
+events we don't consume.
+
+A tunnel is fine here. Unlike a provider's OAuth allowlist, Meta accepts any
+reachable HTTPS URL — but a free ngrok host changes on every restart, and the
+webhook then points at nothing until you paste the new one.
+
+### 5.5 Swap in a permanent token
+
+The temporary token dies in 24 hours. For anything beyond a first test:
+
+**Business Settings → Users → System Users** → **Add** (role: Admin) →
+**Add Assets** → your app *and* your WhatsApp account, with full control →
+**Generate new token** → select your app → tick:
+
+- `whatsapp_business_messaging`
+- `whatsapp_business_management`
+
+Set expiry to **Never**. Copy it into `WHATSAPP_ACCESS_TOKEN` — it is shown
+once.
+
+### 5.6 Verify
+
+```bash
+curl -s localhost:8000/health | python -m json.tool
+```
+
+Expect `"messaging_configured": true`. Then message the number: the log shows
+`[webhook] received 1 message(s)`, then `delivered`, then `read`.
+
+If `GET /webhook` returns 403, the verify token doesn't match. If POSTs return
+403, `WHATSAPP_APP_SECRET` is wrong or unset — both fail closed by design.
+
+### The 24-hour window
+
+You may only reply freely within 24 hours of the user's last message. After
+that Meta returns **131047** and the send fails permanently — it is not
+retried. Reopening the conversation needs an approved message template
+(`whatsapp.send_template` is implemented; no template is registered yet).
 
 ## 6. Connect providers (optional)
 
