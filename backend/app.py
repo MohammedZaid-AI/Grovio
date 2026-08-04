@@ -37,6 +37,14 @@ def _startup_warnings():
             "PUBLIC_BASE_URL is not set — OAuth callbacks will point at localhost "
             "and account linking will fail for real users."
         )
+    elif base_url.startswith("http://localhost"):
+        # Deliberate and supported: providers allowlist http://localhost for
+        # development. Only the OAuth callback uses this — the WhatsApp webhook
+        # is configured separately, so a tunnel can serve that at the same time.
+        logger.info(
+            f"PUBLIC_BASE_URL is {base_url} — development mode. Open link URLs "
+            "in a browser ON THIS MACHINE; they will not work from a phone."
+        )
     elif not base_url.startswith("https://"):
         logger.warning(
             f"PUBLIC_BASE_URL is not https ({base_url}) — providers reject "

@@ -61,16 +61,25 @@ Template — replace the two URLs with what startup printed:
 > OAuth tokens and never see credentials. Orders are placed by the user's own
 > explicit confirmation in chat, cash on delivery.
 
-## Meanwhile: test on the laptop
+## Meanwhile: test on the laptop, keep the tunnel
 
-`http://localhost` is whitelisted for development. Set:
+These are two different URLs, and only one of them is `PUBLIC_BASE_URL`:
+
+| What | Where it's configured | Needs a public URL? |
+|---|---|---|
+| WhatsApp webhook (inbound) | Twilio / Meta console | **Yes** — they must reach you |
+| OAuth callback | `PUBLIC_BASE_URL` | No, if you finish the link on this machine |
+
+So keep the tunnel pointed at the webhook and set:
 
 ```
 PUBLIC_BASE_URL=http://localhost:8000
 ```
 
-restart, and open the link the concierge sends **in a browser on the machine
-running the server** — WhatsApp Desktop or Web makes that one click. The link
-cannot work from your phone: `localhost` there is the phone.
+`http://localhost` is whitelisted for development, so linking works today with
+no whitelisting request at all. Restart, and open the link the concierge sends
+**in a browser on the machine running the server** — WhatsApp Desktop or Web
+makes that one click. It cannot work from your phone: `localhost` there is the
+phone.
 
-This unblocks you, not your users. Real users need step 1 and 2.
+This unblocks you, not your users. Real users need steps 1 and 2.
