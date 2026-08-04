@@ -174,7 +174,6 @@ facts is tracked in [TECHDEBT.md](TECHDEBT.md) H4.
 | Transport | Verification |
 |---|---|
 | WhatsApp Cloud API | `X-Hub-Signature-256` HMAC-SHA256 over the raw body, `hmac.compare_digest` |
-| Twilio (legacy) | Twilio request signature validation |
 
 Both **fail closed**: a missing app secret rejects every request rather than
 silently accepting forged webhooks. The subscription handshake echoes

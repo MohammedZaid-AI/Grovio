@@ -21,8 +21,9 @@ from cryptography.fernet import Fernet
 # Encryption key BEFORE anything imports crypto.
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
-os.environ["WHATSAPP_TRANSPORT"] = "twilio"   # avoid Cloud API config in this suite
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
+os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-token")
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "555000111")
 
 import db
 
@@ -332,7 +333,6 @@ check("disconnect actually removed credentials", db.get_provider_link(ALICE, gro
 
 # ----------------------------------------------------------------------
 print("\n[8] Callback route + conversation continuation")
-os.environ["TWILIO_AUTH_TOKEN"] = "t" * 32
 from fastapi.testclient import TestClient
 from backend.app import app
 

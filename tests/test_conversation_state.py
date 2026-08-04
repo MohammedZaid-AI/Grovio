@@ -19,7 +19,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cryptography.fernet import Fernet
 
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-os.environ["WHATSAPP_TRANSPORT"] = "twilio"
 
 import db
 

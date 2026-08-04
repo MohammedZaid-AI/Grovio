@@ -169,7 +169,7 @@ location / {
 }
 ```
 
-Both forwarded headers matter: the Twilio path reconstructs the request URL from
+Both forwarded headers matter: the OAuth callback reconstructs its URL from
 them to validate signatures.
 
 ---

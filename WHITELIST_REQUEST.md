@@ -67,7 +67,7 @@ These are two different URLs, and only one of them is `PUBLIC_BASE_URL`:
 
 | What | Where it's configured | Needs a public URL? |
 |---|---|---|
-| WhatsApp webhook (inbound) | Twilio / Meta console | **Yes** — they must reach you |
+| WhatsApp webhook (inbound) | Meta App Dashboard | **Yes** — they must reach you |
 | OAuth callback | `PUBLIC_BASE_URL` | No, if you finish the link on this machine |
 
 So keep the tunnel pointed at the webhook and set:

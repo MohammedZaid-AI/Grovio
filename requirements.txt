@@ -17,5 +17,5 @@ httpx==0.28.1
 # Credential encryption at rest
 cryptography==48.0.0
 
-# WhatsApp transport - Cloud API is default; twilio is the legacy path
-twilio==9.10.9
+# WhatsApp Business Cloud API is called over plain HTTP via httpx — there is
+# no vendor SDK to install.

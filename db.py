@@ -58,6 +58,64 @@ def _retire_legacy_orders_table(cursor):
     )
 
 
+# Every table keyed by a phone number. The Twilio era stored
+# "whatsapp:+917795871481"; the Cloud API sends "917795871481". Same human,
+# different key — so without this migration a user loses their memory, their
+# order history and their linked provider accounts on the day we cut over.
+_PHONE_KEYED_TABLES = (
+    "users", "user_facts", "conversation_history", "food_memory",
+    "conversation_state", "orders", "provider_links", "oauth_states",
+    "whatsapp_inbound", "whatsapp_outbound",
+)
+
+
+def _canonical_phone(number: str) -> str:
+    """Bare international MSISDN. Mirrors whatsapp.canonical_phone, duplicated
+    to keep db.py free of an import cycle through the messaging layer."""
+    cleaned = (number or "").replace("whatsapp:", "").replace("+", "")
+    return "".join(c for c in cleaned if c.isdigit())
+
+
+def _migrate_phone_keys(cursor):
+    """Rewrite Twilio-format phone keys to the canonical MSISDN.
+
+    Runs on every startup and is a no-op once clean. Rows that would collide
+    with an existing canonical row are left alone rather than merged — silently
+    combining two users' histories is worse than leaving one stale row behind.
+    """
+    migrated = 0
+    for table in _PHONE_KEYED_TABLES:
+        try:
+            rows = cursor.execute(
+                f"SELECT DISTINCT phone FROM {table} WHERE phone LIKE 'whatsapp:%' "
+                f"OR phone LIKE '+%'"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue        # table not created yet on a fresh database
+
+        for (old,) in rows:
+            new = _canonical_phone(old)
+            if not new or new == old:
+                continue
+            existing = cursor.execute(
+                f"SELECT 1 FROM {table} WHERE phone = ? LIMIT 1", (new,)
+            ).fetchone()
+            if existing:
+                logger.warning(
+                    f"[db] {table}: both {old!r} and {new!r} exist — leaving the "
+                    f"old row in place rather than merging two histories."
+                )
+                continue
+            cursor.execute(f"UPDATE {table} SET phone = ? WHERE phone = ?", (new, old))
+            migrated += cursor.rowcount
+
+    if migrated:
+        logger.warning(
+            f"[db] migrated {migrated} row(s) from Twilio-format phone keys to "
+            f"canonical MSISDN. Users keep their memory and order history."
+        )
+
+
 def init_db():
     conn = get_connection()
     try:
@@ -69,12 +127,12 @@ def init_db():
         # ------------------------------------------------------------------
         # The webhook persists the inbound message and returns 200 instantly;
         # a background worker processes it via the SAME ConversationEngine and
-        # sends the reply via the Twilio REST API. These two tables make that
+        # sends the reply via the WhatsApp Cloud API. These two tables make that
         # durable across restarts and safe against duplicate webhooks.
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS whatsapp_inbound (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            message_sid TEXT UNIQUE,          -- Twilio MessageSid; dedups retries
+            message_sid TEXT UNIQUE,          -- provider message id; dedups retries
             phone TEXT NOT NULL,
             body TEXT,
             num_media INTEGER DEFAULT 0,
@@ -95,8 +153,8 @@ def init_db():
             body TEXT,
             status TEXT DEFAULT 'PENDING',    -- PENDING -> SENT / FAILED
             attempts INTEGER DEFAULT 0,
-            provider_sid TEXT,                -- Twilio message SID once sent
-            error_code INTEGER,               -- Twilio error code on failure (e.g. 63038)
+            provider_sid TEXT,                -- Cloud API message id once sent
+            error_code INTEGER,               -- Cloud API error code (e.g. 131047)
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY(inbound_id) REFERENCES whatsapp_inbound(id)
@@ -251,6 +309,9 @@ def init_db():
         ''')
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_orders_phone ON orders(phone, id)")
 
+        # After every table exists, so a fresh database is a clean no-op.
+        _migrate_phone_keys(cursor)
+
         conn.commit()
     finally:
         conn.close()
@@ -265,7 +326,7 @@ def init_db():
 def enqueue_inbound_message(message_sid, phone, body, num_media=0):
     """Persist an incoming WhatsApp message for async processing.
 
-    Deduplicated by Twilio MessageSid so a retried webhook does not enqueue
+    Deduplicated by provider message id so a retried webhook does not enqueue
     the same message twice. Returns (inbound_id, is_new).
     """
     sid = message_sid or None
@@ -431,6 +492,51 @@ def mark_outbound_failed(outbound_id, error_code=None):
             (error_code, outbound_id),
         )
         conn.commit()
+    finally:
+        conn.close()
+
+
+# Meta's receipt vocabulary -> the row status. `sent` is not written back: the
+# worker already set SENT when the API accepted it, and a later receipt must
+# never move a DELIVERED row backwards.
+_RECEIPT_STATUS = {"delivered": "DELIVERED", "read": "READ", "failed": "FAILED"}
+
+
+def record_delivery_status(provider_sid, status, error_code=None):
+    """Apply a delivery or read receipt to the message it belongs to.
+
+    Matched on the provider's message id. Receipts can arrive out of order and
+    a message can be re-reported, so this only ever moves a row FORWARD along
+    SENT -> DELIVERED -> READ; a late `delivered` cannot un-read a message.
+    """
+    mapped = _RECEIPT_STATUS.get((status or "").lower())
+    if not (provider_sid and mapped):
+        return False
+
+    rank = {"PENDING": 0, "SENT": 1, "DELIVERED": 2, "READ": 3}
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        if mapped == "FAILED":
+            cursor.execute(
+                "UPDATE whatsapp_outbound SET status = 'FAILED', error_code = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE provider_sid = ?",
+                (error_code, provider_sid),
+            )
+        else:
+            row = cursor.execute(
+                "SELECT status FROM whatsapp_outbound WHERE provider_sid = ?",
+                (provider_sid,),
+            ).fetchone()
+            if not row or rank.get(row[0], 0) >= rank[mapped]:
+                return False
+            cursor.execute(
+                "UPDATE whatsapp_outbound SET status = ?, "
+                "updated_at = CURRENT_TIMESTAMP WHERE provider_sid = ?",
+                (mapped, provider_sid),
+            )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 

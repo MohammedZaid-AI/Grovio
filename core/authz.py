@@ -25,10 +25,12 @@ def _phone_in_allowlist(from_phone: str, env_var: str) -> bool:
 
     allow_list = [p.strip() for p in config.split(",") if p.strip()]
 
-    # Normalize incoming phone (strip Twilio "whatsapp:" prefix)
-    normalized_phone = (from_phone or "").replace("whatsapp:", "").strip()
+    # Compare on digits only, so an allowlist entry written "+91 97..." matches
+    # the bare MSISDN the Cloud API delivers.
+    def digits(value):
+        return "".join(c for c in (value or "") if c.isdigit())
 
-    return normalized_phone in allow_list
+    return digits(from_phone) in {digits(entry) for entry in allow_list}
 
 
 def is_authorized_user(from_phone: str) -> bool:

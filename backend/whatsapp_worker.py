@@ -3,20 +3,21 @@ Async WhatsApp delivery worker (Phase 2: eliminate lost replies).
 
 WHY THIS EXISTS
 ---------------
-Twilio discards the webhook's TwiML response if the webhook takes longer than
-its ~15s timeout. A single Groq/OpenRouter 429 retry (~13s) plus LangGraph / MCP
-/ OCR work blows past that, so the reply is silently dropped. This worker
+A webhook must answer in milliseconds. Meta redelivers the whole batch if it
+does not, and an LLM turn plus provider calls takes far longer than any webhook
+timeout allows — so replying inside the webhook loses replies. This worker
 decouples processing from the webhook:
 
     webhook  ->  persist inbound + return 200 immediately (<1s)
-    worker   ->  ConversationEngine -> reply -> Twilio REST API
+    worker   ->  ai.concierge.respond -> reply -> WhatsApp Cloud API
 
 Design guarantees:
   * SINGLE source of truth — the worker calls `ai.concierge.respond` and holds
     no product logic of its own.
   * Ordering — exactly ONE worker task per phone drains that phone's messages in
     arrival order; reply parts are sent in part_index order.
-  * No duplicate replies — inbound is deduped by MessageSid; a reply is queued
+  * No duplicate replies — inbound is deduped by provider message id; a reply
+    is queued
     once (atomically with marking the inbound DONE) and each part is sent only
     while PENDING.
   * No lost replies — everything is persisted before the webhook returns 200;
@@ -34,7 +35,7 @@ import asyncio
 from core.logger import logger
 import db
 from ai.concierge import respond
-from whatsapp.transport import send_whatsapp, classify_send_error
+from whatsapp import classify_send_error, send_text
 
 
 # Reply parts are re-split with the SAME limit the old webhook used, so delivery
@@ -175,8 +176,7 @@ async def _send_with_retry(part, phone):
     for attempt in range(1, MAX_SEND_ATTEMPTS + 1):
         db.increment_outbound_attempt(outbound_id)
         try:
-            # Always awaitable — whatsapp.transport normalises blocking SDKs.
-            sid = await send_whatsapp(phone, body)
+            sid = await send_text(phone, body)
             db.mark_outbound_sent(outbound_id, sid)
             return
         except Exception as e:

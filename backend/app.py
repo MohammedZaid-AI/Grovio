@@ -14,7 +14,7 @@ from backend.routes import router
 from backend.whatsapp_worker import recover_pending
 from core import crypto
 from core.logger import logger
-from whatsapp.transport import TRANSPORT
+import whatsapp
 
 
 def _startup_warnings():
@@ -29,6 +29,20 @@ def _startup_warnings():
             "TOKEN_ENCRYPTION_KEY is not set — provider accounts CANNOT be linked. "
             "Generate one with: python -c \"from cryptography.fernet import Fernet; "
             "print(Fernet.generate_key().decode())\""
+        )
+
+    missing = [
+        name for name in ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+                          "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN")
+        if not os.getenv(name)
+    ]
+    if missing:
+        # The last two fail CLOSED, so this is not cosmetic: without them every
+        # inbound webhook is rejected and the product is silent.
+        logger.warning(
+            f"WhatsApp Cloud API is incompletely configured — missing "
+            f"{', '.join(missing)}. Webhook verification and signature checks "
+            f"fail closed, so inbound messages will be REJECTED until these are set."
         )
 
     base_url = os.getenv("PUBLIC_BASE_URL", "")
@@ -92,9 +106,12 @@ def health():
 
     checks["encryption"] = "ok" if crypto.is_configured() else "unconfigured"
     checks["providers"] = len(ai.providers.registry.available_kinds())
-    checks["transport"] = TRANSPORT
+    checks["messaging"] = "whatsapp_cloud_api"
+    checks["messaging_configured"] = whatsapp.is_configured()
+    checks["meta_api_version"] = whatsapp.api_version()
 
-    ready = checks["database"] == "ok" and checks["encryption"] == "ok"
+    ready = (checks["database"] == "ok" and checks["encryption"] == "ok"
+             and checks["messaging_configured"])
     return JSONResponse(
         status_code=200 if ready else 503,
         content={"ready": ready, "checks": checks},

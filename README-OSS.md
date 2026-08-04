@@ -66,7 +66,7 @@ automatically once they return — they never repeat themselves.
 
 | Module | Provides |
 |---|---|
-| `transport/` | WhatsApp Cloud API + Twilio behind one seam; HMAC verification |
+| `whatsapp/` | WhatsApp Business Cloud API; HMAC webhook verification |
 | `worker/` | Durable queue, per-user ordering, dedup, retry, restart recovery |
 | `planner/` | Async multi-turn LLM orchestration over a fixed tool set |
 | `skills/` | Capability layer: "can this user do this, and what happened?" |

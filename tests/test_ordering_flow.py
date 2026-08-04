@@ -32,8 +32,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cryptography.fernet import Fernet
 
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-os.environ["WHATSAPP_TRANSPORT"] = "cloud"
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
+os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-token")
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "555000111")
 
 import db
 

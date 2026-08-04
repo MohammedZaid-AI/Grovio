@@ -22,10 +22,11 @@ from unittest.mock import AsyncMock, Mock, patch
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Pin the legacy transport: this suite proves the delivery pipeline is
-# unchanged by the pivot. The Cloud API path is covered by
-# tests/test_cloud_api_transport.py.
-os.environ["WHATSAPP_TRANSPORT"] = "twilio"
+import httpx
+
+# The messaging layer itself is covered by tests/test_cloud_api.py; this suite
+# proves the DELIVERY pipeline — ordering, dedup, retries, restart recovery —
+# is unchanged by the move to the Cloud API.
 
 # Isolated temp DB BEFORE importing anything that touches db.
 import db
@@ -35,8 +36,17 @@ db.DB_PATH = _tmp.name
 db.init_db()
 
 import backend.whatsapp_worker as worker
-from whatsapp.twilio import classify_send_error
-from twilio.base.exceptions import TwilioRestException
+from whatsapp import classify_send_error
+from whatsapp.cloud_api import NotConfigured
+
+
+def meta_error(status, code=None):
+    """A Cloud API failure, as httpx would raise it."""
+    payload = {"error": {"code": code}} if code is not None else {}
+    request = httpx.Request("POST", "https://graph.facebook.com/v23.0/1/messages")
+    return httpx.HTTPStatusError(
+        "boom", request=request,
+        response=httpx.Response(status, json=payload, request=request))
 
 # Make retry backoff instant for tests.
 worker.SEND_BACKOFF_BASE_SECONDS = 0
@@ -122,7 +132,7 @@ async def test_basic_delivery():
     phone = "whatsapp:+910000000002"
     sender = AsyncMock(return_value="TWSID-1")
     with patch.object(worker, "respond", new=AsyncMock(return_value="Hello there")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-2", phone, "hey", 0)
         await drain(phone)
     rows = outbound_rows(phone)
@@ -140,7 +150,7 @@ async def test_long_response_ordered():
     order = []
     sender = AsyncMock(side_effect=lambda to, body: (order.append(body), "S")[1])
     with patch.object(worker, "respond", new=AsyncMock(return_value=long_reply)), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-3", phone, "report", 0)
         await drain(phone)
     rows = outbound_rows(phone)
@@ -156,7 +166,7 @@ async def test_send_retry():
     phone = "whatsapp:+910000000004"
     sender = AsyncMock(side_effect=[Exception("429"), Exception("timeout"), "TWSID-OK"])
     with patch.object(worker, "respond", new=AsyncMock(return_value="retry me")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-4", phone, "x", 0)
         await drain(phone)
     rows = outbound_rows(phone)
@@ -168,9 +178,9 @@ async def test_send_retry():
 async def test_hard_failure_recorded():
     print("\n[5] Hard send failure is recorded, not silently dropped")
     phone = "whatsapp:+910000000005"
-    sender = AsyncMock(side_effect=Exception("twilio down"))
+    sender = AsyncMock(side_effect=Exception("meta unreachable"))
     with patch.object(worker, "respond", new=AsyncMock(return_value="never sends")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-5", phone, "x", 0)
         await drain(phone)
     rows = outbound_rows(phone)
@@ -184,7 +194,7 @@ async def test_processing_error_still_replies():
     phone = "whatsapp:+910000000006"
     sender = AsyncMock(return_value="S")
     with patch.object(worker, "respond", new=AsyncMock(side_effect=RuntimeError("boom"))), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-6", phone, "x", 0)
         await drain(phone)
     rows = outbound_rows(phone)
@@ -214,7 +224,7 @@ async def test_restart_recovery():
     # phones (outbound-only / interrupted), but we never want a test to hit a
     # real LLM if that invariant ever regresses.
     with patch.object(worker, "respond", new=AsyncMock(return_value="unexpected")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.recover_pending()
         await drain(phone_out)
         await drain(phone_proc)
@@ -236,7 +246,7 @@ async def test_concurrent_phones():
 
     sender = AsyncMock(return_value="S")
     with patch.object(worker, "respond", new=AsyncMock(side_effect=fake_process)), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-9A", pa, "a", 0)
         await worker.enqueue_and_wake("SID-9B", pb, "b", 0)
         await drain(pa)
@@ -254,7 +264,7 @@ async def test_no_duplicate_resend():
     phone = "whatsapp:+910000000011"
     sender = AsyncMock(return_value="S")
     with patch.object(worker, "respond", new=AsyncMock(return_value="once only")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-11", phone, "x", 0)
         await drain(phone)
         # Run another flush cycle: nothing PENDING remains.
@@ -263,45 +273,48 @@ async def test_no_duplicate_resend():
 
 
 async def test_error_classification():
-    print("\n[10] Twilio send-error classification")
-    # Permanent Twilio codes.
-    for code in (63038, 20003, 21211, 21606, 63007):
-        c = classify_send_error(TwilioRestException(429, "u", "permanent", code=code))
+    print("\n[10] Cloud API send-error classification")
+    # Permanent Meta codes — no retry can change any of these.
+    for code in (131047, 131026, 190, 200, 100):
+        c = classify_send_error(meta_error(400, code))
         check(f"code {code} is non-retryable", c.retryable is False and c.code == code)
-    # Auth HTTP failure.
-    c = classify_send_error(TwilioRestException(401, "u", "bad creds"))
-    check("HTTP 401 auth is non-retryable", c.retryable is False)
-    # Transient server errors are retryable.
+    check("HTTP 401 expired token is non-retryable",
+          classify_send_error(meta_error(401)).retryable is False)
+    check("HTTP 403 permission is non-retryable",
+          classify_send_error(meta_error(403)).retryable is False)
+    check("HTTP 429 rate limit IS retryable",
+          classify_send_error(meta_error(429)).retryable is True)
     for status in (500, 502, 503):
-        c = classify_send_error(TwilioRestException(status, "u", "server"))
-        check(f"HTTP {status} is retryable", c.retryable is True)
-    # Network / timeout (non-Twilio) is retryable.
-    check("ConnectionError is retryable", classify_send_error(ConnectionError("reset")).retryable is True)
-    check("TimeoutError is retryable", classify_send_error(TimeoutError("t")).retryable is True)
-    # Missing config is non-retryable.
-    check("RuntimeError config is non-retryable", classify_send_error(RuntimeError("not configured")).retryable is False)
+        check(f"HTTP {status} is retryable",
+              classify_send_error(meta_error(status)).retryable is True)
+    check("ConnectionError is retryable",
+          classify_send_error(httpx.ConnectError("reset")).retryable is True)
+    check("timeout is retryable",
+          classify_send_error(httpx.ReadTimeout("t")).retryable is True)
+    check("missing config is non-retryable",
+          classify_send_error(NotConfigured("not configured")).retryable is False)
 
 
 async def test_permanent_error_no_retry():
     print("\n[11] 63038 daily limit -> fail immediately, record code, no retries")
     phone = "whatsapp:+910000000012"
-    sender = AsyncMock(side_effect=TwilioRestException(429, "u", "daily limit", code=63038))
+    sender = AsyncMock(side_effect=meta_error(400, 131047))
     with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-12", phone, "x", 0)
         await drain(phone)
     rows = outbound_rows(phone)
     check("send attempted exactly once (no retries)", sender.call_count == 1)
     check("marked FAILED", rows and rows[0][2] == "FAILED")
-    check("Twilio error code 63038 recorded", rows and rows[0][5] == 63038)
+    check("Meta error code 131047 recorded", rows and rows[0][5] == 131047)
 
 
 async def test_retryable_then_success():
     print("\n[12] Transient HTTP 503 retried, then succeeds")
     phone = "whatsapp:+910000000013"
-    sender = AsyncMock(side_effect=[TwilioRestException(503, "u", "unavailable"), "TWSID-OK"])
+    sender = AsyncMock(side_effect=[meta_error(503), "wamid.OK"])
     with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
-         patch.object(worker, "send_whatsapp", sender):
+         patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-13", phone, "x", 0)
         await drain(phone)
     rows = outbound_rows(phone)

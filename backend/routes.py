@@ -11,11 +11,11 @@ calls take far longer than any webhook timeout allows.
 """
 import os
 
-from fastapi import APIRouter, Form, HTTPException, Request
-from fastapi.responses import PlainTextResponse, Response
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 
+import whatsapp
 from core.logger import logger
-from whatsapp.transport import TRANSPORT
 
 router = APIRouter()
 
@@ -91,94 +91,104 @@ async def _queue(message_id, phone, body, unsupported=False):
         logger.error(f"webhook enqueue failed: {e}", exc_info=True)
 
 
-# ----------------------------------------------------------------------
-# WhatsApp Cloud API (default transport)
-# ----------------------------------------------------------------------
 @router.get("/webhook")
 def verify_webhook(request: Request):
-    """Meta's one-time subscription handshake: echo hub.challenge if the
-    verify token matches. Fails closed when unconfigured."""
-    params = request.query_params
-    expected = os.getenv("WHATSAPP_VERIFY_TOKEN")
+    """Meta's one-time subscription handshake.
 
-    if expected and params.get("hub.mode") == "subscribe" \
-            and params.get("hub.verify_token") == expected:
-        return PlainTextResponse(params.get("hub.challenge", ""))
+    Echo hub.challenge as plain text when the verify token matches. Fails
+    closed when WHATSAPP_VERIFY_TOKEN is unset — otherwise anyone could
+    complete the subscription and start receiving this number's messages.
+    """
+    if whatsapp.verify_token_matches(request.query_params):
+        logger.info("[webhook] verification handshake accepted")
+        return PlainTextResponse(request.query_params.get("hub.challenge", ""))
 
-    logger.warning("Webhook verification rejected (token mismatch or unconfigured)")
+    logger.warning("[webhook] verification rejected (token mismatch or unconfigured)")
     raise HTTPException(status_code=403, detail="Verification failed")
 
 
 @router.post("/webhook")
 async def webhook(request: Request):
-    """Inbound messages.
+    """Every Cloud API event: messages, statuses, receipts, errors.
 
-    Cloud API posts JSON signed with X-Hub-Signature-256. Twilio posts a form
-    signed with X-Twilio-Signature; that path stays until the Cloud API number
-    is live and is selected by WHATSAPP_TRANSPORT.
+    Returns 200 for anything that passes signature verification, including
+    events we don't act on. A non-200 makes Meta redeliver the whole batch,
+    so one unrecognised event would replay every message beside it.
     """
     raw = await request.body()
 
-    if TRANSPORT == "twilio":
-        return await _twilio_webhook(request, raw)
-
-    from whatsapp.cloud_api import parse_inbound, verify_signature
-
     # SECURITY: fail CLOSED. An unset app secret must deny everyone rather than
-    # let anyone POST forged messages straight into the concierge.
-    if not verify_signature(raw, request.headers.get("x-hub-signature-256", "")):
-        logger.warning("Webhook rejected: invalid X-Hub-Signature-256")
+    # let anyone POST forged messages straight into the concierge — that is a
+    # path to putting words in a user's mouth and spending their money.
+    if not whatsapp.verify_signature(raw, request.headers.get("x-hub-signature-256", "")):
+        logger.warning("[webhook] rejected: invalid X-Hub-Signature-256")
         raise HTTPException(status_code=403, detail="Invalid signature")
 
     try:
         payload = await request.json()
     except Exception:
-        logger.warning("Webhook rejected: body was not JSON")
+        logger.warning("[webhook] rejected: body was not JSON")
         raise HTTPException(status_code=400, detail="Malformed payload")
 
-    for message in parse_inbound(payload):
-        if not message["phone"]:
-            continue
-        if _debug_enabled():
-            print(f"📩 {message['phone']}: {message['body']!r}")
-        await _queue(
-            message["message_id"], message["phone"], message["body"], message["unsupported"]
-        )
+    if not isinstance(payload, dict):
+        logger.warning(f"[webhook] ignoring non-object payload ({type(payload).__name__})")
+        return {"status": "ignored"}
 
-    # Always 200 — a non-200 makes Meta retry the whole batch.
+    if payload.get("object") and payload["object"] != "whatsapp_business_account":
+        # Some other Meta product subscribed to this endpoint. Not ours.
+        logger.info(f"[webhook] ignoring object={payload['object']!r}")
+        return {"status": "ignored"}
+
+    messages = whatsapp.parse_inbound(payload)
+    statuses = whatsapp.parse_statuses(payload)
+    errors = whatsapp.parse_errors(payload)
+    logger.info(f"[webhook] received {len(messages)} message(s), "
+                f"{len(statuses)} status(es), {len(errors)} error(s)")
+
+    for message in messages:
+        if _debug_enabled():
+            logger.info(f"[webhook] 📩 {message['phone']}: {message['body']!r}")
+        await _queue(message["message_id"], message["phone"], message["body"],
+                     message["unsupported"])
+
+    _record_statuses(statuses)
+
+    for error in errors:
+        # Account-level problems — number quality, template rejections. Nothing
+        # to reply to; they need a human looking at Business Manager.
+        logger.error(f"[webhook] Meta account error {error['code']}: {error['title']}")
+
     return {"status": "received"}
 
 
-# ----------------------------------------------------------------------
-# Twilio (legacy transport, WHATSAPP_TRANSPORT=twilio)
-# ----------------------------------------------------------------------
-async def _twilio_webhook(request: Request, raw: bytes):
-    from twilio.request_validator import RequestValidator
-    from twilio.twiml.messaging_response import MessagingResponse
+def _record_statuses(statuses: list) -> None:
+    """Persist delivery and read receipts against the message we sent.
 
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    if not auth_token:
-        logger.error("Webhook rejected: TWILIO_AUTH_TOKEN is not configured.")
-        raise HTTPException(status_code=500, detail="Webhook is not configured correctly.")
+    Best effort: a receipt is bookkeeping, and losing one must never make us
+    fail a webhook Meta would then redeliver in full.
+    """
+    import db
 
-    proto = request.headers.get("x-forwarded-proto", "http")
-    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or "localhost:8000"
-    url = f"{proto}://{host}{request.url.path}"
+    for status in statuses:
+        if not status["message_id"]:
+            continue
+        try:
+            db.record_delivery_status(
+                provider_sid=status["message_id"],
+                status=status["status"],
+                error_code=status["error_code"],
+            )
+        except Exception as e:
+            logger.error(f"[webhook] could not record status: {e!r}")
 
-    form = dict(await request.form())
-    signature = request.headers.get("x-twilio-signature", "")
-
-    if not RequestValidator(auth_token).validate(url, form, signature):
-        # The reconstructed url must EXACTLY match the console URL. http-vs-https
-        # behind a tunnel is the usual cause. No secrets logged.
-        logger.warning(f"Webhook signature verification failed (url: {url})")
-        raise HTTPException(status_code=403, detail="Invalid Twilio signature")
-
-    num_media = int(form.get("NumMedia") or 0)
-    phone = form.get("From", "")
-    if phone:
-        if _debug_enabled():
-            print(f"📩 {phone}: {form.get('Body')!r}")
-        await _queue(form.get("MessageSid", ""), phone, form.get("Body", ""), num_media > 0)
-
-    return Response(content=str(MessagingResponse()), media_type="application/xml")
+        if status["status"] == "failed":
+            logger.error(
+                f"[webhook] delivery FAILED to {status['recipient']} "
+                f"(message_id={status['message_id']}, code={status['error_code']}, "
+                f"{status['error_title']})"
+            )
+        else:
+            logger.info(
+                f"[webhook] {status['status']} — {status['message_id']} "
+                f"to {status['recipient']}"
+            )

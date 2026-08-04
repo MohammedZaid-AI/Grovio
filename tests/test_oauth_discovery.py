@@ -30,10 +30,11 @@ import httpx
 from cryptography.fernet import Fernet
 
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
-os.environ["WHATSAPP_TRANSPORT"] = "cloud"
 # Importing the provider modules pulls in mcp_use, which otherwise tries to
 # post telemetry and stalls the suite on SSL retries.
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
+os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-token")
+os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "555000111")
 
 import db
 

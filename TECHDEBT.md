@@ -167,7 +167,7 @@ Swiggy's Food MCP tool names are unconfirmed.
 | M3 | `offer_sessions` and `oauth_states` are never swept | Small unbounded growth; expired states linger | The cleanup exists (`delete_expired_oauth_states`) but only runs on a successful callback — move to a periodic task |
 | M4 | Order status is only refreshed when the user asks | "Where's my order" is accurate; proactive updates impossible | Poll active orders when a provider supports tracking |
 | M5 | Provider MCP session is cached per process with no health check | A silently dead session fails the first call, then reconnects | Already self-heals by dropping the client; add a ping |
-| M6 | Twilio path retained alongside Cloud API | Two transports to keep correct | Delete once the Cloud API number is live |
+| M6 | ~~Twilio path retained alongside Cloud API~~ | RESOLVED — Twilio removed entirely; see MIGRATION_CLOUD_API.md | — |
 | M7 | Fact keys are free-text | `budget` vs `Budget` vs `max_spend` fragmentation | Normalise against a vocabulary (also helps H4) |
 | M8 | Facts capped at 200 chars ✅ APPLIED | Was unbounded | Done |
 
@@ -193,7 +193,7 @@ Swiggy's Food MCP tool names are unconfirmed.
 | **Replay protection** | ✅ Single-use atomic claim (`UPDATE … WHERE used_at IS NULL`); a second callback with the same state gets nothing. Tested. |
 | **Encryption** | ✅ Fernet (AES-128-CBC + HMAC). Access tokens, refresh tokens and PKCE verifiers all encrypted at rest. **Fails closed** — no key means no storage, no plaintext fallback. |
 | **Token storage** | ✅ `vault.py` is the only decryptor. Enforced by a test that tokenises the upper layers and fails if they can name a credential. |
-| **Webhook verification** | ✅ Cloud API HMAC `X-Hub-Signature-256` with `compare_digest`; Twilio signature validation. Both **fail closed** on missing secrets. |
+| **Webhook verification** | ✅ Cloud API HMAC `X-Hub-Signature-256` with `compare_digest`. **Fails closed** on a missing app secret. |
 | **Secrets** | ✅ `.env` gitignored, no secrets in the repo, `.env.example` added. ⚠️ No secret-manager integration — fine for a pilot, revisit for scale. |
 | **Conversation isolation** | ✅ Everything keyed by phone; no shared mutable per-user state. Reviewed for cross-user leakage — none found. |
 | **Memory isolation** | ✅ Same. `_metadata_cache` is global but holds only public provider metadata. |

@@ -82,9 +82,8 @@ ai/
     swiggy.py           the ONLY file allowed to know Swiggy exists
 core/                   llm (async, tool-calling), crypto, config, logger, authz
 whatsapp/
-  transport.py          seam: picks the transport, normalises it to async
-  cloud_api.py          WhatsApp Cloud API (default)
-  twilio.py             legacy, WHATSAPP_TRANSPORT=twilio
+  __init__.py           the seam — import send_text/mark_read from here
+  cloud_api.py          the ONLY module that knows Meta exists
 db.py                   delivery queue + user model
 ```
 
@@ -104,7 +103,7 @@ python tests\test_whatsapp_async_delivery.py     # no PYTHONPATH needed
 Pythons on a typical Windows box and a bare `uvicorn`/`python` usually resolves
 to the global one, which has none of these dependencies — the symptom is
 `ModuleNotFoundError: No module named 'mcp_use'` at startup, or two test suites
-failing to import `twilio`. Without activating:
+failing to import a dependency. Without activating:
 
 ```powershell
 venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000
@@ -123,8 +122,8 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 | `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
 | `WHATSAPP_PHONE_NUMBER_ID` | Cloud API sender id |
 | `WHATSAPP_APP_SECRET` | Webhook signature verification. **Fails closed.** |
-| `WHATSAPP_VERIFY_TOKEN` | Echoed during webhook registration |
-| `WHATSAPP_TRANSPORT` | `cloud` (default) or `twilio` |
+| `WHATSAPP_VERIFY_TOKEN` | Echoed during webhook registration. **Fails closed.** |
+| `META_API_VERSION` | Graph API version (default in `whatsapp/cloud_api.py`) |
 | `TOKEN_ENCRYPTION_KEY` | Fernet key for provider tokens. **Fails closed.** |
 | `PUBLIC_BASE_URL` | Base for OAuth callbacks; must be https in production |
 | `SWIGGY_OAUTH_CLIENT_ID` | Optional — Swiggy issues client ids by dynamic registration |
@@ -159,6 +158,10 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 - **OAuth metadata may live at the ORIGIN ROOT**, not under the server path.
   `_metadata_urls` probes the RFC 8414 §3.1 form, the appended form and the
   root. Swiggy serves only the root. See `OAUTH.md`.
+- **Phone numbers are canonical MSISDNs** — `917795871481`, never
+  `whatsapp:+91…`. `whatsapp.canonical_phone` normalises at ingress and
+  `db._migrate_phone_keys` rewrites older rows on startup. A second format
+  means the same human becomes a second user with no memory or order history.
 - **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so

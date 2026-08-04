@@ -83,7 +83,7 @@ No framework — each suite is a plain script that exits non-zero on failure.
 python tests/test_journey.py      # the whole user journey
 python tests/test_identity.py     # identity, OAuth, tokens
 python tests/test_concierge.py    # planner, providers, ranking
-python tests/test_cloud_api_transport.py
+python tests/test_cloud_api.py
 python tests/test_whatsapp_async_delivery.py
 ```
 
@@ -164,7 +164,7 @@ matter most:
 | Phase | Scope | State |
 |---|---|---|
 | 1–2 | Audit + delete the predecessor ERP | ✅ |
-| 3 | Planner, providers, memory, Cloud API transport | ✅ |
+| 3 | Planner, providers, memory, Cloud API messaging | ✅ |
 | 4 | Identity + provider account linking | ✅ |
 | 5 | End-to-end journey: recommend → order → track | ✅ |
 | 6 | Production hardening | ✅ |
