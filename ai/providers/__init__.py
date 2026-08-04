@@ -38,3 +38,34 @@ def setup() -> None:
             "[providers] restaurant search disabled — set SWIGGY_FOOD_ENABLED=1 "
             "after confirming tool names with inspect_tools.py"
         )
+
+    _report_redirect_uris()
+
+
+def _report_redirect_uris() -> None:
+    """Print each provider's callback URL at startup.
+
+    Providers allowlist redirect URIs by EXACT match, so linking fails at their
+    consent screen — not in our logs — if the URL is off by a character or the
+    host was never registered. Printing it is the difference between "linking
+    doesn't work" and a string you can paste into a whitelisting request.
+    """
+    from ai.providers import oauth
+
+    for name in sorted({p.name for kind in registry.available_kinds()
+                        for p in registry.for_kind(kind) if registry.requires_link(p)}):
+        logger.info(f"[providers] {name} redirect URI: {oauth.redirect_uri(name)}")
+
+    base = oauth.redirect_uri("_").rsplit("/link/", 1)[0]
+    if any(marker in base for marker in ("ngrok-free", "trycloudflare", "loca.lt", "serveo")):
+        logger.warning(
+            "[providers] PUBLIC_BASE_URL is an EPHEMERAL TUNNEL. Providers match "
+            "redirect URIs exactly, and this host changes every restart — so a "
+            "whitelisted link breaks as soon as you restart the tunnel. Use a "
+            "reserved/static domain before asking anyone to allowlist it."
+        )
+    elif base.startswith("http://localhost"):
+        logger.info(
+            "[providers] PUBLIC_BASE_URL is localhost — fine for development, but "
+            "the callback only works in a browser ON THIS MACHINE."
+        )
