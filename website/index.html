@@ -1,0 +1,213 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Grovio — an AI food concierge that lives in WhatsApp</title>
+<meta name="description" content="Grovio helps you decide what to eat and orders it for you, entirely inside WhatsApp, using your own Swiggy account.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🍜</text></svg>">
+<style>
+  :root {
+    --bg: #fffdf9; --fg: #1a1614; --muted: #6b6259;
+    --line: #ebe4da; --card: #ffffff; --accent: #d8541f; --accent-soft: #fdf0e8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16130f; --fg: #f3ece4; --muted: #a89d92;
+      --line: #2e2721; --card: #1e1a16; --accent: #ff8a4c; --accent-soft: #2a1c13;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 17px/1.65 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; padding: 0 24px; }
+  a { color: var(--accent); }
+  header {
+    border-bottom: 1px solid var(--line); padding: 20px 0;
+    position: sticky; top: 0; background: var(--bg); z-index: 10;
+  }
+  header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+  .brand { font-weight: 700; font-size: 19px; letter-spacing: -0.02em; text-decoration: none; color: var(--fg); }
+  .brand span { color: var(--accent); }
+  nav a { margin-left: 20px; font-size: 15px; text-decoration: none; color: var(--muted); }
+  nav a:hover { color: var(--accent); }
+  h1 {
+    font-size: clamp(30px, 6vw, 46px); line-height: 1.15;
+    letter-spacing: -0.03em; margin: 56px 0 20px;
+  }
+  h2 { font-size: 23px; letter-spacing: -0.02em; margin: 52px 0 14px; }
+  h3 { font-size: 17px; margin: 0 0 6px; }
+  .lede { font-size: 20px; color: var(--muted); margin-bottom: 28px; }
+  .chat {
+    background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+    padding: 20px; margin: 32px 0; display: grid; gap: 10px;
+  }
+  .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 15.5px; }
+  .them { background: var(--accent-soft); border-bottom-left-radius: 4px; }
+  .me { background: var(--accent); color: #fff; justify-self: end; border-bottom-right-radius: 4px; }
+  .steps { counter-reset: s; padding: 0; margin: 0; list-style: none; }
+  .steps li {
+    counter-increment: s; position: relative; padding-left: 46px; margin-bottom: 22px;
+  }
+  .steps li::before {
+    content: counter(s); position: absolute; left: 0; top: -1px;
+    width: 30px; height: 30px; border-radius: 50%;
+    background: var(--accent-soft); color: var(--accent);
+    display: grid; place-items: center; font-weight: 700; font-size: 15px;
+  }
+  .grid { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 18px; }
+  .card p { margin: 0; color: var(--muted); font-size: 15.5px; }
+  .rule { border: 0; border-top: 1px solid var(--line); margin: 56px 0; }
+  .never li { margin-bottom: 10px; }
+  footer { border-top: 1px solid var(--line); margin-top: 64px; padding: 32px 0 56px; color: var(--muted); font-size: 15px; }
+  footer a { color: var(--muted); }
+  footer .legal { margin-top: 18px; font-size: 14px; line-height: 1.7; }
+  .tag {
+    display: inline-block; background: var(--accent-soft); color: var(--accent);
+    padding: 3px 10px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <a class="brand" href="/">Grov<span>io</span></a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="/privacy.html">Privacy</a>
+      <a href="/terms.html">Terms</a>
+    </nav>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <span class="tag" style="margin-top:48px; display:inline-block;">Personal use · India</span>
+  <h1>Decide what to eat by texting a friend who happens to know food.</h1>
+  <p class="lede">
+    Grovio is an AI food concierge that lives entirely inside WhatsApp. Tell it
+    what you feel like, and it works out what and where — then places the order
+    on your own delivery account, once you say yes.
+  </p>
+
+  <div class="chat">
+    <div class="msg them">I'm starving but I can't decide 😩</div>
+    <div class="msg me">
+      Friday night, and you usually want something spicy. Two that fit your
+      budget:<br><br>
+      1. Chicken Biryani — Meghana Foods<br>⭐ 4.6 · ₹340 · 22 min<br><br>
+      2. Mutton Biryani — Empire<br>⭐ 4.3 · ₹280 · 18 min
+    </div>
+    <div class="msg them">1</div>
+    <div class="msg me">Ordered. ₹340, about 22 minutes. I'll keep an eye on it 🍛</div>
+  </div>
+
+  <p>
+    No app to install. No dashboard to learn. No new account to create. The
+    entire product is a WhatsApp conversation, because that is where you already
+    are.
+  </p>
+
+  <hr class="rule">
+
+  <h2 id="how">How it works</h2>
+  <ol class="steps">
+    <li>
+      <h3>You message Grovio first</h3>
+      <p>Always. Grovio never starts a conversation, never sends promotions, and
+      never messages you out of the blue.</p>
+    </li>
+    <li>
+      <h3>It connects to your own delivery account, once</h3>
+      <p>You authorise it through the delivery platform's own secure sign-in
+      page. Grovio never sees your password.</p>
+    </li>
+    <li>
+      <h3>It suggests real options, and explains why</h3>
+      <p>Every restaurant, price, rating and delivery time comes from a live
+      response from the delivery platform. Nothing is invented or estimated.</p>
+    </li>
+    <li>
+      <h3>You confirm, and it orders</h3>
+      <p>Grovio only ever orders something it has just shown you, and only after
+      you pick it. Then it confirms the total and the ETA.</p>
+    </li>
+  </ol>
+
+  <hr class="rule">
+
+  <h2>What it remembers</h2>
+  <div class="grid">
+    <div class="card">
+      <h3>Your preferences</h3>
+      <p>Budget, favourite cuisines, the area you order to, dietary rules.</p>
+    </div>
+    <div class="card">
+      <h3>Allergies and dislikes</h3>
+      <p>Anything you must avoid is filtered out of every recommendation.</p>
+    </div>
+    <div class="card">
+      <h3>What you've ordered</h3>
+      <p>So it can stop asking questions you've already answered.</p>
+    </div>
+  </div>
+
+  <hr class="rule">
+
+  <h2>What Grovio will never do</h2>
+  <ul class="never">
+    <li><strong>Never order without your say-so.</strong> Every order needs you
+        to choose an option that was just shown to you.</li>
+    <li><strong>Never invent a restaurant, price or delivery time.</strong> If a
+        detail didn't come back from the delivery platform, Grovio doesn't say
+        it.</li>
+    <li><strong>Never ask for a password, OTP or card details.</strong> Sign-in
+        happens on the delivery platform's own page, not in the chat.</li>
+    <li><strong>Never message you first,</strong> and never send marketing.</li>
+    <li><strong>Never sell your data.</strong> Not to anyone, for any purpose.</li>
+  </ul>
+
+  <hr class="rule">
+
+  <h2>Who it's for</h2>
+  <p>
+    People who spend more time choosing dinner than eating it. Grovio is a
+    personal assistant for individuals ordering their own food — it is not a
+    restaurant tool, a point-of-sale system, or a business platform.
+  </p>
+
+  <hr class="rule">
+
+  <h2>Get in touch</h2>
+  <p>
+    Questions, deletion requests, or anything else:
+    <a href="mailto:hello@grovio.app">hello@grovio.app</a>. A real person reads
+    it and replies.
+  </p>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <a href="/privacy.html">Privacy Policy</a> ·
+    <a href="/terms.html">Terms of Service</a> ·
+    <a href="mailto:hello@grovio.app">Contact</a>
+    <div class="legal">
+      <strong>Grovio</strong><br>
+      Operated by [LEGAL NAME], [FULL ADDRESS], India<br>
+      Contact: <a href="mailto:hello@grovio.app">hello@grovio.app</a><br>
+      © 2026 Grovio. Grovio is an independent service and is not affiliated
+      with, endorsed by, or partnered with WhatsApp, Meta, or any delivery
+      platform.
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
