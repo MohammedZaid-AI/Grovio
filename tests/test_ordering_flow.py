@@ -321,7 +321,14 @@ class Recorder:
 
 
 def show(phone, provider_name, kind, entries):
-    """Put a numbered list on the table exactly as find_food would."""
+    """Put a numbered list on the table exactly as find_food would.
+
+    Also authorises the phone to spend. Ordering is gated by AUTHORIZED_PHONES
+    (proved in test_concierge.py §12); this suite is about ordering MECHANICS,
+    so every test phone is allowed through that gate here.
+    """
+    existing = os.environ.get("AUTHORIZED_PHONES", "")
+    os.environ["AUTHORIZED_PHONES"] = f"{existing},{phone}" if existing else phone
     conversation.reset(phone)
     conversation.show_offers(phone, [
         {"provider": provider_name, "id": i, "title": t, "venue": v,

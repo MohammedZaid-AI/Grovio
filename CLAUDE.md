@@ -138,9 +138,9 @@ default, so production is never opt-in).
 number, so use a spare one, never a number tied to a business account. There is
 also no webhook, so no `X-Hub-Signature-256` to verify — the transport is
 trusted, which is exactly why it must not ship. **A linked device receives
-every message that number gets**, and `core/authz.is_authorized_user` is
-currently unwired (no callers), so anyone who texts the number reaches the
-concierge. Wire it before linking a number people actually message.
+every message that number gets**, so anyone who texts the number will be
+answered by the concierge. They cannot spend anything —
+`AUTHORIZED_PHONES` gates ordering — but they will get replies.
 
 `--reload` restarts the WhatsApp socket on every code change. For a long
 session, run without it.
@@ -151,8 +151,7 @@ session, run without it.
 |---|---|
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | LLM inference |
 | `OPENAI_BASE_URL`, `LLM_MODEL` | Provider + model override |
-| `AUTHORIZED_PHONES` | Allowlist for spending money. **Fails closed.** |
-| `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
+| `AUTHORIZED_PHONES` | Who may ORDER. Chat is open to all. **Fails closed.** |
 | `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
 | `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
 | `WHATSAPP_PHONE_NUMBER_ID` | Cloud API sender id |
@@ -175,6 +174,10 @@ session, run without it.
    follow-up only when a genuinely required detail is missing.
 4. **Never hardcode provider logic** above the provider layer.
 5. **Fail closed** on authorization — a missing allowlist denies everyone.
+   Authorization guards **spending, not conversation**: anyone may chat and be
+   recommended food; only `AUTHORIZED_PHONES` may place an order. The gate lives
+   at `skills._execute_pending`, the one point every order (first attempt and
+   retry) passes through.
 6. **Never expose raw exceptions, provider errors, or report IDs** to the user.
 7. **No dead code**, no compatibility shims, no abstraction with one caller.
 

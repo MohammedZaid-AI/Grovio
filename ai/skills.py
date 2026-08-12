@@ -23,6 +23,7 @@ from core.logger import logger
 from ai import conversation, recommendation
 from ai.providers import ProviderKind, SearchContext, base, failures, oauth, registry
 from ai.providers.failures import Failure
+from core import authz
 
 
 class SkillStatus(str, Enum):
@@ -331,6 +332,29 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     offer = _offer_from(entry)
     provider = registry.get(offer.provider)
     quantity = quantity or 1
+
+    # THE money boundary. Anyone may chat and be recommended food; only an
+    # authorised number may spend. Both the first attempt and every retry pass
+    # through here, so this is the one place it has to hold.
+    #
+    # It matters more than it looks: orders go on the ACCOUNT OWNER'S linked
+    # provider account, cash on delivery, to the address stored there. An
+    # unauthorised order is food arriving at someone else's home for them to pay.
+    # FAILS CLOSED — an unset AUTHORIZED_PHONES lets nobody spend.
+    if not authz.is_authorized_user(user.phone):
+        logger.warning(
+            f"[skills] BLOCKED an order attempt from {user.phone} — not in "
+            f"AUTHORIZED_PHONES ({offer.title!r})"
+        )
+        conversation.cancel_pending(user.phone)
+        return SkillResult(
+            SkillStatus.ERROR,
+            "NOT AUTHORISED TO ORDER: this user may chat and get recommendations, "
+            "but ordering is limited to approved numbers. Tell them warmly that "
+            "you can help them decide but can't place the order for them yet, and "
+            "keep being useful about the food itself. Do NOT claim an order was "
+            "placed, and do NOT offer to try again.",
+        )
 
     if provider is None or not hasattr(provider, "place"):
         conversation.order_failed(user.phone, "no ordering provider")

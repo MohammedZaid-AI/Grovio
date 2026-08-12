@@ -25,7 +25,7 @@ _tmp.close()
 db.DB_PATH = _tmp.name
 db.init_db()
 
-from ai import concierge, identity, memory, planner, recommendation, skills
+from ai import concierge, conversation, identity, memory, planner, recommendation, skills
 from ai.providers import ProviderKind, SearchContext, registry
 from ai.providers.base import Offer
 from core.llm import LLMReply, ToolCall, _parse_arguments
@@ -312,47 +312,78 @@ check("the provider adapter does own the platform detail", "SwiggyInstamart" in 
 
 
 # ----------------------------------------------------------------------
-print("\n[12] Authorization is ENFORCED, and silence is the refusal")
-# This shipped unwired: core/authz.is_authorized_user had no callers anywhere,
-# so every number that reached the transport got an AI reply. On a linked
-# personal device that means friends and family, because a linked device
-# receives every message the number gets.
+print("\n[12] ANYONE may chat; only authorised numbers may SPEND")
+# core/authz.is_authorized_user shipped with no callers at all, so ordering was
+# ungated. It guards MONEY, not conversation: its own docstring says "authorized
+# to spend money — i.e. to place an order". Recommending food to a stranger
+# costs nothing; ordering it puts food at the account owner's door, cash on
+# delivery, for them to pay.
 from core import authz
 
 _saved_allow = os.environ.get("AUTHORIZED_PHONES", "")
 os.environ["AUTHORIZED_PHONES"] = "919800000001"
 
 planner.get_llm = lambda: FakeLLM([LLMReply(text="here you go")])
-check("an allowed number gets a normal reply",
+check("an allowed number is answered",
       run(concierge.respond("919800000001", "hi")) == "here you go")
 
-check("a stranger gets SILENCE, not a refusal",
-      run(concierge.respond("910000009999", "hi")) is None)
-check("silence beats a refusal message — no auto-reply to someone's family",
-      run(concierge.respond("910000009999", "hi")) is None)
+planner.get_llm = lambda: FakeLLM([LLMReply(text="try the biryani")])
+check("a STRANGER is answered too — chat is open to anyone",
+      run(concierge.respond("910000009999", "what's good?")) == "try the biryani")
 
 os.environ["AUTHORIZED_PHONES"] = ""
-check("FAILS CLOSED — an unset allowlist denies everyone",
-      run(concierge.respond("919800000001", "hi")) is None)
+planner.get_llm = lambda: FakeLLM([LLMReply(text="still chatting")])
+check("an unset allowlist does NOT silence the concierge",
+      run(concierge.respond("919800000001", "hi")) == "still chatting")
 
-os.environ["AUTHORIZED_PHONES"] = "+91 98000 00001"
-planner.get_llm = lambda: FakeLLM([LLMReply(text="ok")])
-check("allowlist entries match on digits, whatever the formatting",
-      run(concierge.respond("919800000001", "hi")) == "ok")
-os.environ["AUTHORIZED_PHONES"] = _saved_allow or "919800000001"
+# ...but the money path is gated, at the single point every order passes through.
+registry.clear()
+spender = FakeProvider("pay_provider", ProviderKind.GROCERY,
+                       [offer("Milk", kind=ProviderKind.GROCERY, price=33)])
+spender.placed = []
 
-# The worker must treat None as "send nothing", not as an empty reply.
-import backend.whatsapp_worker as _worker
+
+async def _place(offer_, quantity, ctx):
+    spender.placed.append(offer_.id)
+    from ai.providers.base import PLACED, PlacedOrder
+    return PlacedOrder(provider=spender.name, order_id="OK-1", status=PLACED, total=33)
+
+
+spender.place = _place
+registry.register(spender)
+
+STRANGER = "910000009999"
+identity.load(STRANGER)
+conversation.show_offers(STRANGER, [{"provider": "pay_provider", "id": "SKU-1",
+                                     "title": "Milk", "venue": "Amul", "price": 33,
+                                     "currency": "INR", "eta_minutes": None,
+                                     "kind": "grocery"}], "milk")
 
 os.environ["AUTHORIZED_PHONES"] = "919800000001"
-inbound_id, _ = db.enqueue_inbound_message("SILENT-1", "910000009999", "hello?")
-run(_worker._process_inbound({"id": inbound_id, "phone": "910000009999",
-                              "body": "hello?", "num_media": 0}))
-queued = db.get_pending_outbound("910000009999")
-check("an unauthorised message queues NO reply at all", queued == [])
-row = db.get_connection().execute(
-    "SELECT status FROM whatsapp_inbound WHERE id = ?", (inbound_id,)).fetchone()
-check("but is marked DONE, so dedup and recovery still work", row[0] == "DONE")
+result = run(skills.place_order(identity.load(STRANGER), 1))
+check("an unauthorised number CANNOT order", result.status == skills.SkillStatus.ERROR)
+check("nothing reached the provider", spender.placed == [])
+check("the model is told to stay helpful about the food",
+      "can't place the order" in result.message or "NOT AUTHORISED" in result.message)
+check("and is told NOT to claim success", "Do NOT claim an order was" in result.message)
+
+os.environ["AUTHORIZED_PHONES"] = ""
+conversation.show_offers(STRANGER, [{"provider": "pay_provider", "id": "SKU-1",
+                                     "title": "Milk", "venue": "Amul", "price": 33,
+                                     "currency": "INR", "eta_minutes": None,
+                                     "kind": "grocery"}], "milk")
+result = run(skills.place_order(identity.load(STRANGER), 1))
+check("FAILS CLOSED — an unset allowlist lets NOBODY spend",
+      result.status == skills.SkillStatus.ERROR and spender.placed == [])
+
+os.environ["AUTHORIZED_PHONES"] = "+91 00000 09999"
+conversation.show_offers(STRANGER, [{"provider": "pay_provider", "id": "SKU-1",
+                                     "title": "Milk", "venue": "Amul", "price": 33,
+                                     "currency": "INR", "eta_minutes": None,
+                                     "kind": "grocery"}], "milk")
+result = run(skills.place_order(identity.load(STRANGER), 1))
+check("an authorised number CAN order", result.ok and spender.placed == ["SKU-1"])
+check("allowlist entries match on digits, whatever the formatting", result.ok)
 os.environ["AUTHORIZED_PHONES"] = _saved_allow
 
 # ----------------------------------------------------------------------
