@@ -166,6 +166,52 @@ else:
     check("a malformed event is ignored, not raised",
           local_client.parse_event(object()) is None)
 
+    # ==================================================================
+    print("\n[5b] LID addressing — a long id is NOT a phone number")
+    # Observed live: a message arrived from 81209342308582@lid. Reading Sender
+    # blindly keyed the user by that LID and replied to
+    # 81209342308582@s.whatsapp.net, which nobody owns — the send returned an
+    # id so it LOOKED delivered, but the recipient never got it.
+    def source(sender_user, sender_server, alt_user=None, chat_user=None,
+               chat_server="s.whatsapp.net"):
+        ev = npb.Message()
+        ev.Info.ID = "LID-1"
+        ev.Info.MessageSource.Sender.User = sender_user
+        ev.Info.MessageSource.Sender.Server = sender_server
+        if alt_user:
+            ev.Info.MessageSource.SenderAlt.User = alt_user
+            ev.Info.MessageSource.SenderAlt.Server = "s.whatsapp.net"
+        ev.Info.MessageSource.Chat.User = chat_user or sender_user
+        ev.Info.MessageSource.Chat.Server = chat_server
+        ev.Message.conversation = "hi"
+        return ev
+
+    check("a plain phone sender resolves to its number",
+          local_client._sender_phone(
+              source("917795871481", "s.whatsapp.net").Info.MessageSource)
+          == "917795871481")
+    check("REGRESSION: a LID sender resolves via SenderAlt, not the LID",
+          local_client._sender_phone(
+              source("81209342308582", "lid", alt_user="917795871481").Info.MessageSource)
+          == "917795871481")
+    check("a LID with no phone alternative is DROPPED, not made into a user",
+          local_client._sender_phone(
+              source("81209342308582", "lid").Info.MessageSource) == "")
+    check("and the whole event is ignored",
+          local_client.parse_event(source("81209342308582", "lid")) is None)
+    check("a LID id never becomes a phone key",
+          local_client.parse_event(
+              source("81209342308582", "lid", alt_user="917795871481"))["phone"]
+          == "917795871481")
+
+    local_client._chat_jids.clear()
+    local_client.parse_event(source("81209342308582", "lid",
+                                    alt_user="917795871481",
+                                    chat_user="81209342308582", chat_server="lid"))
+    check("the chat JID is remembered so the reply lands in the right chat",
+          local_client._chat_jids.get("917795871481") == ("81209342308582", "lid"))
+    local_client._chat_jids.clear()
+
     print("\n[6] Text extraction covers the real shapes")
     m = e2e.Message()
     m.conversation = "plain"

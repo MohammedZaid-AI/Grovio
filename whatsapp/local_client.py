@@ -50,12 +50,24 @@ SESSION_DB = SESSION_DIR / "session.db"
 # are ignored — the concierge is a private conversation by design.
 DIRECT_SERVER = "s.whatsapp.net"
 
+# WhatsApp now addresses some chats by LID — a privacy identifier that looks
+# like a long number but is NOT a phone number. `Sender` then holds the LID and
+# `SenderAlt` holds the real phone JID. Reading `Sender` blindly keys the user
+# by a LID (a phantom user with no history) and builds a reply address of
+# <lid>@s.whatsapp.net, which does not exist — the reply goes nowhere while the
+# send call still returns an id, so it looks delivered in the logs.
+LID_SERVER = "lid"
+
 _client = None
 _thread = None
 _loop = None            # the app's event loop, for the listener thread to post into
 _connected = threading.Event()
 _qr_count = 0          # QR codes rotate; numbering them makes that visible
 _paired = threading.Event()
+# canonical phone -> (jid user, jid server) of the chat it arrived on.
+# Dev-scale and in-memory on purpose: it repopulates from the next
+# inbound message, and a cold miss just falls back to <phone>@s.whatsapp.net.
+_chat_jids: dict = {}
 
 
 class NotConfigured(RuntimeError):
@@ -102,6 +114,39 @@ def message_text(message) -> str:
     return ""
 
 
+def _is_lid(jid) -> bool:
+    return bool(jid is not None and getattr(jid, "Server", "") == LID_SERVER)
+
+
+def _sender_phone(source) -> str:
+    """The sender's REAL phone number, whichever way the chat is addressed.
+
+    In LID addressing `Sender` is a privacy id, not a number, and the phone JID
+    is in `SenderAlt`. Returns "" when no phone number can be established —
+    which must drop the message rather than invent a user: keying anyone by a
+    LID gives them a second identity with no memory, no history and no link,
+    and they cannot be matched against AUTHORIZED_PHONES either.
+    """
+    sender = getattr(source, "Sender", None)
+    alternate = getattr(source, "SenderAlt", None)
+
+    # Prefer whichever of the two is an actual phone-number JID.
+    for candidate in (alternate, sender) if _is_lid(sender) else (sender, alternate):
+        if candidate is None or _is_lid(candidate):
+            continue
+        phone = canonical_phone(getattr(candidate, "User", ""))
+        if phone:
+            return phone
+
+    if _is_lid(sender):
+        logger.warning(
+            f"[whatsapp] ignoring a message addressed only by LID "
+            f"({getattr(sender, 'User', '?')}) — no phone number to identify or "
+            f"authorise the sender with, and a reply would not reach them."
+        )
+    return ""
+
+
 def parse_event(event) -> dict | None:
     """Turn a neonize MessageEv into the same shape the webhook produces.
 
@@ -122,10 +167,15 @@ def parse_event(event) -> dict | None:
     if getattr(source, "IsGroup", False):
         return None
 
-    sender = getattr(source, "Sender", None)
-    phone = canonical_phone(getattr(sender, "User", "") if sender else "")
+    phone = _sender_phone(source)
     if not phone:
         return None
+
+    # Remember where this conversation actually lives, so the reply goes back to
+    # the exact chat rather than a JID rebuilt from a phone number.
+    chat = getattr(source, "Chat", None)
+    if chat is not None and getattr(chat, "User", ""):
+        _chat_jids[phone] = (chat.User, getattr(chat, "Server", "") or DIRECT_SERVER)
 
     body = message_text(getattr(event, "Message", None))
     return {
@@ -175,8 +225,12 @@ async def send_text(to: str, body: str) -> str:
 
     client = _require_client()
     recipient = canonical_phone(to)
+    # Reply into the chat the message actually arrived on. Rebuilding
+    # <phone>@s.whatsapp.net is right for ordinary chats but wrong for a
+    # LID-addressed one, where it silently sends to an address nobody owns.
+    user, server = _chat_jids.get(recipient, (recipient, DIRECT_SERVER))
     response = await asyncio.to_thread(
-        client.send_message, build_jid(recipient, DIRECT_SERVER), body
+        client.send_message, build_jid(user, server), body
     )
     message_id = str(getattr(response, "ID", "") or "")
     logger.info(f"[whatsapp] sent text to {recipient} — message_id={message_id} "
