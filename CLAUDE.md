@@ -82,8 +82,10 @@ ai/
     swiggy.py           the ONLY file allowed to know Swiggy exists
 core/                   llm (async, tool-calling), crypto, config, logger, authz
 whatsapp/
-  __init__.py           the seam — import send_text/mark_read from here
-  cloud_api.py          the ONLY module that knows Meta exists
+  __init__.py           the seam — import send_text/mark_read from here;
+                        selects the transport via WHATSAPP_PROVIDER
+  cloud_api.py          the ONLY module that knows Meta exists (production)
+  local_client.py       personal WhatsApp Web session (DEVELOPMENT ONLY)
 db.py                   delivery queue + user model
 ```
 
@@ -112,6 +114,37 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 
 `uvicorn --reload` does **not** watch `.env` — restart fully after changing it.
 
+### Testing without a Meta account
+
+Meta requires an approved business account and a public webhook. To exercise the
+concierge before that exists, `WHATSAPP_PROVIDER=local` links a **personal**
+WhatsApp number over WhatsApp Web instead:
+
+```powershell
+venv\Scripts\python.exe -m pip install neonize "qrcode[pil]"
+$env:WHATSAPP_PROVIDER="local"
+venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000
+```
+
+A QR prints in the terminal (and lands in `.data/whatsapp-session/qr.png`).
+Scan it once: **WhatsApp → Settings → Linked devices → Link a device**. The
+session persists in `.data/whatsapp-session/` — gitignored — and survives
+restarts until you unlink from the phone. Then message that number.
+
+Switch back with `WHATSAPP_PROVIDER=cloud` (or just unset it — cloud is the
+default, so production is never opt-in).
+
+⚠️ **Development only.** This is an unofficial client: WhatsApp can ban the
+number, so use a spare one, never a number tied to a business account. There is
+also no webhook, so no `X-Hub-Signature-256` to verify — the transport is
+trusted, which is exactly why it must not ship. **A linked device receives
+every message that number gets**, and `core/authz.is_authorized_user` is
+currently unwired (no callers), so anyone who texts the number reaches the
+concierge. Wire it before linking a number people actually message.
+
+`--reload` restarts the WhatsApp socket on every code change. For a long
+session, run without it.
+
 ## Environment
 
 | Variable | Purpose |
@@ -119,6 +152,8 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 | `GROQ_API_KEY` / `OPENAI_API_KEY` | LLM inference |
 | `OPENAI_BASE_URL`, `LLM_MODEL` | Provider + model override |
 | `AUTHORIZED_PHONES` | Allowlist for spending money. **Fails closed.** |
+| `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
+| `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
 | `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
 | `WHATSAPP_PHONE_NUMBER_ID` | Cloud API sender id |
 | `WHATSAPP_APP_SECRET` | Webhook signature verification. **Fails closed.** |
@@ -158,10 +193,20 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 - **OAuth metadata may live at the ORIGIN ROOT**, not under the server path.
   `_metadata_urls` probes the RFC 8414 §3.1 form, the appended form and the
   root. Swiggy serves only the root. See `OAUTH.md`.
+- **The transport is a seam, not a fork.** Both transports expose the same
+  `send_text`/`classify_send_error` and hand inbound messages to
+  `whatsapp_worker.enqueue_and_wake` in the same shape. Nothing above
+  `whatsapp/` may learn which one is running — `tests/test_local_transport.py`
+  §10 tokenises the local client and fails the build if it names the AI layer.
 - **Phone numbers are canonical MSISDNs** — `917795871481`, never
   `whatsapp:+91…`. `whatsapp.canonical_phone` normalises at ingress and
   `db._migrate_phone_keys` rewrites older rows on startup. A second format
   means the same human becomes a second user with no memory or order history.
+- **The transport is a seam, not a fork.** Both transports expose the same
+  `send_text`/`classify_send_error` and hand inbound messages to
+  `whatsapp_worker.enqueue_and_wake` in the same shape. Nothing above
+  `whatsapp/` may learn which one is running — `tests/test_local_transport.py`
+  §10 tokenises the local client and fails the build if it names the AI layer.
 - **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so

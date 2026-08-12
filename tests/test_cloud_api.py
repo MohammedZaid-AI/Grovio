@@ -23,6 +23,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import httpx
 
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
+# This suite IS the Cloud API. Pin it so an ambient
+# WHATSAPP_PROVIDER=local in the shell cannot silently retarget it.
+os.environ["WHATSAPP_PROVIDER"] = "cloud"
 
 import db
 
@@ -529,10 +532,12 @@ after = db.get_connection().execute(
 check("REPLAY: the same message id is never queued twice", before == after == 1)
 
 health = client.get("/health")
-check("readiness reports the messaging provider",
-      health.json()["checks"]["messaging"] == "whatsapp_cloud_api")
+check("readiness reports which transport is live",
+      health.json()["checks"]["messaging"] == "cloud")
 check("and whether it is configured",
       health.json()["checks"]["messaging_configured"] is True)
+check("and the API version it will call",
+      health.json()["checks"]["messaging_api_version"].startswith("v"))
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

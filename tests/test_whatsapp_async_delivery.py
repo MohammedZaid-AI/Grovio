@@ -24,6 +24,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 
+# Pin the Cloud API transport BEFORE anything imports it: section 10 asserts
+# Meta's error-code semantics through the worker, which only hold when the
+# worker is bound to that classifier. The local transport has its own retry
+# rules and its own suite (tests/test_local_transport.py).
+os.environ["WHATSAPP_PROVIDER"] = "cloud"
+
 # The messaging layer itself is covered by tests/test_cloud_api.py; this suite
 # proves the DELIVERY pipeline — ordering, dedup, retries, restart recovery —
 # is unchanged by the move to the Cloud API.

@@ -19,3 +19,8 @@ cryptography==48.0.0
 
 # WhatsApp Business Cloud API is called over plain HTTP via httpx — there is
 # no vendor SDK to install.
+#
+# WHATSAPP_PROVIDER=local (development only) additionally needs:
+#   pip install neonize qrcode
+# Deliberately NOT pinned here — production must not carry an
+# unofficial WhatsApp client. See CLAUDE.md.

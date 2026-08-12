@@ -10,3 +10,6 @@ __pycache__/
 # local .env backups — never commit
 .env.bak*
 .env.*.bak
+
+# Local WhatsApp Web session (WHATSAPP_PROVIDER=local). Contains device keys.
+.data/

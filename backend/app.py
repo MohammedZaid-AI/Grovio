@@ -31,19 +31,29 @@ def _startup_warnings():
             "print(Fernet.generate_key().decode())\""
         )
 
-    missing = [
-        name for name in ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
-                          "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN")
-        if not os.getenv(name)
-    ]
-    if missing:
-        # The last two fail CLOSED, so this is not cosmetic: without them every
-        # inbound webhook is rejected and the product is silent.
+    if whatsapp.PROVIDER == "local":
+        # Deliberate for development, and needs saying every single boot: this
+        # transport is unofficial and there is no webhook signature to verify.
         logger.warning(
-            f"WhatsApp Cloud API is incompletely configured — missing "
-            f"{', '.join(missing)}. Webhook verification and signature checks "
-            f"fail closed, so inbound messages will be REJECTED until these are set."
+            "WHATSAPP_PROVIDER=local — using an unofficial WhatsApp Web session. "
+            "DEVELOPMENT ONLY: the number can be banned, and inbound messages are "
+            "NOT cryptographically verified. Set WHATSAPP_PROVIDER=cloud for "
+            "production."
         )
+    else:
+        missing = [
+            name for name in ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+                              "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN")
+            if not os.getenv(name)
+        ]
+        if missing:
+            # The last two fail CLOSED, so this is not cosmetic: without them
+            # every inbound webhook is rejected and the product is silent.
+            logger.warning(
+                f"WhatsApp Cloud API is incompletely configured — missing "
+                f"{', '.join(missing)}. Webhook verification and signature checks "
+                f"fail closed, so inbound messages will be REJECTED until these are set."
+            )
 
     base_url = os.getenv("PUBLIC_BASE_URL", "")
     if not base_url:
@@ -74,7 +84,12 @@ async def lifespan(app: FastAPI):
     _startup_warnings()
     ai.providers.setup()
     await recover_pending()
+    # Last, so recovery is done before new messages can arrive. The Cloud API
+    # is stateless and this is a no-op; the local transport opens its socket
+    # here and may print a QR to scan.
+    await whatsapp.start()
     yield
+    await whatsapp.stop()
 
 
 app = FastAPI(title="Food Concierge", lifespan=lifespan)
@@ -106,9 +121,9 @@ def health():
 
     checks["encryption"] = "ok" if crypto.is_configured() else "unconfigured"
     checks["providers"] = len(ai.providers.registry.available_kinds())
-    checks["messaging"] = "whatsapp_cloud_api"
+    checks["messaging"] = whatsapp.PROVIDER
     checks["messaging_configured"] = whatsapp.is_configured()
-    checks["meta_api_version"] = whatsapp.api_version()
+    checks["messaging_api_version"] = whatsapp.api_version()
 
     ready = (checks["database"] == "ok" and checks["encryption"] == "ok"
              and checks["messaging_configured"])
