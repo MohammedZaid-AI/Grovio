@@ -150,6 +150,15 @@ async def _process_inbound(msg):
             reply = MEDIA_REDIRECT_MESSAGE
         else:
             reply = await respond(phone=phone, message=body)
+
+        if reply is None:
+            # Deliberate silence — the concierge decided this message gets no
+            # answer at all (an unauthorised sender). Distinct from an empty
+            # reply, which is a bug and still gets the fallback. Marking it DONE
+            # with no parts keeps dedup and recovery working.
+            db.save_reply_and_finish(inbound_id, phone, [])
+            return
+
         if not reply:
             reply = _FALLBACK_REPLY
         parts = _split(reply)

@@ -168,8 +168,13 @@ TOOLS = [
                         ),
                     },
                     "max_price": {
-                        "type": "number",
-                        "description": "Optional budget ceiling for one item.",
+                        # null is permitted because models routinely emit an
+                        # explicit null for an omitted optional argument, and
+                        # the provider validates the model's OWN output against
+                        # this schema — a bare "number" makes it reject the call
+                        # with a 400 before we ever see it, killing the turn.
+                        "type": ["number", "null"],
+                        "description": "Optional budget ceiling for one item. Omit if unknown.",
                     },
                 },
                 "required": ["query", "kind"],
@@ -192,7 +197,10 @@ TOOLS = [
                         "type": "integer",
                         "description": "The option's number exactly as shown to the user (1, 2, 3…).",
                     },
-                    "quantity": {"type": "integer", "description": "How many. Defaults to 1."},
+                    # Nullable for the same reason as max_price: an explicit
+                    # null on an omitted optional argument must not 400.
+                    "quantity": {"type": ["integer", "null"],
+                                 "description": "How many. Defaults to 1."},
                 },
                 "required": ["selection"],
             },
@@ -253,7 +261,7 @@ TOOLS = [
                 "type": "object",
                 "properties": {
                     "provider": {
-                        "type": "string",
+                        "type": ["string", "null"],
                         "description": "Platform name if they named one; omit otherwise.",
                     }
                 },
@@ -307,7 +315,8 @@ TOOLS = [
                         "type": "string",
                         "enum": ["ORDERED", "LIKED", "DISLIKED", "REJECTED"],
                     },
-                    "venue": {"type": "string", "description": "Where it came from, if known."},
+                    "venue": {"type": ["string", "null"],
+                              "description": "Where it came from, if known."},
                 },
                 "required": ["item", "sentiment"],
             },

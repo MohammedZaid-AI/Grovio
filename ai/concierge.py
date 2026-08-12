@@ -8,14 +8,27 @@ Thin by design: run the planner, persist the turn, keep failures friendly.
 """
 from ai import identity, memory
 from ai.planner import plan
+from core import authz
 from core.logger import logger
 
 EMPTY_MESSAGE_REPLY = "Tell me what you're in the mood for and I'll take it from there 🙂"
 ERROR_REPLY = "Something went wrong on my end — mind trying that again?"
 
 
-async def respond(phone: str, message: str) -> str:
-    """Return the assistant's reply to one inbound user message."""
+async def respond(phone: str, message: str):
+    """Return the assistant's reply to one inbound user message.
+
+    Returns None when this number may not use the service — meaning SAY
+    NOTHING, not "you're not allowed". Silence matters: on a linked personal
+    device every message the number receives arrives here, so a refusal would
+    auto-reply to friends and family who never asked to talk to a bot.
+    """
+    if not authz.is_authorized_user(phone):
+        # FAILS CLOSED: an unset AUTHORIZED_PHONES denies everyone. Logged at
+        # info because on a linked device this is normal traffic, not an attack.
+        logger.info(f"[concierge] ignoring {phone} — not in AUTHORIZED_PHONES")
+        return None
+
     message = (message or "").strip()
     if not message:
         return EMPTY_MESSAGE_REPLY

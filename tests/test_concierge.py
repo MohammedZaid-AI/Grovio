@@ -14,6 +14,10 @@ import tempfile
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+# Authorisation is enforced in concierge.respond; these suites are about
+# everything else, so put their numbers on the allowlist.
+os.environ["AUTHORIZED_PHONES"] = "919876500000,919800000001"
+
 import db
 
 _tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
@@ -306,6 +310,68 @@ check(f"no Swiggy references outside ai/providers/ {leaks or ''}", not leaks)
 allowed = (root / "ai" / "providers" / "swiggy.py").read_text(encoding="utf-8")
 check("the provider adapter does own the platform detail", "SwiggyInstamart" in allowed)
 
+
+# ----------------------------------------------------------------------
+print("\n[12] Authorization is ENFORCED, and silence is the refusal")
+# This shipped unwired: core/authz.is_authorized_user had no callers anywhere,
+# so every number that reached the transport got an AI reply. On a linked
+# personal device that means friends and family, because a linked device
+# receives every message the number gets.
+from core import authz
+
+_saved_allow = os.environ.get("AUTHORIZED_PHONES", "")
+os.environ["AUTHORIZED_PHONES"] = "919800000001"
+
+planner.get_llm = lambda: FakeLLM([LLMReply(text="here you go")])
+check("an allowed number gets a normal reply",
+      run(concierge.respond("919800000001", "hi")) == "here you go")
+
+check("a stranger gets SILENCE, not a refusal",
+      run(concierge.respond("910000009999", "hi")) is None)
+check("silence beats a refusal message — no auto-reply to someone's family",
+      run(concierge.respond("910000009999", "hi")) is None)
+
+os.environ["AUTHORIZED_PHONES"] = ""
+check("FAILS CLOSED — an unset allowlist denies everyone",
+      run(concierge.respond("919800000001", "hi")) is None)
+
+os.environ["AUTHORIZED_PHONES"] = "+91 98000 00001"
+planner.get_llm = lambda: FakeLLM([LLMReply(text="ok")])
+check("allowlist entries match on digits, whatever the formatting",
+      run(concierge.respond("919800000001", "hi")) == "ok")
+os.environ["AUTHORIZED_PHONES"] = _saved_allow or "919800000001"
+
+# The worker must treat None as "send nothing", not as an empty reply.
+import backend.whatsapp_worker as _worker
+
+os.environ["AUTHORIZED_PHONES"] = "919800000001"
+inbound_id, _ = db.enqueue_inbound_message("SILENT-1", "910000009999", "hello?")
+run(_worker._process_inbound({"id": inbound_id, "phone": "910000009999",
+                              "body": "hello?", "num_media": 0}))
+queued = db.get_pending_outbound("910000009999")
+check("an unauthorised message queues NO reply at all", queued == [])
+row = db.get_connection().execute(
+    "SELECT status FROM whatsapp_inbound WHERE id = ?", (inbound_id,)).fetchone()
+check("but is marked DONE, so dedup and recovery still work", row[0] == "DONE")
+os.environ["AUTHORIZED_PHONES"] = _saved_allow
+
+# ----------------------------------------------------------------------
+print("\n[13] Optional tool arguments accept an explicit null")
+# Groq/OpenAI validate the model's OWN generated tool call against the schema we
+# send. Models routinely emit `"max_price": null` for an omitted optional, and a
+# bare {"type": "number"} makes the provider 400 the call before we ever see it,
+# killing the whole turn. Observed live: tool_use_failed on find_food.
+for tool in planner.TOOLS:
+    fn = tool["function"]
+    params = fn.get("parameters", {})
+    required = set(params.get("required", []))
+    for name, spec in (params.get("properties") or {}).items():
+        if name in required:
+            continue
+        kind = spec.get("type")
+        check(f"{fn['name']}.{name} (optional) accepts null",
+              isinstance(kind, list) and "null" in kind
+)
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:

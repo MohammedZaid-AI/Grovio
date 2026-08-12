@@ -23,6 +23,9 @@ from cryptography.fernet import Fernet
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
+# concierge.respond enforces the allowlist; these suites are about the
+# journey, not authorisation, so put their numbers on it.
+os.environ["AUTHORIZED_PHONES"] = "919911100001,919911100002"
 os.environ.setdefault("WHATSAPP_ACCESS_TOKEN", "test-token")
 os.environ.setdefault("WHATSAPP_PHONE_NUMBER_ID", "555000111")
 

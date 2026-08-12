@@ -15,6 +15,9 @@ import tempfile
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# concierge.respond enforces the allowlist; these suites are about the
+# journey, not authorisation, so put their numbers on it.
+os.environ["AUTHORIZED_PHONES"] = "919922200001"
 
 from cryptography.fernet import Fernet
 
