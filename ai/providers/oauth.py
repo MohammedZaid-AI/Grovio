@@ -437,6 +437,16 @@ async def begin(phone: str, provider: str, config: OAuthConfig,
         params["scope"] = " ".join(config.scopes)
 
     logger.info(f"[oauth] link started provider={provider} state={state[:8]}…")
+    callback = redirect_uri(provider)
+    if callback.startswith("http://localhost"):
+        # The commonest dead end in local development: the link is delivered
+        # over WhatsApp, so it gets tapped on the PHONE — where localhost is the
+        # phone. The provider redirects, nothing answers, and the flow dies
+        # silently with the state left unclaimed.
+        logger.warning(
+            f"[oauth] callback is {callback} — this link MUST be opened in a "
+            f"browser on THIS machine. Tapping it on a phone cannot work."
+        )
     return f"{metadata['authorization_endpoint']}?{urlencode(params)}"
 
 
