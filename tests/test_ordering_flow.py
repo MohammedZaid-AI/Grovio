@@ -925,6 +925,47 @@ class BrokenCoupons(CouponClient):
 order = run(food_provider(BrokenCoupons()).place(offers[0], 1, SearchContext()))
 check("a broken coupon service never breaks ordering", order.status == "PLACED")
 check("and claims no saving", not order.note)
+# ======================================================================
+print("\n[17] REGRESSION: the picker lists APPS, not payment methods")
+# Captured live 2026-08-16. Each entry's id ("gpay://upi/") is the intentApp;
+# the method is always "UPI". Sending the id as the method got:
+#   Unsupported payment method "gpay://upi/". Use "UPI" with
+#   intentApp/generateUPIQR for UPI payments, or "Cash" for cash on delivery.
+LIVE_PICKER = {"allMethods": [
+    {"id": "gpay://upi/", "displayName": "Google Pay"},
+    {"id": "phonepe://upi/", "displayName": "PhonePe UPI"},
+    {"id": "paytmmp://upi/", "displayName": "Paytm UPI"},
+    {"displayName": "Pay with QR", "generateUPIQR": True},
+]}
+methods = swiggy_food._payment_methods(LIVE_PICKER)
+
+check("every entry resolves to a method Swiggy accepts",
+      all(m["method"] in ("UPI", "Cash") for m in methods))
+check("the app id becomes the intentApp, not the method",
+      methods[0]["method"] == "UPI" and methods[0]["intent_app"] == "gpay://upi/")
+check("the human label is preserved", methods[0]["label"] == "Google Pay")
+check("the QR option asks for a QR, with no intentApp",
+      methods[-1]["qr"] is True and methods[-1]["intent_app"] is None)
+check("the QR option is still UPI", methods[-1]["method"] == "UPI")
+
+check("cash is picked up from the cod field",
+      swiggy_food._payment_methods({"cod": True})[0]["method"] == "Cash")
+check("cash wins over UPI when both are offered",
+      swiggy_food._payment_methods(
+          {"allMethods": [{"id": "gpay://upi/", "displayName": "GPay"}], "cod": True}
+      )[-1]["method"] == "Cash")
+
+check("an entry with nothing usable is dropped, not sent and rejected",
+      swiggy_food._payment_methods({"allMethods": [{"displayName": "Mystery"}]}) == [])
+check("an unreadable payload yields nothing", swiggy_food._payment_methods(None) == [])
+
+# End to end: the live shape must produce a call Swiggy accepts.
+live = FoodClient(payment_options=LIVE_PICKER, checkout=Result(structured={
+    "orderId": "ORD-L", "paasId": "P-L", "bridgeUrl": "https://pay/x"}))
+run(food_provider(live).place(offers[0], 1, SearchContext()))
+sent = live.paid_with[0]
+check("checkout is told UPI, never an app id", sent["method"] == "UPI")
+check("and given the app to open", sent["intent_app"] == "gpay://upi/")
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

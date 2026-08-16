@@ -104,49 +104,82 @@ def _is_payment_problem(text: str) -> bool:
     return any(needle in lowered for needle in _PAYMENT_PROBLEMS)
 
 
+# The ONLY values place_food_order accepts. Swiggy says so itself when you send
+# anything else: 'Unsupported payment method "gpay://upi/". Use "UPI" with
+# intentApp/generateUPIQR for UPI payments, or "Cash" for cash on delivery.'
+#
+# The picker lists APPS — Google Pay, PhonePe, BHIM — and each app's id
+# ("gpay://upi/") is the intentApp, NOT the method. Passing that id through as
+# the method is exactly the mistake that error is describing.
+UPI = "UPI"
+CASH = "Cash"
+
+
+def _payment_method_of(entry: dict):
+    """(method, intent_app, qr) for one picker entry, or None if unusable."""
+    declared = str(_first(entry, "paymentMethod", "group", "type") or "").upper()
+    if declared in ("CASH", "COD"):
+        return CASH, None, False
+
+    if bool(entry.get("generateUPIQR")):
+        return UPI, None, True
+
+    intent = _first(entry, "intentApp", "id")
+    if declared == "UPI" or intent:
+        return UPI, str(intent) if intent else None, False
+
+    # A QR option often carries no id at all; the label is the only signal.
+    label = str(_first(entry, "displayName", "name", "label") or "")
+    if "qr" in label.lower():
+        return UPI, None, True
+    return None
+
+
 def _payment_methods(payload: dict) -> list:
     """Flatten the payment picker into [{label, method, intent_app, qr}].
 
     Swiggy publishes `allMethods` explicitly "for headless clients", which is
     what a chat window is. Mobile/desktop lists are read as a fallback, and cash
     only appears if THIS cart still offers it — it is switched off per cart.
+
+    Anything that does not resolve to UPI or Cash is DROPPED rather than sent
+    and rejected at checkout.
     """
     if not isinstance(payload, dict):
         return []
     methods = []
 
-    def add(label, method, intent_app=None, qr=False):
-        if method:
-            methods.append({"label": str(label or method), "method": str(method),
+    def add(label, resolved):
+        if resolved:
+            method, intent_app, qr = resolved
+            methods.append({"label": str(label or method), "method": method,
                             "intent_app": intent_app, "qr": qr})
 
     for entry in payload.get("allMethods") or []:
         if isinstance(entry, str):
-            add(entry, entry)
+            # A bare string is only usable if it already IS a valid method.
+            if entry.strip().upper() in ("UPI", "CASH", "COD"):
+                add(entry, (CASH if entry.strip().upper() != "UPI" else UPI, None, False))
         elif isinstance(entry, dict):
-            group = _first(entry, "paymentMethod", "group", "type", "id")
-            add(_first(entry, "displayName", "name", "label") or group, group,
-                intent_app=entry.get("intentApp")
-                or (entry.get("id") if str(group).upper() == "UPI" else None),
-                qr=bool(entry.get("generateUPIQR")))
+            add(_first(entry, "displayName", "name", "label"), _payment_method_of(entry))
 
     platforms = payload.get("platforms") or {}
     if not methods and isinstance(platforms, dict):
         for entry in ((platforms.get("mobile") or {}).get("methods") or []):
             if isinstance(entry, dict) and entry.get("id"):
-                add(_first(entry, "displayName", "name") or entry["id"], "UPI",
-                    intent_app=entry["id"])
+                add(_first(entry, "displayName", "name") or entry["id"],
+                    (UPI, str(entry["id"]), False))
         for entry in ((platforms.get("desktop") or {}).get("methods") or []):
             if isinstance(entry, dict):
                 add(_first(entry, "displayName", "name") or "Scan a QR to pay",
-                    "UPI", qr=True)
+                    (UPI, None, True))
 
     cod = payload.get("cod")
     if cod:
         label = "Cash on delivery"
         if isinstance(cod, dict):
             label = _first(cod, "displayName", "label") or label
-        add(label, "Cash")
+        add(label, (CASH, None, False))
     return methods
 
 
@@ -664,9 +697,14 @@ class SwiggyFoodProvider:
 
         if not options:
             return fallback
-        logger.info(f"[{self.name}] payment options: {[o['label'] for o in options]}")
+        # Log the method and intentApp, not just the label. A pretty label told
+        # us nothing when the method underneath it was wrong.
+        logger.info(
+            f"[{self.name}] payment options: "
+            f"{[(o['label'], o['method'], o['intent_app'], o['qr']) for o in options]}"
+        )
 
-        cash = next((o for o in options if o["method"].lower() in ("cash", "cod")), None)
+        cash = next((o for o in options if o["method"] == mcp.PAYMENT_METHOD), None)
         return cash or options[0]
 
     async def payment_status(self, order: PlacedOrder, ctx: SearchContext) -> str:
