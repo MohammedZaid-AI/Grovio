@@ -401,8 +401,84 @@ for tool in planner.TOOLS:
             continue
         kind = spec.get("type")
         check(f"{fn['name']}.{name} (optional) accepts null",
-              isinstance(kind, list) and "null" in kind
-)
+              isinstance(kind, list) and "null" in kind)
+# ======================================================================
+print("\n[14] Recommendations behave like a friend, not a search box")
+FRIEND = "919555000111"
+memory.remember_fact(FRIEND, "budget", "400")
+memory.remember_food(FRIEND, "Chicken Biryani", memory.ORDERED, venue="Meghana")
+friend = memory.load(FRIEND)
+
+
+def dish(title, venue, price=300, rating=None, eta=None):
+    return offer(title, venue=venue, price=price, rating=rating, eta_minutes=eta,
+                 id=f"{venue}:{title}")
+
+
+# Ratings on a delivery app cluster in a narrow band. Adding the raw number made
+# rating dominate the total while barely separating anything.
+ranked = recommendation.rank([
+    dish("Pizza A", "Alpha", rating=4.6, eta=20),
+    dish("Pizza B", "Beta", rating=4.0, eta=20),
+], friend)
+check("a 4.6 beats a 4.0 decisively", ranked[0].offer.venue == "Alpha")
+check("and the gap is meaningful, not noise",
+      ranked[0].score - ranked[1].score > 0.9)
+
+# A friend suggests somewhere further when it is genuinely better.
+further = recommendation.rank([
+    dish("Near Pizza", "Close", rating=3.9, eta=15),
+    dish("Far Pizza", "Distant", rating=4.7, eta=40),
+], friend)
+check("further-but-better outranks near-but-average",
+      further[0].offer.venue == "Distant")
+check("and the trade-off is SPOKEN, not buried",
+      any("rather than round the corner" in r for r in further[0].reasons))
+check("the reason names the real ETA", any("40 min" in r for r in further[0].reasons))
+
+# Distance is never a penalty — only closeness is a bonus.
+slow = dish("Slow", "S", rating=4.0, eta=90)
+fast = dish("Fast", "F", rating=4.0, eta=10)
+check("being far away is never punished, only nearness rewarded",
+      recommendation._speed_score(slow) == 0.0
+      and recommendation._speed_score(fast) > 0)
+
+# Five dishes from one kitchen is a menu, not a choice.
+same = [dish(f"Pizza {i}", "OnePlace", rating=4.5, eta=20) for i in range(5)]
+elsewhere = [dish("Burger", "Other", rating=4.4, eta=25),
+             dish("Pasta", "Third", rating=4.4, eta=25)]
+varied = recommendation.rank(same + elsewhere, friend, limit=4)
+venues = [r.offer.venue for r in varied]
+check("no more than two dishes from one venue",
+      venues.count("OnePlace") <= recommendation.MAX_PER_VENUE)
+check("other places get a look in", len(set(venues)) >= 2)
+
+# Novelty, gently — it breaks ties, it does not steer the list.
+novel = recommendation.rank([
+    dish("Chicken Biryani", "Meghana", rating=4.2, eta=25),
+    dish("Thai Green Curry", "New Place", rating=4.2, eta=25),
+], friend)
+check("the regular order still wins on a tie", novel[0].offer.title == "Chicken Biryani")
+check("but the new thing is flagged as new",
+      any("haven't tried" in r for r in novel[1].reasons))
+
+# Everything a reason says still has to be true.
+plain = recommendation.rank([dish("Mystery", "X", rating=None, eta=None)], friend)
+check("no rating means no rating is claimed",
+      not any("rated" in r for r in plain[0].reasons))
+check("no ETA means no ETA is claimed",
+      not any("min" in r for r in plain[0].reasons))
+check("more options are offered by default", recommendation.rank.__defaults__[0] == 6)
+
+# Two options scoring 2.65 and 2.6500000000000004 are the same option to anyone
+# eating dinner. Letting float noise pick the order makes it unreproducible.
+tie_a = dish("Tie A", "First", rating=4.3, eta=18)
+tie_b = dish("Tie B", "Second", rating=4.4, eta=26)
+order = [r.offer.title for r in recommendation.rank([tie_a, tie_b], friend)]
+check("a near-tie keeps the provider's own order, every time",
+      all([r.offer.title for r in recommendation.rank([tie_a, tie_b], friend)] == order
+          for _ in range(5)))
+check("and that order is the input order, not float luck", order[0] == "Tie A")
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:

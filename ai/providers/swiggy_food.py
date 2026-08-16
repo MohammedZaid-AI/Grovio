@@ -181,6 +181,40 @@ def _price_of(entry):
     return None
 
 
+# How far to page for more candidates. Each page is one round trip, so this is
+# a trade between choice and how long the user waits for a reply.
+MAX_EXTRA_PAGES = 2
+MIN_CANDIDATES = 20
+
+
+def _entry_key(entry):
+    """What makes a dish the same dish, for de-duplication."""
+    if not isinstance(entry, dict):
+        return None
+    return (
+        str(_first(entry, "menu_item_id", "itemId", "menuItemId", "dishId", "id") or ""),
+        str(_first(entry, "restaurant_id", "restaurantId", "resId") or ""),
+    )
+
+
+def _merge(payload: dict, extra: list) -> dict:
+    """Append another page, skipping anything already present.
+
+    A server may ignore `offset`, or overlap pages, and listing the same pizza
+    three times is worse than offering fewer choices.
+    """
+    if not isinstance(payload, dict):
+        return {"items": list(extra)}
+
+    for key in ("items", "dishes", "results", "menuItems", "cards", "restaurants"):
+        current = payload.get(key)
+        if isinstance(current, list):
+            seen = {_entry_key(e) for e in current}
+            fresh = [e for e in extra if _entry_key(e) not in seen]
+            return {**payload, key: current + fresh}
+    return {**payload, "items": list(extra)}
+
+
 def _entries(payload):
     """Flatten a menu search into (item, restaurant) pairs.
 
@@ -284,6 +318,7 @@ class SwiggyFoodProvider:
             client = await self._session()
             address_id = ctx.address_id or await client.default_address_id()
             payload = await client.search_dishes(query, address_id)
+            payload = await self._widen(client, query, address_id, payload, ctx.limit)
         except (mcp.ToolSurfaceMismatch, mcp.NoDeliveryAddress) as e:
             self._drop_session()
             logger.error(f"[{self.name}] {e}")
@@ -473,6 +508,39 @@ class SwiggyFoodProvider:
                               "total", "amount")) or offer.price,
             items=(offer.title,),
         )
+
+    async def _widen(self, client, query, address_id, payload, wanted):
+        """Pull more pages so ranking has a real field to choose from.
+
+        One page is ten dishes, often several from the same kitchen — nothing to
+        pick between, and no chance of offering somewhere slightly further that
+        is genuinely better. Extra pages are best effort: a failure keeps
+        whatever the first page returned.
+        """
+        seen = len(_entries(payload))
+        offset = seen
+        for _ in range(MAX_EXTRA_PAGES):
+            if seen >= max(wanted * 3, MIN_CANDIDATES):
+                break
+            try:
+                more = await client.search_dishes(query, address_id, offset=offset)
+            except Exception as e:
+                logger.info(f"[{self.name}] could not widen the search: {e!r}")
+                break
+
+            extra = mcp.items_of(more, "items", "dishes", "results", "menuItems",
+                                 "cards", "restaurants")
+            if not extra:
+                break
+            payload = _merge(payload, extra)
+            grown = len(_entries(payload))
+            if grown <= seen:
+                break        # the page was all duplicates; more paging is waste
+            offset += len(extra)
+            seen = grown
+
+        logger.info(f"[{self.name}] {seen} candidates for {query!r}")
+        return payload
 
     async def _payment_choice(self, client, address_id: str) -> dict:
         """Pick how to pay, from what the platform actually offers.
