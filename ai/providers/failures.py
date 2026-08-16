@@ -37,7 +37,17 @@ class Failure(str, Enum):
     VALIDATION = "validation"          # we sent something they rejected
     CHECKOUT = "checkout"              # the order itself was refused
     ITEM_UNAVAILABLE = "item_unavailable"
+    PAYMENT_UNAVAILABLE = "payment_unavailable"   # the payment method is refused
     UNKNOWN = "unknown"
+
+
+# Failures no amount of retrying can clear. Offering "shall I try again?" for
+# one of these is the same lie as telling a user a working provider is down.
+NO_RETRY = frozenset({
+    Failure.CONFIGURATION,
+    Failure.PAYMENT_UNAVAILABLE,
+    Failure.AUTHORIZATION,
+})
 
 
 # What the model is told. Written as fact + intent, never as a canned sentence,
@@ -96,6 +106,14 @@ INSTRUCTION = {
     Failure.ITEM_UNAVAILABLE: (
         "ITEM UNAVAILABLE right now — sold out, or the store is closed. Say so "
         "and offer the other options."
+    ),
+    Failure.PAYMENT_UNAVAILABLE: (
+        "PAYMENT METHOD REFUSED by the platform — the way we pay isn't accepted "
+        "right now, and this has nothing to do with the food or the user. "
+        "Nothing was charged and the order was NOT placed. Say plainly that you "
+        "can't complete the payment at the moment, that their choice was fine, "
+        "and that they can order it in the provider's own app meanwhile. Do NOT "
+        "offer to try again — retrying cannot change it."
     ),
     Failure.UNKNOWN: (
         "UNEXPECTED FAILURE. Apologise in one line, offer to try again, and do "

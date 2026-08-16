@@ -30,6 +30,7 @@ from ai.providers.base import (
     UNKNOWN,
 )
 from ai.providers import swiggy
+from ai.providers.failures import Failure
 from ai.providers.oauth import OAuthConfig
 from integrations.swiggy import swiggy_food_mcp as mcp
 
@@ -86,6 +87,20 @@ _ITEM_PROBLEMS = (
 def _is_item_problem(text: str) -> bool:
     lowered = (text or "").lower()
     return any(needle in lowered for needle in _ITEM_PROBLEMS)
+
+
+# The platform refusing our payment method is not the item's fault and not the
+# user's. Observed live: "To minimise contact between you and the delivery
+# partner, cash option is temporarily disabled." Retrying repeats it forever.
+_PAYMENT_PROBLEMS = (
+    "cash option", "cash on delivery", "payment method", "payment option",
+    "payment mode", "cod is", "cod not",
+)
+
+
+def _is_payment_problem(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(needle in lowered for needle in _PAYMENT_PROBLEMS)
 
 
 def _error_text(result) -> str:
@@ -350,6 +365,13 @@ class SwiggyFoodProvider:
         if getattr(result, "isError", False):
             detail = _error_text(result)
             logger.error(f"[{self.name}] checkout failed: {detail}")
+            if _is_payment_problem(detail):
+                # Not the item, not the user — the platform will not take the
+                # payment method we send. Flagged so the layers above stop
+                # offering a retry that cannot possibly work.
+                error = ProviderError(f"payment method refused: {detail[:120]}")
+                error.failure = Failure.PAYMENT_UNAVAILABLE
+                raise error
             if _is_item_problem(detail):
                 raise ItemUnavailable(f"checkout rejected {item_id}: item problem")
             raise ProviderError("order rejected at checkout")

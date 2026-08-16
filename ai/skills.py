@@ -396,10 +396,14 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
         if state.state == conversation.State.ORDER_FAILED:
             return _exhausted(user, state)
 
-        if failure is Failure.CONFIGURATION:
-            # Retrying cannot help, so do not offer it.
+        if failure in failures.NO_RETRY:
+            # Retrying cannot change any of these — a refused payment method, a
+            # missing endpoint, a permission we don't have. Offering another
+            # attempt would be the same lie as calling a working provider down.
+            conversation.cancel_pending(user.phone)
             return SkillResult(
-                SkillStatus.CONFIGURATION,
+                SkillStatus.CONFIGURATION if failure is Failure.CONFIGURATION
+                else SkillStatus.ERROR,
                 f"{instruction} Nothing was charged for '{offer.title}'.",
             )
         return SkillResult(

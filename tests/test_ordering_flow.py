@@ -652,6 +652,68 @@ try:
 except OSError:
     pass
 
+# ======================================================================
+print("\n[13] A refused PAYMENT METHOD is never retried")
+# Observed live: the cart built perfectly, then Swiggy refused checkout with
+# "To minimise contact between you and the delivery partner, cash option is
+# temporarily disabled." Asking "shall I try again?" for that is a lie — it
+# fails identically every time.
+from ai.providers import failures
+from ai.providers.failures import Failure
+
+check("Swiggy's exact wording is recognised",
+      swiggy_food._is_payment_problem(
+          "Failed to place order: To minimise contact between you and the "
+          "delivery partner, cash option is temporarily disabled."))
+check("a sold-out message is NOT mistaken for a payment problem",
+      not swiggy_food._is_payment_problem("Item is Out of Stock"))
+check("payment failures are in the no-retry set",
+      Failure.PAYMENT_UNAVAILABLE in failures.NO_RETRY)
+check("item problems ARE still retryable",
+      Failure.ITEM_UNAVAILABLE not in failures.NO_RETRY)
+
+refused = FoodClient(checkout=Result(
+    is_error=True,
+    text="Failed to place order: cash option is temporarily disabled."))
+try:
+    run(food_provider(refused).place(offers[0], 1, SearchContext()))
+    check("checkout raises on a refused payment method", False)
+except ProviderError as e:
+    check("checkout raises on a refused payment method", True)
+    check("and is classified as PAYMENT_UNAVAILABLE",
+          failures.classify(e) is Failure.PAYMENT_UNAVAILABLE)
+
+instruction = failures.INSTRUCTION[Failure.PAYMENT_UNAVAILABLE]
+check("the model is told NOT to offer a retry", "Do NOT offer to try again" in instruction)
+check("and told nothing was charged", "Nothing was charged" in instruction)
+check("and told it is not the user's fault", "nothing to do with" in instruction)
+
+# Through the skills layer: the pending order is dropped, not left armed.
+phone = "919177700001"
+registry.clear()
+spy = Spy("spy_food", ProviderKind.RESTAURANT)
+
+
+async def _refuse(offer_, quantity, ctx):
+    error = ProviderError("payment method refused: cash option is temporarily disabled")
+    error.failure = Failure.PAYMENT_UNAVAILABLE
+    raise error
+
+
+spy.place = _refuse
+registry.register(spy)
+identity.load(phone)
+show(phone, "spy_food", ProviderKind.RESTAURANT.value,
+     [("IT-1", "Tomatoes Pizza", "La Pino'z", 97, None)])
+
+result = run(skills.place_order(identity.load(phone), 1))
+check("the user is told plainly, not asked to retry",
+      "try again" not in result.message.lower().replace("do not offer to try again", ""))
+state = conversation.load(phone)
+check("no pending order is left armed", state.pending is None)
+check("state is NOT left awaiting a retry",
+      state.state != conversation.State.AWAITING_RETRY_CONFIRMATION)
+
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:
@@ -659,3 +721,4 @@ try:
 except OSError:
     pass
 sys.exit(1 if _failed else 0)
+
