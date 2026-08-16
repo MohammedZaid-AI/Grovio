@@ -93,6 +93,21 @@ RESTAURANT_PAYLOAD = {
     ]
 }
 
+# What search_menu ACTUALLY returns. Key names captured from the live server on
+# 2026-08-16 — flat entries, snake_case ids, no nested restaurant object and no
+# ETA field at all. Every dish was being dropped because `menu_item_id` was not
+# in the id lookup, and `restaurant_name` was not in the venue lookup.
+LIVE_MENU_PAYLOAD = {
+    "items": [
+        {"name": "Chicken Biryani", "price": 340, "menu_item_id": "MI-1",
+         "inStock": True, "imageUrl": "x.jpg", "restaurant_id": "R-1",
+         "restaurant_name": "Meghana Foods", "rating": 4.6, "hasAddons": True},
+        {"name": "Mutton Biryani", "price": 280, "menu_item_id": "MI-2",
+         "inStock": True, "imageUrl": "y.jpg", "restaurant_id": "R-2",
+         "restaurant_name": "Empire Restaurant", "rating": 4.3},
+    ]
+}
+
 # The other shape Swiggy uses: restaurant cards, each holding its dishes.
 GROUPED_PAYLOAD = {
     "cards": [
@@ -215,6 +230,21 @@ summary = offers[0].summary()
 check("summary shows a ₹ price", "₹340" in summary)
 check("summary never says N/A", "N/A" not in summary)
 check("summary carries the rating and ETA", "4.6" in summary and "22 min" in summary)
+
+print("\n[1b] REGRESSION: the shape search_menu really returns")
+live = run(food_provider(FoodClient(LIVE_MENU_PAYLOAD)).search("biryani", SearchContext(limit=10)))
+check("live-shape dishes are orderable (menu_item_id)", len(live) == 2)
+check("restaurant_id is read", swiggy_food._unpack_id(live[0].id)[0] == "R-1")
+check("menu_item_id is read", swiggy_food._unpack_id(live[0].id)[1] == "MI-1")
+check("venue is the RESTAURANT, not the dish's own name",
+      live[0].venue == "Meghana Foods")
+check("the dish name stays the title", live[0].title == "Chicken Biryani")
+check("price is read", live[0].price == 340)
+check("rating is read", live[0].rating == 4.6)
+check("no ETA field means no ETA — never invented", live[0].eta_minutes is None)
+check("summary shows venue and price, omits the missing ETA",
+      "Meghana Foods" in live[0].summary() and "₹340" in live[0].summary()
+      and "min" not in live[0].summary())
 
 grouped = run(food_provider(FoodClient(GROUPED_PAYLOAD)).search("biryani", SearchContext()))
 check("REGRESSION: restaurant-grouped cards are flattened, not dropped", len(grouped) == 1)

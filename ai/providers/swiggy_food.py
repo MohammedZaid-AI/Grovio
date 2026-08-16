@@ -143,7 +143,11 @@ def _entries(payload):
             pairs.extend((item, entry) for item in nested if isinstance(item, dict))
         else:
             restaurant = entry.get("restaurant")
-            pairs.append((entry, restaurant if isinstance(restaurant, dict) else entry))
+            # {} rather than `entry` when there is no nested restaurant object:
+            # falling back to the entry itself would resolve the RESTAURANT name
+            # from the dish's own `name`, labelling every option with its own
+            # title. The dish-level keys are read first anyway.
+            pairs.append((entry, restaurant if isinstance(restaurant, dict) else {}))
     return pairs
 
 
@@ -234,7 +238,11 @@ class SwiggyFoodProvider:
             # The restaurant id may be on the dish or on the card grouping it.
             restaurant_id = (_first(entry, "restaurantId", "restaurant_id", "resId")
                              or _first(restaurant, "restaurantId", "resId", "id"))
-            item_id = _first(entry, "itemId", "menuItemId", "dishId", "id")
+            # `menu_item_id` is what search_menu actually returns — verified
+            # against the live server 2026-08-16. Its absence from this list is
+            # why every dish was dropped as "not orderable".
+            item_id = _first(entry, "menu_item_id", "itemId", "menuItemId",
+                             "dishId", "id")
             if not (title and restaurant_id and item_id):
                 # Cannot be ordered without both ids, so it is not an offer.
                 continue
@@ -254,7 +262,7 @@ class SwiggyFoodProvider:
                 title=str(title),
                 # Rating and ETA describe the restaurant, so they usually live on
                 # the card rather than the dish. Check both.
-                venue=(_first(entry, "restaurantName", "storeName")
+                venue=(_first(entry, "restaurant_name", "restaurantName", "storeName")
                        or _first(restaurant, "name", "restaurantName", "storeName")),
                 price=price,
                 rating=_rating(entry) or _rating(restaurant),
@@ -265,6 +273,16 @@ class SwiggyFoodProvider:
                 tags=tuple(t for t in (_first(entry, "cuisine", "category", "variantName"),) if t),
             ))
 
+        if offers:
+            # One line naming what the user is about to be shown. Swiggy menu
+            # payloads are reported to carry paise in some fields, and this is
+            # how we find out for certain rather than guessing a /100.
+            first = offers[0]
+            logger.info(
+                f"[{self.name}] {len(offers)} offers — first: {first.title!r} "
+                f"from {first.venue!r} price={first.price} rating={first.rating} "
+                f"eta={first.eta_minutes}"
+            )
         if unpriced:
             # A menu item always has a price. If we couldn't read one, OUR key
             # list is wrong — say so loudly instead of shipping blank options.
