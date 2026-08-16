@@ -150,6 +150,54 @@ def _payment_methods(payload: dict) -> list:
     return methods
 
 
+def _coupons(payload: dict) -> list:
+    """Flatten the offers list into [{code, saving, minimum, label}].
+
+    Shapes vary, so this reads several plausible key names and keeps only
+    coupons with a code — an offer we cannot apply is not an offer.
+    """
+    if not isinstance(payload, dict):
+        return []
+
+    entries = mcp.items_of(payload, "coupons", "offers", "items", "results", "data")
+    found = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        code = _first(entry, "couponCode", "coupon_code", "code", "offerCode")
+        if not code:
+            continue
+        found.append({
+            "code": str(code),
+            # What it takes off. Unknown stays 0 rather than becoming a guess —
+            # this number is only ever used to CHOOSE, never to tell the user
+            # what they saved.
+            "saving": _num(_first(entry, "maxDiscount", "discountAmount", "savings",
+                                  "value", "amount")) or 0.0,
+            "minimum": _num(_first(entry, "minCartAmount", "minimumOrder",
+                                   "minOrderValue", "minAmount")) or 0.0,
+            "label": str(_first(entry, "description", "title", "header",
+                                "couponDescription") or code),
+        })
+    return found
+
+
+def _best_coupon(coupons: list, cart_total) -> dict | None:
+    """The biggest saving this cart actually qualifies for.
+
+    Deterministic, like the ranking: same cart, same coupon, every time.
+    Anything with a minimum above the cart total is skipped rather than applied
+    and rejected.
+    """
+    affordable = [
+        c for c in coupons
+        if not c["minimum"] or cart_total is None or cart_total >= c["minimum"]
+    ]
+    if not affordable:
+        return None
+    return sorted(affordable, key=lambda c: (-c["saving"], c["code"]))[0]
+
+
 def _error_text(result) -> str:
     """A provider's own error message, for LOGS only — never shown to a user.
     Without it a failure is just isError=True, which nobody can act on."""
@@ -443,6 +491,11 @@ class SwiggyFoodProvider:
         except Exception as e:
             logger.info(f"[{self.name}] could not read the cart back: {e!r}")
 
+        # Best coupon, applied for them. A friend doesn't hand you a list of
+        # codes to try — they just get you the discount. Purely additive: if
+        # anything here fails the order proceeds at full price.
+        applied = await self._apply_best_coupon(client, address_id, offer.price)
+
         # Ask what THIS cart can be paid with rather than assuming. Hardcoding
         # "Cash" is what made every order fail once Swiggy disabled it.
         chosen = await self._payment_choice(client, address_id)
@@ -495,6 +548,7 @@ class SwiggyFoodProvider:
                 items=(offer.title,),
                 payment_url=bridge_url,
                 payment_ref=str(_first(payload, "paasId", "paas_id") or "") or None,
+                note=f"coupon {applied} applied" if applied else None,
                 poll_interval_ms=_int(_first(payload, "pollingIntervalInMs")),
                 poll_timeout_ms=_int(_first(payload, "maxTimeToPollForInMs")),
             )
@@ -507,6 +561,7 @@ class SwiggyFoodProvider:
             total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
                               "total", "amount")) or offer.price,
             items=(offer.title,),
+            note=f"coupon {applied} applied" if applied else None,
         )
 
     async def _widen(self, client, query, address_id, payload, wanted):
@@ -541,6 +596,52 @@ class SwiggyFoodProvider:
 
         logger.info(f"[{self.name}] {seen} candidates for {query!r}")
         return payload
+
+    async def _apply_best_coupon(self, client, address_id, cart_total):
+        """Find the best coupon and apply it. Returns its code, or None.
+
+        Entirely best effort. A discount is a bonus, so nothing in here may
+        stop an order going through — every failure logs and returns None, and
+        the order proceeds at full price.
+        """
+        if not (client.supports("coupons") and client.supports("apply_coupon")):
+            return None
+
+        try:
+            available = _coupons(await client.coupons(address_id))
+        except Exception as e:
+            logger.info(f"[{self.name}] could not fetch coupons: {e!r}")
+            return None
+
+        if not available:
+            logger.info(f"[{self.name}] no coupons offered for this cart")
+            return None
+        logger.info(f"[{self.name}] coupons offered: {[c['code'] for c in available]}")
+
+        best = _best_coupon(available, cart_total)
+        if not best:
+            return None
+
+        try:
+            result = await client.apply_coupon(address_id, best["code"])
+        except Exception as e:
+            logger.warning(
+                f"[{self.name}] apply_food_coupon({best['code']}) raised: {e!r}. "
+                f"If this is an argument-name error, fix COUPON_CODE_ARG in "
+                f"integrations/swiggy/swiggy_food_mcp.py — see its comment."
+            )
+            return None
+
+        if getattr(result, "isError", False):
+            # Commonly the cart no longer qualifies. Not worth troubling the
+            # user with; they simply pay full price.
+            logger.info(
+                f"[{self.name}] coupon {best['code']} not applied: {_error_text(result)}"
+            )
+            return None
+
+        logger.info(f"[{self.name}] applied coupon {best['code']}")
+        return best["code"]
 
     async def _payment_choice(self, client, address_id: str) -> dict:
         """Pick how to pay, from what the platform actually offers.

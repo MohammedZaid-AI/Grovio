@@ -41,6 +41,7 @@ TOOLS = {
     "orders":       "get_food_orders",
     "order_status": "track_food_order",
     "coupons":      "fetch_food_coupons",
+    "apply_coupon": "apply_food_coupon",
     # Payment stage. Documented at
     # mcp.swiggy.com/builders/docs/build/recipes/pay-with-upi — the order is
     # created in PENDING_PAYMENT and is not real until confirmed.
@@ -203,6 +204,21 @@ class SwiggyFood:
         if restaurant_name:
             args["restaurantName"] = restaurant_name
         return await self.call("update_cart", args)
+
+    # The parameter name for the coupon code is NOT published in Swiggy's tool
+    # reference. This is the single place to change it, and a mismatch is logged
+    # loudly rather than silently skipping the discount. Settle it with:
+    #   inspect_tools.py food apply_food_coupon fetch_food_coupons
+    COUPON_CODE_ARG = "couponCode"
+
+    async def coupons(self, address_id: str) -> dict:
+        """Offers available for the current cart."""
+        return payload_of(await self.call("coupons", {"addressId": address_id}))
+
+    async def apply_coupon(self, address_id: str, code: str):
+        return await self.call("apply_coupon", {
+            "addressId": address_id, self.COUPON_CODE_ARG: code,
+        })
 
     async def payment_options(self, address_id: str) -> dict:
         """What this cart can actually be paid with."""

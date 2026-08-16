@@ -480,12 +480,16 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     # The provider's own order id — what they'd quote to the platform. The
     # internal row id is ours and stays out of the conversation.
     reference = f" Order ID {placed.order_id}." if placed.order_id else ""
+    # Only ever stated when the provider confirmed the coupon went on. The
+    # total already reflects it, so this just names what got them the price.
+    saving = f" A coupon was applied automatically ({placed.note})." \
+        if placed.note and "coupon" in placed.note else ""
 
     return SkillResult(
         SkillStatus.OK,
         f"ORDER PLACED. {offer.title}"
         + (f" from {offer.venue}" if offer.venue else "")
-        + f". Total: {total}. ETA: {eta}.{reference}\n"
+        + f". Total: {total}. ETA: {eta}.{reference}{saving}\n"
         f"Confirm it warmly in one or two lines: say it's placed, give the total, "
         f"the ETA if there is one, and the Order ID if there is one. Mention they "
         f"can ask where it is any time. Do NOT invent a delivery time.",

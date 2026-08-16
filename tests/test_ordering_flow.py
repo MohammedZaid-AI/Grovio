@@ -849,6 +849,82 @@ check("the follow-up answers no inbound message",
 check("conversation closes as ORDER_COMPLETE",
       conversation.load(pay_phone).state == conversation.State.ORDER_COMPLETE)
 
+# ======================================================================
+print("\n[16] Coupons are applied for the user, never invented")
+check("the biggest qualifying saving wins",
+      swiggy_food._best_coupon(
+          [{"code": "A", "saving": 50.0, "minimum": 0},
+           {"code": "B", "saving": 120.0, "minimum": 0}], 300)["code"] == "B")
+check("a coupon the cart cannot reach is skipped",
+      swiggy_food._best_coupon(
+          [{"code": "BIG", "saving": 500.0, "minimum": 999},
+           {"code": "SMALL", "saving": 40.0, "minimum": 0}], 300)["code"] == "SMALL")
+check("nothing qualifying means no coupon",
+      swiggy_food._best_coupon([{"code": "X", "saving": 9.0, "minimum": 1000}], 100) is None)
+check("no coupons at all is safe", swiggy_food._best_coupon([], 300) is None)
+check("equal savings break deterministically, not by luck",
+      all(swiggy_food._best_coupon(
+          [{"code": "ZZ", "saving": 50.0, "minimum": 0},
+           {"code": "AA", "saving": 50.0, "minimum": 0}], 300)["code"] == "AA"
+          for _ in range(5)))
+
+parsed = swiggy_food._coupons({"coupons": [
+    {"couponCode": "TRYNEW", "maxDiscount": 120, "minCartAmount": 199,
+     "description": "120 off above 199"},
+    {"description": "an offer with no code"},
+]})
+check("a coupon without a code is not an offer", len(parsed) == 1)
+check("the code is read", parsed[0]["code"] == "TRYNEW")
+check("the saving is read", parsed[0]["saving"] == 120)
+check("the minimum is read", parsed[0]["minimum"] == 199)
+check("an unreadable payload yields nothing", swiggy_food._coupons("nonsense") == [])
+
+
+class CouponClient(FoodClient):
+    """A Food client that offers coupons."""
+
+    def __init__(self, coupons=None, apply_fails=False, **kw):
+        super().__init__(**kw)
+        self.coupon_payload = coupons if coupons is not None else {
+            "coupons": [{"couponCode": "SAVE60", "maxDiscount": 60, "minCartAmount": 0}]
+        }
+        self.apply_fails = apply_fails
+        self.applied = []
+
+    async def coupons(self, address_id):
+        return self.coupon_payload
+
+    async def apply_coupon(self, address_id, code):
+        self.applied.append(code)
+        return Result(is_error=self.apply_fails,
+                      text="Coupon not valid" if self.apply_fails else None)
+
+
+client = CouponClient()
+order = run(food_provider(client).place(offers[0], 1, SearchContext()))
+check("the best coupon is applied without being asked", client.applied == ["SAVE60"])
+check("and the order says which one", "SAVE60" in (order.note or ""))
+
+# A discount is a bonus. Nothing about it may stop an order.
+rejected = CouponClient(apply_fails=True)
+order = run(food_provider(rejected).place(offers[0], 1, SearchContext()))
+check("a rejected coupon does NOT block the order", order.status == "PLACED")
+check("and nothing is claimed about a discount", not order.note)
+
+none_offered = CouponClient(coupons={"coupons": []})
+order = run(food_provider(none_offered).place(offers[0], 1, SearchContext()))
+check("no coupons offered still orders fine", order.status == "PLACED")
+check("and claims no saving", not order.note)
+
+
+class BrokenCoupons(CouponClient):
+    async def coupons(self, address_id):
+        raise RuntimeError("coupon service down")
+
+
+order = run(food_provider(BrokenCoupons()).place(offers[0], 1, SearchContext()))
+check("a broken coupon service never breaks ordering", order.status == "PLACED")
+check("and claims no saving", not order.note)
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
