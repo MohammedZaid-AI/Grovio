@@ -416,6 +416,28 @@ def save_reply_and_finish(inbound_id, phone, parts):
         conn.close()
 
 
+def enqueue_followup(phone, text):
+    """Queue a message that answers no inbound message.
+
+    For things that resolve on their own clock — a payment landing minutes
+    after the user tapped a link. It goes through the SAME outbound queue as
+    every reply, so it inherits ordering, retries and restart recovery instead
+    of being fired off with a bare send that nobody would notice failing.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO whatsapp_outbound (inbound_id, phone, part_index, body, "
+            "status, attempts) VALUES (NULL, ?, 0, ?, 'PENDING', 0)",
+            (phone, text),
+        )
+        conn.commit()
+        return cursor.lastrowid
+    finally:
+        conn.close()
+
+
 def save_error_reply(inbound_id, phone, text):
     """Queue a single error reply and mark the inbound message FAILED. The
     failure is recorded (not silently dropped) and the user still gets a note."""

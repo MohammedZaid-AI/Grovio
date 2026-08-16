@@ -41,13 +41,23 @@ TOOLS = {
     "orders":       "get_food_orders",
     "order_status": "track_food_order",
     "coupons":      "fetch_food_coupons",
+    # Payment stage. Documented at
+    # mcp.swiggy.com/builders/docs/build/recipes/pay-with-upi — the order is
+    # created in PENDING_PAYMENT and is not real until confirmed.
+    "payment_options": "get_payment_options",
+    "payment_status":  "check_payment_status",
+    "confirm":         "confirm_order",
 }
 
 # Without these the provider cannot do its job; the rest are optional niceties.
+# The payment tools are deliberately NOT required: if a server does not expose
+# them we fall back to whatever the picker offers, rather than refusing to start.
 REQUIRED = ("addresses", "search", "update_cart", "checkout")
 
-# COD only for now. Swiggy's UPI path involves a polling widget plus
-# check_payment_status/confirm_order, which does not fit a chat window.
+# The fallback when nothing else is offered. Swiggy's docs call cash "the
+# universal fallback", but it can be switched off per cart — observed live:
+# "cash option is temporarily disabled" — so the picker is asked first and this
+# is only used when it comes back as an option.
 PAYMENT_METHOD = "Cash"
 
 
@@ -194,11 +204,37 @@ class SwiggyFood:
             args["restaurantName"] = restaurant_name
         return await self.call("update_cart", args)
 
-    async def place_order(self, address_id: str, payment_method: str = PAYMENT_METHOD):
-        return await self.call("checkout", {
-            "addressId": address_id,
-            "paymentMethod": payment_method,
-        })
+    async def payment_options(self, address_id: str) -> dict:
+        """What this cart can actually be paid with."""
+        return payload_of(await self.call("payment_options", {"addressId": address_id}))
+
+    async def place_order(self, address_id: str, payment_method: str = PAYMENT_METHOD,
+                          intent_app: str = None, generate_upi_qr: bool = False):
+        """Create the order.
+
+        With a UPI method the order comes back PENDING_PAYMENT plus a
+        `bridgeUrl` — an opaque HTTPS page that handles the whole UPI dance —
+        and is not real until `check_payment_status` says so.
+        """
+        args = {"addressId": address_id, "paymentMethod": payment_method}
+        if intent_app:
+            args["intentApp"] = intent_app
+        if generate_upi_qr:
+            args["generateUPIQR"] = True
+        return await self.call("checkout", args)
+
+    async def payment_status(self, order_id: str, paas_id: str, address_id: str) -> dict:
+        """Poll one payment. Swiggy long-polls (~19s), so this is not a busy loop."""
+        return payload_of(await self.call("payment_status", {
+            "orderId": order_id, "paasId": paas_id, "addressId": address_id,
+        }))
+
+    async def confirm_order(self, order_id: str, address_id: str, paas_id: str = None) -> dict:
+        """Finalise. Required when polling times out while still pending."""
+        args = {"orderId": order_id, "addressId": address_id}
+        if paas_id:
+            args["paasId"] = paas_id
+        return payload_of(await self.call("confirm", args))
 
     async def track(self, order_id: str):
         return payload_of(await self.call("order_status", {"orderId": order_id}))

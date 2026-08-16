@@ -43,6 +43,7 @@ class State:
     RECOMMENDING = "RECOMMENDING"
     AWAITING_SELECTION = "AWAITING_SELECTION"
     ORDERING = "ORDERING"
+    AWAITING_PAYMENT = "AWAITING_PAYMENT"
     AWAITING_RETRY_CONFIRMATION = "AWAITING_RETRY_CONFIRMATION"
     ORDER_COMPLETE = "ORDER_COMPLETE"
     ORDER_FAILED = "ORDER_FAILED"
@@ -59,7 +60,14 @@ ALLOWED = {
     # search raises IllegalTransition and the user can never get another list.
     State.ORDERING:                    {State.ORDER_COMPLETE, State.AWAITING_RETRY_CONFIRMATION,
                                         State.ORDER_FAILED, State.AWAITING_SELECTION,
+                                        State.AWAITING_PAYMENT,
                                         State.RECOMMENDING, State.IDLE},
+    # The provider created the order and is waiting to be paid. It resolves on
+    # its own — a background poll confirms or gives up — so this never depends
+    # on the user saying anything.
+    State.AWAITING_PAYMENT:            {State.ORDER_COMPLETE, State.ORDER_FAILED,
+                                        State.AWAITING_SELECTION, State.RECOMMENDING,
+                                        State.IDLE},
     State.AWAITING_RETRY_CONFIRMATION: {State.ORDERING, State.ORDER_FAILED,
                                         State.AWAITING_SELECTION, State.IDLE},
     # Terminal states accept themselves: asking again after giving up is a
@@ -241,6 +249,14 @@ def begin_retry(phone: str) -> Conversation:
         raise IllegalTransition("retry with no pending order")
     conversation.pending.retry_count += 1
     return _save(conversation, State.ORDERING)
+
+
+def awaiting_payment(phone: str) -> Conversation:
+    """The order exists but is unpaid. The pending order is kept so the poll can
+    resolve it; the offer list is kept so they can pick something else if they
+    change their mind."""
+    conversation = load(phone)
+    return _save(conversation, State.AWAITING_PAYMENT)
 
 
 def order_succeeded(phone: str) -> Conversation:

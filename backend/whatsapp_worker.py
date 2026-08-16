@@ -82,6 +82,19 @@ async def enqueue_and_wake(message_sid, phone, body, num_media=0):
     return inbound_id, is_new
 
 
+async def deliver(phone, text):
+    """Send a message nobody asked for, through the normal delivery path.
+
+    Used by work that finishes on its own clock — a payment confirming after
+    the turn that started it has ended. Goes through the outbound queue so it
+    is ordered behind anything already waiting, retried on failure, and
+    recovered after a restart.
+    """
+    outbound_id = db.enqueue_followup(phone, text)
+    await _ensure_worker(phone)
+    return outbound_id
+
+
 async def recover_pending():
     """Startup recovery: fail interrupted in-flight messages (do not blindly
     reprocess side effects), then respawn workers for any phone that still has

@@ -19,6 +19,7 @@ import os
 from core.logger import logger
 
 from ai.providers.base import (
+    PENDING_PAYMENT,
     PLACED,
     ItemUnavailable,
     Offer,
@@ -101,6 +102,52 @@ _PAYMENT_PROBLEMS = (
 def _is_payment_problem(text: str) -> bool:
     lowered = (text or "").lower()
     return any(needle in lowered for needle in _PAYMENT_PROBLEMS)
+
+
+def _payment_methods(payload: dict) -> list:
+    """Flatten the payment picker into [{label, method, intent_app, qr}].
+
+    Swiggy publishes `allMethods` explicitly "for headless clients", which is
+    what a chat window is. Mobile/desktop lists are read as a fallback, and cash
+    only appears if THIS cart still offers it — it is switched off per cart.
+    """
+    if not isinstance(payload, dict):
+        return []
+    methods = []
+
+    def add(label, method, intent_app=None, qr=False):
+        if method:
+            methods.append({"label": str(label or method), "method": str(method),
+                            "intent_app": intent_app, "qr": qr})
+
+    for entry in payload.get("allMethods") or []:
+        if isinstance(entry, str):
+            add(entry, entry)
+        elif isinstance(entry, dict):
+            group = _first(entry, "paymentMethod", "group", "type", "id")
+            add(_first(entry, "displayName", "name", "label") or group, group,
+                intent_app=entry.get("intentApp")
+                or (entry.get("id") if str(group).upper() == "UPI" else None),
+                qr=bool(entry.get("generateUPIQR")))
+
+    platforms = payload.get("platforms") or {}
+    if not methods and isinstance(platforms, dict):
+        for entry in ((platforms.get("mobile") or {}).get("methods") or []):
+            if isinstance(entry, dict) and entry.get("id"):
+                add(_first(entry, "displayName", "name") or entry["id"], "UPI",
+                    intent_app=entry["id"])
+        for entry in ((platforms.get("desktop") or {}).get("methods") or []):
+            if isinstance(entry, dict):
+                add(_first(entry, "displayName", "name") or "Scan a QR to pay",
+                    "UPI", qr=True)
+
+    cod = payload.get("cod")
+    if cod:
+        label = "Cash on delivery"
+        if isinstance(cod, dict):
+            label = _first(cod, "displayName", "label") or label
+        add(label, "Cash")
+    return methods
 
 
 def _error_text(result) -> str:
@@ -361,7 +408,17 @@ class SwiggyFoodProvider:
         except Exception as e:
             logger.info(f"[{self.name}] could not read the cart back: {e!r}")
 
-        result = await client.place_order(address_id)
+        # Ask what THIS cart can be paid with rather than assuming. Hardcoding
+        # "Cash" is what made every order fail once Swiggy disabled it.
+        chosen = await self._payment_choice(client, address_id)
+        logger.info(f"[{self.name}] paying with {chosen}")
+
+        result = await client.place_order(
+            address_id,
+            payment_method=chosen["method"],
+            intent_app=chosen["intent_app"],
+            generate_upi_qr=chosen["qr"],
+        )
         if getattr(result, "isError", False):
             detail = _error_text(result)
             logger.error(f"[{self.name}] checkout failed: {detail}")
@@ -387,6 +444,26 @@ class SwiggyFoodProvider:
                 f"Keys: {list(payload.keys())[:12]}"
             )
 
+        # A UPI order arrives PENDING_PAYMENT with a hosted payment page. It is
+        # NOT placed — saying so would be claiming food is coming that nobody
+        # has paid for.
+        bridge_url = str(_first(payload, "bridgeUrl", "bridge_url",
+                                "redirectUrl", "paymentUrl") or "")
+        if bridge_url:
+            logger.info(f"[{self.name}] order {order_id} awaiting payment")
+            return PlacedOrder(
+                provider=self.name,
+                order_id=order_id,
+                status=PENDING_PAYMENT,
+                total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
+                                  "total", "amount")) or offer.price,
+                items=(offer.title,),
+                payment_url=bridge_url,
+                payment_ref=str(_first(payload, "paasId", "paas_id") or "") or None,
+                poll_interval_ms=_int(_first(payload, "pollingIntervalInMs")),
+                poll_timeout_ms=_int(_first(payload, "maxTimeToPollForInMs")),
+            )
+
         return PlacedOrder(
             provider=self.name,
             order_id=order_id,
@@ -396,6 +473,67 @@ class SwiggyFoodProvider:
                               "total", "amount")) or offer.price,
             items=(offer.title,),
         )
+
+    async def _payment_choice(self, client, address_id: str) -> dict:
+        """Pick how to pay, from what the platform actually offers.
+
+        Cash first when available — it needs nothing from the user. Otherwise
+        the first UPI method, which yields a payment link they can tap.
+        If the picker cannot be read we fall back to cash and let checkout
+        speak for itself, rather than refusing to try.
+        """
+        fallback = {"label": "Cash on delivery", "method": mcp.PAYMENT_METHOD,
+                    "intent_app": None, "qr": False}
+        if not client.supports("payment_options"):
+            return fallback
+
+        try:
+            options = _payment_methods(await client.payment_options(address_id))
+        except Exception as e:
+            logger.info(f"[{self.name}] could not read payment options: {e!r}")
+            return fallback
+
+        if not options:
+            return fallback
+        logger.info(f"[{self.name}] payment options: {[o['label'] for o in options]}")
+
+        cash = next((o for o in options if o["method"].lower() in ("cash", "cod")), None)
+        return cash or options[0]
+
+    async def payment_status(self, order: PlacedOrder, ctx: SearchContext) -> str:
+        """One poll of a pending payment. Returns Swiggy's own status word.
+
+        `pending` on any failure to read it: an unreadable poll must never be
+        mistaken for a completed payment.
+        """
+        client = await self._session()
+        if not client.supports("payment_status"):
+            return "pending"
+        address_id = ctx.address_id or await client.default_address_id()
+        try:
+            payload = await client.payment_status(
+                order_id=order.order_id, paas_id=order.payment_ref or "",
+                address_id=address_id,
+            )
+        except Exception as e:
+            logger.info(f"[{self.name}] payment poll failed: {e!r}")
+            return "pending"
+        status = str(_first(payload, "status", "paymentStatus", "state") or "pending")
+        logger.info(f"[{self.name}] payment {order.order_id} -> {status}")
+        return status.lower()
+
+    async def confirm_payment(self, order: PlacedOrder, ctx: SearchContext) -> bool:
+        """Finalise a paid order. Only called once payment actually succeeded."""
+        client = await self._session()
+        if not client.supports("confirm"):
+            return True          # nothing to call; payment success stands
+        address_id = ctx.address_id or await client.default_address_id()
+        try:
+            await client.confirm_order(order.order_id, address_id, order.payment_ref)
+            return True
+        except Exception as e:
+            logger.error(f"[{self.name}] confirm_order failed: {e!r}")
+            return False
 
     async def track(self, order_id: str, ctx: SearchContext) -> OrderStatus:
         client = await self._session()

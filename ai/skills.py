@@ -445,6 +445,11 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
             )
             return None
 
+    if placed.needs_payment:
+        # The provider made the order but wants paying first. NOTHING is placed
+        # yet — saying otherwise would promise food nobody has paid for.
+        return _await_payment(user, offer, placed, provider, ctx)
+
     order_id = bookkeeping("save_order", lambda: db.save_order(
         phone=user.phone,
         provider=placed.provider,
@@ -485,6 +490,48 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
         f"the ETA if there is one, and the Order ID if there is one. Mention they "
         f"can ask where it is any time. Do NOT invent a delivery time.",
         offers=[offer],
+    )
+
+
+def _await_payment(user, offer, placed, provider, ctx) -> SkillResult:
+    """Hand the user the provider's payment page and watch for it to land.
+
+    The link is the ONLY thing that goes to them — no card or UPI details pass
+    through us at any point. A background watcher confirms the order and
+    messages them when it resolves, because that happens on their clock, not
+    inside this turn.
+    """
+    from ai import payments
+
+    order_id = None
+    try:
+        order_id = db.save_order(
+            phone=user.phone, provider=placed.provider,
+            provider_order_id=placed.order_id, status=placed.status,
+            title=offer.title, venue=offer.venue,
+            total=placed.total if placed.total is not None else offer.price,
+            currency=placed.currency, eta_minutes=placed.eta_minutes,
+        )
+        conversation.awaiting_payment(user.phone)
+    except Exception:
+        logger.error("[skills] could not record a pending payment", exc_info=True)
+
+    payments.watch(user.phone, provider, placed, ctx, offer.title, order_id)
+
+    amount = placed.total if placed.total is not None else offer.price
+    total = f"{placed.currency} {amount:g}" if amount is not None else "the total"
+    logger.info(f"[skills] {offer.title!r} awaiting payment — order {placed.order_id}")
+
+    return SkillResult(
+        SkillStatus.OK,
+        f"PAYMENT NEEDED before this order is placed. {offer.title}"
+        + (f" from {offer.venue}" if offer.venue else "")
+        + f", {total}.\n"
+        f"Give them this link EXACTLY as-is, on its own line, and say it opens "
+        f"their UPI app:\n{placed.payment_url}\n"
+        f"Tell them you'll confirm here the moment it goes through — they do NOT "
+        f"need to reply. Do NOT say the order is placed, do NOT invent an ETA, "
+        f"and never ask for a UPI id, PIN or card details.",
     )
 
 

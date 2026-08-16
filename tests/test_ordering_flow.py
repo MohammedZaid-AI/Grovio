@@ -138,14 +138,20 @@ GROCERY_PRODUCTS = [
 class FoodClient:
     """Fake Swiggy Food MCP client."""
 
-    def __init__(self, payload=None, checkout=None, cart_error=False):
+    def __init__(self, payload=None, checkout=None, cart_error=False,
+                 payment_options=None, statuses=None):
         self.payload = payload if payload is not None else RESTAURANT_PAYLOAD
         self.checkout = checkout or Result(
             structured={"orderId": "FOOD-77", "data": {"cartTotal": 340, "eta": 24}}
         )
         self.cart_error = cart_error
+        # Default: cash is still offered, as Swiggy's docs describe it.
+        self.options = payment_options if payment_options is not None else {"cod": True}
+        self.statuses = list(statuses or [])
         self.searches = 0
         self.carts = []
+        self.paid_with = []
+        self.confirmed = []
 
     def supports(self, key):
         return True
@@ -157,13 +163,29 @@ class FoodClient:
         self.searches += 1
         return self.payload
 
+    async def call(self, key, args):
+        return Result(structured={"items": [{"menu_item_id": "IT-1"}]})
+
     async def add_to_cart(self, address_id, restaurant_id, cart_items, restaurant_name=None):
         self.carts.append((restaurant_id, cart_items))
         return Result(is_error=self.cart_error,
                       text="Item is Out of Stock" if self.cart_error else None)
 
-    async def place_order(self, address_id, payment_method="Cash"):
+    async def payment_options(self, address_id):
+        return self.options
+
+    async def place_order(self, address_id, payment_method="Cash",
+                          intent_app=None, generate_upi_qr=False):
+        self.paid_with.append({"method": payment_method, "intent_app": intent_app,
+                               "qr": generate_upi_qr})
         return self.checkout
+
+    async def payment_status(self, order_id, paas_id, address_id):
+        return {"status": self.statuses.pop(0) if self.statuses else "pending"}
+
+    async def confirm_order(self, order_id, address_id, paas_id=None):
+        self.confirmed.append(order_id)
+        return {"ok": True}
 
 
 class GroceryClient:
@@ -713,6 +735,120 @@ state = conversation.load(phone)
 check("no pending order is left armed", state.pending is None)
 check("state is NOT left awaiting a retry",
       state.state != conversation.State.AWAITING_RETRY_CONFIRMATION)
+# ======================================================================
+print("\n[14] UPI: the order is NOT placed until it is paid")
+# Swiggy creates the order in PENDING_PAYMENT and returns `bridgeUrl`, an opaque
+# HTTPS payment page. Treating that as a placed order would promise food nobody
+# has paid for.
+from ai.providers.base import PENDING_PAYMENT, PlacedOrder
+
+cash = FoodClient(payment_options={"cod": True})
+run(food_provider(cash).place(offers[0], 1, SearchContext()))
+check("cash is used when the picker still offers it",
+      cash.paid_with[0]["method"] == "Cash")
+
+upi_only = FoodClient(
+    payment_options={"allMethods": [
+        {"paymentMethod": "UPI", "id": "gpay", "displayName": "Google Pay"},
+    ]},
+    checkout=Result(structured={
+        "orderId": "ORD-9", "paasId": "PAAS-9",
+        "bridgeUrl": "https://mcp.swiggy.com/pay/opaque-token",
+        "pollingIntervalInMs": 2000, "maxTimeToPollForInMs": 60000,
+        "cartTotal": 127,
+    }),
+)
+pending = run(food_provider(upi_only).place(offers[0], 1, SearchContext()))
+
+check("UPI is chosen when cash is NOT offered", upi_only.paid_with[0]["method"] == "UPI")
+check("the picked app id is passed through", upi_only.paid_with[0]["intent_app"] == "gpay")
+check("status is PENDING_PAYMENT, never PLACED", pending.status == PENDING_PAYMENT)
+check("needs_payment says so", pending.needs_payment is True)
+check("the payment link is carried", pending.payment_url.startswith("https://"))
+check("the payment reference is carried", pending.payment_ref == "PAAS-9")
+check("the provider's poll cadence is honoured", pending.poll_interval_ms == 2000)
+check("and its timeout", pending.poll_timeout_ms == 60000)
+check("the total comes from the provider", pending.total == 127)
+check("no ETA is invented for an unpaid order", pending.eta_minutes is None)
+
+# ======================================================================
+print("\n[15] The link goes to the user; nothing is claimed until it clears")
+pay_phone = "919188800001"
+registry.clear()
+
+
+class PayProvider(Spy):
+    def __init__(self):
+        super().__init__("pay_food", ProviderKind.RESTAURANT)
+        self.statuses = ["pending", "success"]
+        self.confirmed = []
+
+    async def place(self, offer, quantity, ctx):
+        return PlacedOrder(provider=self.name, order_id="ORD-9",
+                           status=PENDING_PAYMENT, total=127,
+                           payment_url="https://mcp.swiggy.com/pay/tok",
+                           payment_ref="PAAS-9", poll_interval_ms=10,
+                           poll_timeout_ms=5000)
+
+    async def payment_status(self, order, ctx):
+        return self.statuses.pop(0) if self.statuses else "pending"
+
+    async def confirm_payment(self, order, ctx):
+        self.confirmed.append(order.order_id)
+        return True
+
+
+payer = PayProvider()
+registry.register(payer)
+identity.load(pay_phone)
+show(pay_phone, "pay_food", ProviderKind.RESTAURANT.value,
+     [("R::I", "Tomatoes Pizza", "La Pino'z", 97, None)])
+
+result = run(skills.place_order(identity.load(pay_phone), 1))
+check("the payment link reaches the model verbatim",
+      "https://mcp.swiggy.com/pay/tok" in result.message)
+check("the model is told NOT to claim it is placed",
+      "Do NOT say the order is placed" in result.message)
+check("and never to ask for a PIN or card details",
+      "never ask for a UPI id, PIN or card details" in result.message)
+check("conversation moves to AWAITING_PAYMENT",
+      conversation.load(pay_phone).state == conversation.State.AWAITING_PAYMENT)
+check("the order is recorded PENDING_PAYMENT, not placed",
+      db.get_latest_order(pay_phone)["status"] == PENDING_PAYMENT)
+
+
+async def _settle():
+    """Run the watcher the way skills does, and wait for it to finish."""
+    from ai import payments
+    order = PlacedOrder(provider="pay_food", order_id="ORD-9",
+                        status=PENDING_PAYMENT, payment_url="u",
+                        payment_ref="PAAS-9", poll_interval_ms=10,
+                        poll_timeout_ms=5000)
+    payments.watch(pay_phone, payer, order, SearchContext(), "Tomatoes Pizza",
+                   db.get_latest_order(pay_phone)["id"])
+    for _ in range(100):
+        await asyncio.sleep(0.05)
+        if not payments._watchers.get(pay_phone):
+            return
+
+
+run(_settle())
+check("the watcher confirms the order once paid", payer.confirmed == ["ORD-9"])
+check("the order becomes PLACED", db.get_latest_order(pay_phone)["status"] == "PLACED")
+# Queued through the SAME outbound path as any reply, so it inherits ordering,
+# retries and restart recovery. Read the table directly: the worker may already
+# have tried to send it, which leaves it non-PENDING.
+sent = db.get_connection().execute(
+    "SELECT body FROM whatsapp_outbound WHERE phone = ?", (pay_phone,)).fetchall()
+check("the user is told, without being asked",
+      any("on its way" in row[0] for row in sent))
+check("the follow-up answers no inbound message",
+      db.get_connection().execute(
+          "SELECT inbound_id FROM whatsapp_outbound WHERE phone = ? AND body LIKE '%on its way%'",
+          (pay_phone,)).fetchone()[0] is None)
+check("conversation closes as ORDER_COMPLETE",
+      conversation.load(pay_phone).state == conversation.State.ORDER_COMPLETE)
+
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

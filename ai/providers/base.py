@@ -94,6 +94,10 @@ class Provider(Protocol):
 # Order lifecycle, normalised across platforms. A provider maps its own
 # vocabulary onto these; nothing above the provider layer sees platform states.
 PLACED = "PLACED"
+# The provider created the order but is waiting for the user to pay. NOT placed:
+# nothing is cooking and nothing is owed until payment lands. Kept distinct so
+# no layer can mistake "we asked for money" for "the food is coming".
+PENDING_PAYMENT = "PENDING_PAYMENT"
 CONFIRMED = "CONFIRMED"
 PREPARING = "PREPARING"
 ON_THE_WAY = "ON_THE_WAY"
@@ -105,6 +109,7 @@ UNKNOWN = "UNKNOWN"
 # upward, and so the model is never left to invent a status.
 STATUS_PHRASING = {
     PLACED: "placed",
+    PENDING_PAYMENT: "waiting for payment",
     CONFIRMED: "confirmed by the restaurant",
     PREPARING: "being prepared",
     ON_THE_WAY: "out for delivery",
@@ -125,6 +130,19 @@ class PlacedOrder:
     currency: str = "INR"
     items: tuple = field(default_factory=tuple)
     note: str | None = None
+
+    # Set only when `status == PENDING_PAYMENT`. `payment_url` is the provider's
+    # own hosted payment page — the ONLY thing we hand the user, so no card or
+    # UPI detail ever passes through us. `payment_ref` and the poll timings come
+    # straight from the provider; nothing here is a guess.
+    payment_url: str | None = None
+    payment_ref: str | None = None
+    poll_interval_ms: int | None = None
+    poll_timeout_ms: int | None = None
+
+    @property
+    def needs_payment(self) -> bool:
+        return self.status == PENDING_PAYMENT
 
 
 @dataclass(frozen=True)
