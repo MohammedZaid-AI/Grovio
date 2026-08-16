@@ -48,8 +48,16 @@ WhatsApp  →  webhook (verify, enqueue, return 200 in ms)
                  └── ai/providers/registry  routed by CAPABILITY, not by name
                           └── oauth.py + vault.py   linking, refresh, encryption
                                    ↓
-                     Swiggy | Zomato | Blinkit | Zepto
+                  Swiggy Instamart (grocery) · Swiggy Food (restaurant)
 ```
+
+**Swiggy is the only platform implemented.** Zomato runs an MCP server of the
+same shape, but third-party apps are not permitted on it yet; Blinkit and Zepto
+expose nothing. The registry is genuinely provider-agnostic — a second platform
+is one file in `ai/providers/` and a line in `setup()`, with nothing above the
+provider layer changing — but there is currently no second platform to add.
+That single-supplier dependency is the product's largest structural risk, and
+naming it here is more useful than a diagram implying otherwise.
 
 **Nothing above the provider layer may know which provider it is talking to.**
 `tests/test_concierge.py` §10 enforces this mechanically — it fails the build if
