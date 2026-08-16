@@ -122,6 +122,29 @@ venv\Scripts\python.exe tests\test_ordering_flow.py
 
 `uvicorn --reload` does **not** watch `.env` — restart fully after changing it.
 
+### Running the model locally
+
+Ollama speaks the OpenAI protocol, so this is configuration only — no code
+path differs:
+
+```
+OPENAI_API_KEY=ollama
+OPENAI_BASE_URL=http://localhost:11434/v1
+LLM_MODEL=gemma4:e4b
+```
+
+Verify before trusting it — the whole concierge hangs off tool calling, and a
+model that chats fluently but never calls `find_food` fails silently because
+the reply still looks like a reply:
+
+```powershell
+venv\Scripts\python.exe scripts\check_llm.py
+```
+
+Set **`OLLAMA_KEEP_ALIVE=30m`**. Ollama unloads an idle model after 5 minutes
+and reloading `gemma4:e4b` costs ~50s on a 6 GB card — the difference between a
+3-second reply and a user assuming it is broken.
+
 ### Testing without a Meta account
 
 Meta requires an approved business account and a public webhook. To exercise the
@@ -157,8 +180,9 @@ session, run without it.
 
 | Variable | Purpose |
 |---|---|
-| `GROQ_API_KEY` / `OPENAI_API_KEY` | LLM inference |
+| `GROQ_API_KEY` / `OPENAI_API_KEY` | LLM inference. `OPENAI_*` wins when set |
 | `OPENAI_BASE_URL`, `LLM_MODEL` | Provider + model override |
+| | Local: `OPENAI_API_KEY=ollama`, `OPENAI_BASE_URL=http://localhost:11434/v1` |
 | `AUTHORIZED_PHONES` | Who may ORDER. Chat is open to all. **Fails closed.** |
 | `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
 | `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
