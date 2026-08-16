@@ -8,9 +8,15 @@ against real tools instead of guesses.
     python integrations/swiggy/inspect_tools.py im
     python integrations/swiggy/inspect_tools.py dineout
 
+Name tools after the server to dump their COMPLETE schema, including the shape
+of nested arrays like cart items:
+
+    python integrations/swiggy/inspect_tools.py food update_food_cart place_food_order
+
 Paste the output when asking for an adapter to be written.
 """
 import asyncio
+import json
 import os
 import sys
 
@@ -59,6 +65,22 @@ async def main():
                 kind = spec.get("type", "?") if isinstance(spec, dict) else "?"
                 mark = "*" if key in required else " "
                 print(f"      {mark} {key} ({kind})")
+
+    # Named tools get their COMPLETE schema. The summary above shows only
+    # top-level parameters, which hides the shape of nested arrays — and the
+    # shape of a cart item is exactly the thing worth knowing.
+    wanted = {a.lower() for a in sys.argv[2:]}
+    if wanted:
+        print("\n" + "=" * 66)
+        print("FULL SCHEMAS\n")
+        for tool in tools:
+            name = getattr(tool, "name", "")
+            if name.lower() not in wanted:
+                continue
+            schema = getattr(tool, "inputSchema", None) or getattr(tool, "input_schema", None)
+            print(f"\n▸ {name}")
+            print(f"    {(getattr(tool, 'description', '') or '').strip()}")
+            print(json.dumps(schema, indent=2))
 
     print("\n" + "=" * 66)
     print("Copy everything above.\n")

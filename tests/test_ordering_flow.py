@@ -279,8 +279,13 @@ placed = run(food_provider(food).place(offers[0], 1, SearchContext()))
 check("restaurant order returns the provider's id", placed.order_id == "FOOD-77")
 check("REGRESSION: cartTotal is read as the total", placed.total == 340)
 check("cart was built with the restaurant id", food.carts[0][0] == "RES-1")
-check("cart carries the item id and quantity",
-      food.carts[0][1] == [{"itemId": "IT-1", "quantity": 1}])
+sent_item = food.carts[0][1][0]
+check("cart carries the quantity", sent_item["quantity"] == 1)
+# Both spellings go out: search_menu returns `menu_item_id`, and the cart tool's
+# argument shape is not published in the tool listing. An item the cart silently
+# ignores surfaces only as "Some error while creating the order" at checkout.
+check("cart carries the item id as menu_item_id", sent_item["menu_item_id"] == "IT-1")
+check("cart also carries it as itemId", sent_item["itemId"] == "IT-1")
 
 grocery = GroceryClient()
 placed = run(grocery_provider(grocery).place(items[1], 2, SearchContext()))

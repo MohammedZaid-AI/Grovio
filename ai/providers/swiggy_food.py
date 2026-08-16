@@ -307,15 +307,44 @@ class SwiggyFoodProvider:
         if not restaurant_id:
             raise ProviderError(f"offer {offer.id!r} carries no restaurant id")
 
+        # search_menu returns the id as `menu_item_id`, so the cart is sent both
+        # spellings: the tool schema for update_food_cart is not published in the
+        # summary listing, and an item the cart silently ignores produces exactly
+        # the symptom seen here — the add "succeeds" and checkout then fails with
+        # "Some error while creating the order".
+        cart_item = {
+            "menu_item_id": item_id,
+            "itemId": item_id,
+            "quantity": max(1, quantity),
+        }
+        logger.info(
+            f"[{self.name}] update_food_cart payload: addressId={address_id!r} "
+            f"restaurantId={restaurant_id!r} items={[cart_item]}"
+        )
         cart = await client.add_to_cart(
             address_id=address_id,
             restaurant_id=restaurant_id,
-            cart_items=[{"itemId": item_id, "quantity": max(1, quantity)}],
+            cart_items=[cart_item],
             restaurant_name=offer.venue,
+        )
+        logger.info(
+            f"[{self.name}] update_food_cart isError="
+            f"{getattr(cart, 'isError', None)} body={_error_text(cart)}"
         )
         if getattr(cart, "isError", False):
             logger.error(f"[{self.name}] cart rejected {item_id}: {_error_text(cart)}")
             raise ItemUnavailable(f"cart rejected {item_id}")
+
+        # Confirm the item actually landed BEFORE spending. The Instamart
+        # provider learned this the hard way: update_cart can report success
+        # while adding nothing, and the emptiness only surfaces as an opaque
+        # checkout failure. Advisory here — the cart tool's argument shape is
+        # unverified, so a failure to read it must not block a valid order.
+        try:
+            cart_state = mcp.payload_of(await client.call("cart", {"addressId": address_id}))
+            logger.info(f"[{self.name}] get_food_cart: {str(cart_state)[:500]}")
+        except Exception as e:
+            logger.info(f"[{self.name}] could not read the cart back: {e!r}")
 
         result = await client.place_order(address_id)
         if getattr(result, "isError", False):
