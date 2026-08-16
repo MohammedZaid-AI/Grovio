@@ -4,12 +4,12 @@ load_dotenv()
 import os
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 import db
 import ai.providers
-from backend.linking import router as linking_router
+from backend.linking import complete_callback, router as linking_router
 from backend.routes import router
 from backend.whatsapp_worker import recover_pending
 from core import crypto
@@ -99,8 +99,24 @@ app.include_router(linking_router)
 
 
 @app.get("/")
-def home():
-    return {"status": "running", "service": "AI Food Concierge"}
+async def home(request: Request):
+    """Status — or an OAuth callback that landed here instead of on its path.
+
+    A provider whose redirect allowlist holds a bare origin (`http://localhost`
+    for development, say) can send the user back to the root rather than to the
+    callback URL we asked for. The authorization code is still in the query
+    string, and dropping it means the link silently never completes — which is
+    exactly what was happening. `state` identifies the provider, so finishing
+    the link here is equivalent.
+    """
+    params = request.query_params
+    if params.get("code") and params.get("state"):
+        logger.info("[linking] OAuth callback arrived at the site root")
+        return await complete_callback(params)
+    if params.get("error"):
+        return await complete_callback(params)
+
+    return JSONResponse({"status": "running", "service": "AI Food Concierge"})
 
 
 @app.get("/health")

@@ -363,7 +363,13 @@ async def start() -> None:
         return
 
     from neonize.client import NewClient
-    from neonize.events import ConnectedEv, DisconnectedEv, MessageEv, PairStatusEv
+    from neonize.events import (
+        ConnectedEv,
+        DisconnectedEv,
+        LoggedOutEv,
+        MessageEv,
+        PairStatusEv,
+    )
 
     SESSION_DIR.mkdir(parents=True, exist_ok=True)
     _loop = asyncio.get_running_loop()
@@ -399,6 +405,20 @@ async def start() -> None:
         _paired.set()
         logger.info(f"[whatsapp] device paired — session saved to {SESSION_DB}. "
                     f"You will not need to scan again until you log out from the phone.")
+
+    @_client.event(LoggedOutEv)
+    def handle_logged_out(client, event):     # noqa: F811
+        # The phone unlinked this device (or WhatsApp did). The stored session is
+        # dead and no reconnect will revive it — without this the operator sees
+        # only "Got 401: logged out from another device" and no QR, which reads
+        # like a crash rather than "you need to pair again".
+        _connected.clear()
+        _paired.clear()
+        logger.error(
+            f"[whatsapp] LOGGED OUT — this device was unlinked from the phone. "
+            f"The saved session is dead; reconnecting cannot fix it. Stop the app, "
+            f"delete {SESSION_DB}, then start again to scan a fresh QR."
+        )
 
     _client.event.qr(_print_qr)
 

@@ -82,7 +82,25 @@ async def _resume_conversation(phone: str, pending_message: str) -> None:
 @router.get("/link/{provider}/callback")
 async def oauth_callback(provider: str, request: Request):
     """Where the provider sends the user back after they authorise us."""
-    params = request.query_params
+    return await complete_callback(request.query_params)
+
+
+async def complete_callback(params):
+    """Finish a link from whatever URL the provider actually redirected to.
+
+    The `{provider}` path segment is decorative: `oauth.complete` resolves the
+    provider from the stored `state`, which is why this also works at the site
+    root. That matters because a provider whose allowlist holds a bare
+    `http://localhost` may send the user there instead of to our full callback
+    path — and the authorization code would be dropped on the floor.
+    """
+    # Exactly what arrived, minus the code and state themselves. Without this a
+    # failed link is invisible: the browser shows a page and the server logs
+    # nothing at all.
+    logger.info(
+        f"[linking] callback received with params: "
+        f"{sorted(k for k in params.keys())}"
+    )
 
     # The provider can also report a refusal here.
     if params.get("error"):
