@@ -43,6 +43,7 @@ class State:
     RECOMMENDING = "RECOMMENDING"
     AWAITING_SELECTION = "AWAITING_SELECTION"
     ORDERING = "ORDERING"
+    AWAITING_COUPON = "AWAITING_COUPON"
     AWAITING_PAYMENT = "AWAITING_PAYMENT"
     AWAITING_RETRY_CONFIRMATION = "AWAITING_RETRY_CONFIRMATION"
     ORDER_COMPLETE = "ORDER_COMPLETE"
@@ -60,7 +61,12 @@ ALLOWED = {
     # search raises IllegalTransition and the user can never get another list.
     State.ORDERING:                    {State.ORDER_COMPLETE, State.AWAITING_RETRY_CONFIRMATION,
                                         State.ORDER_FAILED, State.AWAITING_SELECTION,
-                                        State.AWAITING_PAYMENT,
+                                        State.AWAITING_PAYMENT, State.AWAITING_COUPON,
+                                        State.RECOMMENDING, State.IDLE},
+    # The cart is built and discounts are on the table. Nothing is charged here
+    # — they can pick one, decline, walk away, or change their mind entirely and
+    # search for something else.
+    State.AWAITING_COUPON:             {State.ORDERING, State.AWAITING_SELECTION,
                                         State.RECOMMENDING, State.IDLE},
     # The provider created the order and is waiting to be paid. It resolves on
     # its own — a background poll confirms or gives up — so this never depends
@@ -104,6 +110,12 @@ class PendingOrder:
     eta_minutes: int | None = None
     quantity: int = 1
     selection: int | None = None      # the number the user actually said
+    # Discounts offered for this cart, in the order shown, as {code, label,
+    # saving}. `coupon` is three-valued exactly as the provider protocol says:
+    # None = not asked yet, "" = declined, a code = their choice. Carried on the
+    # pending order so a retry reuses the same one rather than re-asking.
+    coupons: list = field(default_factory=list)
+    coupon: str | None = None
     retry_count: int = 0
     last_error: str | None = None     # for logs; never shown to the user
     created_at: str = ""
@@ -133,6 +145,10 @@ class Conversation:
     @property
     def has_offers(self) -> bool:
         return bool(self.offers) and not self.stale
+
+    @property
+    def awaiting_coupon(self) -> bool:
+        return self.state == State.AWAITING_COUPON and self.pending is not None
 
     @property
     def awaiting_retry(self) -> bool:
@@ -248,6 +264,25 @@ def begin_retry(phone: str) -> Conversation:
     if not conversation.pending:
         raise IllegalTransition("retry with no pending order")
     conversation.pending.retry_count += 1
+    return _save(conversation, State.ORDERING)
+
+
+def offer_coupons(phone: str, coupons: list) -> Conversation:
+    """The cart is built and these discounts apply to it. Waiting on a choice —
+    nothing is charged until they answer."""
+    conversation = load(phone)
+    if not conversation.pending:
+        raise IllegalTransition("coupons with no pending order")
+    conversation.pending.coupons = coupons
+    return _save(conversation, State.AWAITING_COUPON)
+
+
+def choose_coupon(phone: str, code: str) -> Conversation:
+    """They picked one, or declined with "". Back to placing the order."""
+    conversation = load(phone)
+    if not conversation.pending:
+        raise IllegalTransition("coupon chosen with no pending order")
+    conversation.pending.coupon = code
     return _save(conversation, State.ORDERING)
 
 

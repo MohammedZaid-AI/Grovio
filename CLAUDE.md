@@ -208,8 +208,9 @@ session, run without it.
 5. **Fail closed** on authorization — a missing allowlist denies everyone.
    Authorization guards **spending, not conversation**: anyone may chat and be
    recommended food; only `AUTHORIZED_PHONES` may place an order. The gate lives
-   at `skills._execute_pending`, the one point every order (first attempt and
-   retry) passes through.
+   in `skills._may_spend`, called from `_execute_pending` (first attempt and
+   retry) and from `place_order` before the cart is built — building a cart is
+   already a write to the account owner's provider account.
 6. **Never expose raw exceptions, provider errors, or report IDs** to the user.
 7. **No dead code**, no compatibility shims, no abstraction with one caller.
 
@@ -250,6 +251,25 @@ session, run without it.
   the list actually shown (persisted in `offer_sessions`). This is the
   money-spending equivalent of not inventing a restaurant — do not "improve" it
   into accepting a dish name.
+- **The cart is built TWICE per order, and the flush is why that is safe.**
+  Discounts are scoped to a built cart, so `provider.coupons()` commits the
+  basket to list them and `place()` checks that same basket out. Both call
+  `_build_cart`, which flushes first. Remove the flush and a second add can
+  stack quantities — someone pays for two dinners.
+- **Read the cart back and BELIEVE it.** `update_food_cart` answers
+  `isError=False` and prints a tidy summary for a cart that is unusable —
+  observed live: `statusCode 1 · errorCodes ['INVALID_ADDON']`. Checking out
+  anyway burns a real call and dies with "Some error while creating the order",
+  which then looks retryable and isn't. A cart we cannot READ stays advisory; a
+  cart Swiggy REJECTS raises `ItemUnavailable`.
+- **The payment link is sent by `skills._await_payment`, not by the model.**
+  Swiggy's UPI window was 60s and the local model spent 24 of them writing a
+  sentence around the link. It goes out through `payments.notify` the moment the
+  order exists; the model's reply must not repeat it.
+- **Never print `offer.price` beside a payment link.** It is what the SEARCH
+  listed (₹269 live) — not the dish price (₹159), not what the page charges
+  (₹251). For a pending payment the amount comes from the provider or is left
+  out entirely.
 - **Providers declare `supports_tracking` / `supports_cancellation`.** When
   false, the concierge says so honestly. Never paper over it with a plausible
   status; a fabricated ETA is worse than no ETA.

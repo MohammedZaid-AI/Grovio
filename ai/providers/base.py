@@ -77,6 +77,23 @@ class Offer:
         return " · ".join(bits)
 
 
+@dataclass(frozen=True)
+class Coupon:
+    """One discount the user could apply. `saving` and `minimum` are None when
+    the platform didn't say — never a guess, because a saving we invent is a
+    price we invented."""
+    code: str
+    label: str
+    saving: float | None = None
+    minimum: float | None = None
+
+    def summary(self) -> str:
+        bits = [self.label]
+        if self.saving:
+            bits.append(f"saves up to ₹{self.saving:g}")
+        return " — ".join(bits)
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Implement this to plug in a platform.
@@ -178,8 +195,18 @@ class OrderingProvider(Provider, Protocol):
     """
     supports_tracking: bool
     supports_cancellation: bool
+    # Platforms scope discounts to a built cart, so `coupons` is what actually
+    # commits the basket. A provider that can't list them leaves this False and
+    # the flow goes straight to `place` — no coupon step, nothing invented.
+    supports_coupons: bool
 
-    async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
+    async def coupons(self, offer: Offer, quantity: int, ctx: SearchContext) -> list[Coupon]:
+        ...
+
+    async def place(self, offer: Offer, quantity: int, ctx: SearchContext,
+                    coupon: str | None = None) -> PlacedOrder:
+        """`coupon` is three-valued: None picks the best one automatically,
+        "" applies none because the user declined, and a code applies that."""
         ...
 
 

@@ -150,6 +150,7 @@ class FoodClient:
         self.statuses = list(statuses or [])
         self.searches = 0
         self.carts = []
+        self.calls = []
         self.paid_with = []
         self.confirmed = []
 
@@ -164,6 +165,7 @@ class FoodClient:
         return self.payload
 
     async def call(self, key, args):
+        self.calls.append(key)
         return Result(structured={"items": [{"menu_item_id": "IT-1"}]})
 
     async def add_to_cart(self, address_id, restaurant_id, cart_items, restaurant_name=None):
@@ -805,8 +807,16 @@ show(pay_phone, "pay_food", ProviderKind.RESTAURANT.value,
      [("R::I", "Tomatoes Pizza", "La Pino'z", 97, None)])
 
 result = run(skills.place_order(identity.load(pay_phone), 1))
-check("the payment link reaches the model verbatim",
-      "https://mcp.swiggy.com/pay/tok" in result.message)
+# The link goes STRAIGHT to the user. Routing it through the model cost 24s of a
+# 60s UPI window when this ran live on a local model.
+queued = [row[0] for row in db.get_connection().execute(
+    "SELECT body FROM whatsapp_outbound WHERE phone = ?", (pay_phone,)).fetchall()]
+check("the payment link is sent to the user immediately",
+      any("https://mcp.swiggy.com/pay/tok" in body for body in queued))
+check("and never handed to the model, which would only delay it",
+      "https://mcp.swiggy.com/pay/tok" not in result.message)
+check("so it cannot be mangled, shortened or omitted in the reply",
+      "Do NOT repeat it" in result.message)
 check("the model is told NOT to claim it is placed",
       "Do NOT say the order is placed" in result.message)
 check("and never to ask for a PIN or card details",
@@ -966,6 +976,196 @@ run(food_provider(live).place(offers[0], 1, SearchContext()))
 sent = live.paid_with[0]
 check("checkout is told UPI, never an app id", sent["method"] == "UPI")
 check("and given the app to open", sent["intent_app"] == "gpay://upi/")
+
+# ======================================================================
+print("\n[18] The user picks the coupon, and the cart is built exactly once")
+# Discounts are scoped to a built cart, so listing them commits the basket and
+# `place` then checks the SAME basket out. That means the cart is built twice for
+# one order — the flush is what stops the second build stacking quantities and
+# charging someone for two dinners.
+lister = CouponClient(coupons={"coupons": [
+    {"couponCode": "SAVE60", "maxDiscount": 60, "minCartAmount": 0},
+    {"couponCode": "FLAT120", "maxDiscount": 120, "minCartAmount": 0},
+    {"couponCode": "TOOBIG", "maxDiscount": 900, "minCartAmount": 5000},
+]})
+listed = run(food_provider(lister).coupons(offers[0], 1, SearchContext()))
+check("coupons are listed best saving first", [c.code for c in listed] == ["FLAT120", "SAVE60"])
+check("one the cart cannot reach is never shown", "TOOBIG" not in [c.code for c in listed])
+check("listing builds the cart", len(lister.carts) == 1)
+check("and flushes it first, so a rebuild cannot stack quantities",
+      lister.calls[0] == "flush_cart")
+check("listing applies nothing on its own", lister.applied == [])
+
+chosen = CouponClient(coupons=lister.coupon_payload)
+run(food_provider(chosen).place(offers[0], 1, SearchContext(), coupon="SAVE60"))
+check("their choice is applied, not ours", chosen.applied == ["SAVE60"])
+
+declined = CouponClient(coupons=lister.coupon_payload)
+order = run(food_provider(declined).place(offers[0], 1, SearchContext(), coupon=""))
+check("declining applies no coupon at all", declined.applied == [])
+check("and still places the order", order.status == "PLACED")
+check("and claims no saving", not order.note)
+
+
+class CouponSpy(Spy):
+    """An ordering provider that offers discounts."""
+    supports_coupons = True
+
+    def __init__(self, *a, coupons=("FLAT120", "SAVE60"), **kw):
+        super().__init__(*a, **kw)
+        self.offering = list(coupons)
+        self.coupon_calls = 0
+        self.used = []
+
+    async def coupons(self, offer, quantity, ctx):
+        from ai.providers.base import Coupon
+        self.coupon_calls += 1
+        return [Coupon(code=c, label=f"{c} off") for c in self.offering]
+
+    async def place(self, offer, quantity, ctx, coupon=None):
+        self.used.append(coupon)
+        return await Spy.place(self, offer, quantity, ctx)
+
+
+ENTRIES = [("IT-1", "Chicken Biryani", "Meghana Foods", 340, 22),
+           ("IT-2", "Mutton Biryani", "Empire Restaurant", 280, 18)]
+
+
+def coupon_turn(phone, reply=None, **kw):
+    """Pick option 1, then optionally answer the coupon question."""
+    registry.clear()
+    spy = CouponSpy("spy_food", ProviderKind.RESTAURANT, **kw)
+    registry.register(spy)
+    identity.load(phone)
+    show(phone, "spy_food", ProviderKind.RESTAURANT.value, ENTRIES)
+    planner.get_llm = lambda: Recorder()
+    run(planner.plan(phone, "1"))
+    if reply is not None:
+        run(planner.plan(phone, reply))
+    return spy
+
+
+spy = coupon_turn("919155500180")
+state = conversation.load("919155500180")
+check("choosing a dish asks about coupons before spending",
+      state.state == conversation.State.AWAITING_COUPON)
+check("and nothing is ordered at that point", spy.placed == [])
+check("the offered codes are remembered in order",
+      [c["code"] for c in state.pending.coupons] == ["FLAT120", "SAVE60"])
+
+spy = coupon_turn("919155500181", "2")
+check("'2' picks the second coupon", spy.used == ["SAVE60"])
+check("and places the order they chose", spy.placed and spy.placed[0][0] == "IT-1")
+check("picking a coupon never re-searches", spy.searches == 0)
+check("ends in ORDER_COMPLETE",
+      conversation.load("919155500181").state == conversation.State.ORDER_COMPLETE)
+
+check("the code can be typed instead of the number",
+      coupon_turn("919155500182", "FLAT120").used == ["FLAT120"])
+check("case does not matter", coupon_turn("919155500183", "save60").used == ["SAVE60"])
+check("'no' skips the discount and still orders",
+      coupon_turn("919155500184", "no thanks").used == [""])
+check("'yes' takes the best one, which is the one listed first",
+      coupon_turn("919155500185", "yes").used == ["FLAT120"])
+
+# Changing their mind mid-checkout must not strand them holding a basket.
+spy = coupon_turn("919155500186", "actually I want pizza instead")
+state = conversation.load("919155500186")
+check("an unrelated reply drops the basket rather than stranding them",
+      state.state != conversation.State.AWAITING_COUPON)
+check("and nothing was ordered", spy.placed == [])
+
+# A provider with no coupons must not grow a step that could lose the order.
+spy = coupon_turn("919155500187", coupons=())
+check("no coupons means straight to ordering", spy.placed and spy.placed[0][0] == "IT-1")
+check("and no coupon question", conversation.load("919155500187").state
+      == conversation.State.ORDER_COMPLETE)
+check("with nothing applied", spy.used == [None])
+
+# A retry retries THIS order — the discount included, not asked for again.
+spy = coupon_turn("919155500188", "1", fail_times=1)
+run(planner.plan("919155500188", "yes"))
+check("a retry reuses the coupon they already chose", spy.used == ["FLAT120", "FLAT120"])
+check("and never re-asks", spy.coupon_calls == 1)
+
+# THE money boundary. Building a cart writes to the owner's account, so an
+# unauthorised number must not get that far — never mind to checkout.
+registry.clear()
+spy = CouponSpy("spy_food", ProviderKind.RESTAURANT)
+registry.register(spy)
+stranger = "919999000111"
+identity.load(stranger)
+show(stranger, "spy_food", ProviderKind.RESTAURANT.value, ENTRIES)
+os.environ["AUTHORIZED_PHONES"] = "919155500180"      # deliberately not them
+planner.get_llm = lambda: Recorder()
+run(planner.plan(stranger, "1"))
+check("an unauthorised number never gets a cart built", spy.coupon_calls == 0)
+check("and never reaches checkout", spy.placed == [])
+
+# ======================================================================
+print("\n[19] REGRESSION: a cart Swiggy rejected is never checked out")
+# Captured live 2026-08-16. update_food_cart answered isError=False and printed a
+# tidy summary; get_food_cart said the cart was unusable. We logged that and
+# spent a checkout anyway, which died with "Some error while creating the order"
+# — then offered a retry that could only fail the same way.
+BROKEN_CART = {
+    "statusCode": 1, "successful": False, "data": None,
+    "errorCodes": ["INVALID_ADDON"], "ctaAction": "clearCart",
+    "statusMessage": "Restaurant may have removed the item(s) from their menu.",
+}
+GOOD_CART = {"statusCode": 0, "statusMessage": "CART_UPDATED_SUCCESSFULLY",
+             "data": {"cart_id": 646329498, "result": "success"}}
+
+check("Swiggy's rejection is read as a rejection",
+      "removed the item" in (swiggy_food._cart_rejected(BROKEN_CART) or ""))
+check("a healthy cart is not", swiggy_food._cart_rejected(GOOD_CART) is None)
+check("an unreadable cart is not a verdict either",
+      swiggy_food._cart_rejected({}) is None and swiggy_food._cart_rejected(None) is None)
+check("errorCodes alone are enough to stop",
+      swiggy_food._cart_rejected({"errorCodes": ["INVALID_ADDON"]}) is not None)
+
+
+class BrokenCartClient(FoodClient):
+    """update_food_cart says fine; get_food_cart says the cart is unusable."""
+
+    async def call(self, key, args):
+        self.calls.append(key)
+        if key == "cart":
+            return Result(structured=BROKEN_CART)
+        return Result(structured={"items": []})
+
+
+broken = BrokenCartClient()
+failed = None
+try:
+    run(food_provider(broken).place(offers[0], 1, SearchContext()))
+except ItemUnavailable as e:
+    failed = e
+check("a rejected cart stops before checkout", failed is not None)
+check("and nothing was paid for", broken.paid_with == [])
+check("and the logs carry Swiggy's own reason, not just isError",
+      "removed the item" in str(failed))
+
+# Through skills: the user gets alternatives, not a retry that cannot work.
+registry.clear()
+spy = CouponSpy("spy_food", ProviderKind.RESTAURANT)
+
+
+async def _unavailable(offer, quantity, ctx, coupon=None):
+    raise ItemUnavailable("cart rejected: INVALID_ADDON")
+
+
+spy.place = _unavailable
+spy.offering = []
+registry.register(spy)
+sold_out = "919155500190"
+identity.load(sold_out)
+show(sold_out, "spy_food", ProviderKind.RESTAURANT.value, ENTRIES)
+outcome = run(skills.place_order(identity.load(sold_out), 1))
+check("the user is told it's unavailable, not that something broke",
+      outcome.status == skills.SkillStatus.UNAVAILABLE_ITEM)
+check("and pointed at the options already on the table",
+      "other options" in outcome.message)
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

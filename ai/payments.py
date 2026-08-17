@@ -17,6 +17,7 @@ WHAT IT WILL NOT DO
   * Never spend anything. The order already exists; this only observes it.
 """
 import asyncio
+import time
 
 import db
 from core.logger import logger
@@ -47,8 +48,13 @@ def _seconds(milliseconds, fallback):
         return fallback
 
 
-async def _notify(phone: str, text: str) -> None:
-    """Say something to a user outside any turn, via the durable queue."""
+async def notify(phone: str, text: str) -> None:
+    """Say something to a user outside any turn, via the durable queue.
+
+    Public because the payment LINK goes out this way too: a UPI session is
+    short, and waiting for the model to write a sentence around it spends a
+    chunk of the window the user needs to actually pay.
+    """
     from backend.whatsapp_worker import deliver
 
     try:
@@ -60,16 +66,17 @@ async def _notify(phone: str, text: str) -> None:
 async def _watch(user_phone: str, provider, order, ctx, title: str, row_id) -> None:
     interval = _seconds(order.poll_interval_ms, DEFAULT_INTERVAL_SECONDS)
     deadline = _seconds(order.poll_timeout_ms, DEFAULT_TIMEOUT_SECONDS)
-    waited = 0.0
+    started = time.monotonic()
 
     logger.info(
         f"[payments] watching {order.order_id} for {user_phone} — every "
         f"{interval:g}s for up to {deadline:g}s"
     )
 
-    while waited < deadline:
+    # Real elapsed time, not a count of sleeps: each poll also costs a round
+    # trip, so adding up the intervals ran a 60s window for 92s.
+    while (waited := time.monotonic() - started) < deadline:
         await asyncio.sleep(interval)
-        waited += interval
 
         try:
             status = (await provider.payment_status(order, ctx) or "pending").lower()
@@ -90,9 +97,9 @@ async def _watch(user_phone: str, provider, order, ctx, title: str, row_id) -> N
 
             _finish(user_phone, row_id, base.PLACED if confirmed else base.UNKNOWN)
             if confirmed:
-                await _notify(user_phone, f"Paid and confirmed — {title} is on its way 🎉")
+                await notify(user_phone, f"Paid and confirmed — {title} is on its way 🎉")
             else:
-                await _notify(
+                await notify(
                     user_phone,
                     f"Your payment for {title} went through, but I couldn't get the "
                     f"final confirmation. Please check the Swiggy app before "
@@ -102,20 +109,20 @@ async def _watch(user_phone: str, provider, order, ctx, title: str, row_id) -> N
 
         if status in ABANDONED:
             _finish(user_phone, row_id, base.CANCELLED)
-            await _notify(user_phone, f"That order for {title} was cancelled. "
+            await notify(user_phone, f"That order for {title} was cancelled. "
                                       f"Nothing more will be charged.")
             return
 
         if status in FAILED:
             _finish(user_phone, row_id, base.CANCELLED)
-            await _notify(user_phone, f"The payment for {title} didn't go through, so "
+            await notify(user_phone, f"The payment for {title} didn't go through, so "
                                       f"nothing was charged and no order was placed. "
                                       f"Say the word and I'll set it up again.")
             return
 
         if status in CART_CHANGED:
             _finish(user_phone, row_id, base.CANCELLED)
-            await _notify(user_phone, f"Something changed in the basket for {title}, so "
+            await notify(user_phone, f"Something changed in the basket for {title}, so "
                                       f"I stopped rather than order the wrong thing. "
                                       f"Want me to look again?")
             return
@@ -124,7 +131,7 @@ async def _watch(user_phone: str, provider, order, ctx, title: str, row_id) -> N
     # either outcome — a wrong "it failed" invites a duplicate order.
     logger.warning(f"[payments] gave up waiting on {order.order_id} after {waited:g}s")
     _finish(user_phone, row_id, base.UNKNOWN)
-    await _notify(
+    await notify(
         user_phone,
         f"I haven't seen the payment for {title} come through yet. If you did pay, "
         f"it'll show in your Swiggy app — please check there before ordering again."

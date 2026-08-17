@@ -257,7 +257,91 @@ async def place_order(user, selection: int, quantity: int = 1) -> SkillResult:
         f"[skills] selection {selection} -> {entry['title']!r} on "
         f"{entry['provider']} (offer_id={entry['id']!r}, qty={pending.quantity})"
     )
+
+    # Building a cart WRITES to the account owner's linked account, so the money
+    # gate has to hold here too, not only at checkout.
+    blocked = _may_spend(user, entry.get("title", ""))
+    if blocked:
+        return blocked
+
+    offering = await _offer_coupons(user, entry, pending.quantity)
+    if offering:
+        return offering
     return await _execute_pending(user, entry, quantity=pending.quantity)
+
+
+async def _offer_coupons(user, entry: dict, quantity: int) -> SkillResult | None:
+    """Show the discounts on this cart and wait for a choice.
+
+    Returns None when there is nothing to ask about — no coupon capability, no
+    coupons, or the lookup failed — and the order proceeds straight to checkout.
+    A discount is a bonus; it must never become a step that loses the order.
+    """
+    offer = _offer_from(entry)
+    provider = registry.get(offer.provider)
+    if provider is None or not getattr(provider, "supports_coupons", False):
+        return None
+
+    ctx, _ = await _ordering_context(user, provider)
+    if ctx is None:
+        return None      # not linked; _execute_pending raises the link prompt
+
+    try:
+        coupons = await provider.coupons(offer, quantity, ctx)
+    except Exception as e:
+        # Includes the cart being rejected. Left to _execute_pending to hit
+        # again and classify properly — this step never speaks for the order.
+        logger.info(f"[skills] could not list coupons for {offer.title!r}: {e!r}")
+        return None
+
+    if not coupons:
+        logger.info(f"[skills] no coupons for {offer.title!r}; ordering at full price")
+        return None
+
+    shown = [{"code": c.code, "label": c.label, "saving": c.saving} for c in coupons[:5]]
+    conversation.offer_coupons(user.phone, shown)
+    lines = [f"{i}. {c['code']} — {c['label']}" for i, c in enumerate(shown, 1)]
+    return SkillResult(
+        SkillStatus.OK,
+        f"COUPONS AVAILABLE for {offer.title}"
+        + (f" from {offer.venue}" if offer.venue else "")
+        + ". Nothing is ordered or charged yet.\n"
+        + "\n".join(lines)
+        + "\nList these EXACTLY as given — the codes and wording are Swiggy's, not "
+        "yours, so never invent a code or a saving amount. Ask which one they want, "
+        "and say they can skip it. Their reply is handled for you; do NOT call any "
+        "tool for this and do NOT claim the order is placed.",
+    )
+
+
+async def choose_coupon(user, code: str) -> SkillResult:
+    """Apply the discount they chose (or none, for "") and place the order."""
+    state = conversation.load(user.phone)
+    if not state.awaiting_coupon:
+        return SkillResult(
+            SkillStatus.STALE,
+            "There is no order waiting on a coupon. Ask what they'd like instead.",
+        )
+
+    conversation.choose_coupon(user.phone, code)
+    logger.info(f"[skills] coupon {code or '<none>'} chosen for {state.pending.title!r}")
+    entry = state.offer_at(state.pending.selection or 0) or _entry_from(state.pending)
+    return await _execute_pending(user, entry, quantity=state.pending.quantity, coupon=code)
+
+
+def _entry_from(pending) -> dict:
+    """Rebuild the offer dict from a pending order, for when the shown list is
+    gone but the choice is still live."""
+    return {
+        "provider": pending.provider,
+        "id": pending.offer_id,
+        "title": pending.title,
+        "venue": pending.venue,
+        "price": pending.price,
+        "currency": pending.currency,
+        "eta_minutes": pending.eta_minutes,
+        "kind": pending.kind,
+    }
 
 
 async def retry_pending_order(user) -> SkillResult:
@@ -277,17 +361,11 @@ async def retry_pending_order(user) -> SkillResult:
         return _exhausted(user, state)
 
     conversation.begin_retry(user.phone)
-    entry = state.offer_at(state.pending.selection or 0) or {
-        "provider": state.pending.provider,
-        "id": state.pending.offer_id,
-        "title": state.pending.title,
-        "venue": state.pending.venue,
-        "price": state.pending.price,
-        "currency": state.pending.currency,
-        "eta_minutes": state.pending.eta_minutes,
-        "kind": state.pending.kind,
-    }
-    return await _execute_pending(user, entry, quantity=state.pending.quantity)
+    entry = state.offer_at(state.pending.selection or 0) or _entry_from(state.pending)
+    # Same coupon as the original attempt — a retry retries THIS order, discount
+    # included, rather than asking them to choose all over again.
+    return await _execute_pending(user, entry, quantity=state.pending.quantity,
+                                  coupon=state.pending.coupon)
 
 
 def _exhausted(user, state) -> SkillResult:
@@ -325,7 +403,36 @@ async def cancel_pending_order(user) -> SkillResult:
     )
 
 
-async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResult:
+def _may_spend(user, title: str) -> SkillResult | None:
+    """THE money boundary. Anyone may chat and be recommended food; only an
+    authorised number may spend. Every path that touches the account owner's
+    provider account — building a cart included — passes through here.
+
+    It matters more than it looks: orders go on the ACCOUNT OWNER'S linked
+    provider account, to the address stored there. An unauthorised order is food
+    arriving at someone else's home for them to pay.
+    FAILS CLOSED — an unset AUTHORIZED_PHONES lets nobody spend.
+    """
+    if authz.is_authorized_user(user.phone):
+        return None
+
+    logger.warning(
+        f"[skills] BLOCKED an order attempt from {user.phone} — not in "
+        f"AUTHORIZED_PHONES ({title!r})"
+    )
+    conversation.cancel_pending(user.phone)
+    return SkillResult(
+        SkillStatus.ERROR,
+        "NOT AUTHORISED TO ORDER: this user may chat and get recommendations, "
+        "but ordering is limited to approved numbers. Tell them warmly that "
+        "you can help them decide but can't place the order for them yet, and "
+        "keep being useful about the food itself. Do NOT claim an order was "
+        "placed, and do NOT offer to try again.",
+    )
+
+
+async def _execute_pending(user, entry: dict, quantity: int = None,
+                           coupon: str | None = None) -> SkillResult:
     """Place the order described by `entry`, driving the state machine on the
     outcome. Shared by the first attempt and every retry so both paths behave
     identically."""
@@ -333,28 +440,9 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     provider = registry.get(offer.provider)
     quantity = quantity or 1
 
-    # THE money boundary. Anyone may chat and be recommended food; only an
-    # authorised number may spend. Both the first attempt and every retry pass
-    # through here, so this is the one place it has to hold.
-    #
-    # It matters more than it looks: orders go on the ACCOUNT OWNER'S linked
-    # provider account, cash on delivery, to the address stored there. An
-    # unauthorised order is food arriving at someone else's home for them to pay.
-    # FAILS CLOSED — an unset AUTHORIZED_PHONES lets nobody spend.
-    if not authz.is_authorized_user(user.phone):
-        logger.warning(
-            f"[skills] BLOCKED an order attempt from {user.phone} — not in "
-            f"AUTHORIZED_PHONES ({offer.title!r})"
-        )
-        conversation.cancel_pending(user.phone)
-        return SkillResult(
-            SkillStatus.ERROR,
-            "NOT AUTHORISED TO ORDER: this user may chat and get recommendations, "
-            "but ordering is limited to approved numbers. Tell them warmly that "
-            "you can help them decide but can't place the order for them yet, and "
-            "keep being useful about the food itself. Do NOT claim an order was "
-            "placed, and do NOT offer to try again.",
-        )
+    blocked = _may_spend(user, offer.title)
+    if blocked:
+        return blocked
 
     if provider is None or not hasattr(provider, "place"):
         conversation.order_failed(user.phone, "no ordering provider")
@@ -372,10 +460,16 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
 
     logger.info(
         f"[skills] placing {offer.title!r} on {provider.name} — offer_id="
-        f"{offer.id!r} quantity={quantity} price={offer.price}"
+        f"{offer.id!r} quantity={quantity} price={offer.price} coupon={coupon!r}"
     )
     try:
-        placed = await provider.place(offer, max(1, int(quantity)), ctx)
+        # Only providers that list coupons are asked to apply one. The rest keep
+        # the plain two-argument signature rather than growing a parameter they
+        # would ignore.
+        if getattr(provider, "supports_coupons", False):
+            placed = await provider.place(offer, max(1, int(quantity)), ctx, coupon=coupon)
+        else:
+            placed = await provider.place(offer, max(1, int(quantity)), ctx)
     except base.ItemUnavailable as e:
         state = conversation.order_failed(user.phone, str(e))
         if state.state == conversation.State.ORDER_FAILED:
@@ -448,7 +542,7 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     if placed.needs_payment:
         # The provider made the order but wants paying first. NOTHING is placed
         # yet — saying otherwise would promise food nobody has paid for.
-        return _await_payment(user, offer, placed, provider, ctx)
+        return await _await_payment(user, offer, placed, provider, ctx)
 
     order_id = bookkeeping("save_order", lambda: db.save_order(
         phone=user.phone,
@@ -497,13 +591,18 @@ async def _execute_pending(user, entry: dict, quantity: int = None) -> SkillResu
     )
 
 
-def _await_payment(user, offer, placed, provider, ctx) -> SkillResult:
+async def _await_payment(user, offer, placed, provider, ctx) -> SkillResult:
     """Hand the user the provider's payment page and watch for it to land.
 
     The link is the ONLY thing that goes to them — no card or UPI details pass
     through us at any point. A background watcher confirms the order and
     messages them when it resolves, because that happens on their clock, not
     inside this turn.
+
+    THE LINK IS SENT HERE, not left for the model to include in its reply. A UPI
+    session is short — Swiggy asked us to poll for sixty seconds — and observed
+    live, the model spent twenty-four of those writing a sentence around the
+    link. The user got it with a third of their window already gone.
     """
     from ai import payments
 
@@ -513,29 +612,40 @@ def _await_payment(user, offer, placed, provider, ctx) -> SkillResult:
             phone=user.phone, provider=placed.provider,
             provider_order_id=placed.order_id, status=placed.status,
             title=offer.title, venue=offer.venue,
-            total=placed.total if placed.total is not None else offer.price,
+            total=placed.total,          # the provider's figure or nothing
             currency=placed.currency, eta_minutes=placed.eta_minutes,
         )
         conversation.awaiting_payment(user.phone)
     except Exception:
         logger.error("[skills] could not record a pending payment", exc_info=True)
 
-    payments.watch(user.phone, provider, placed, ctx, offer.title, order_id)
+    # Only ever the provider's own figure. The offer price is what the search
+    # listed for the dish, not what this cart charges — quoting it beside a
+    # payment link would be inventing the amount someone is about to pay.
+    total = f"{placed.currency} {placed.total:g}" if placed.total is not None else None
 
-    amount = placed.total if placed.total is not None else offer.price
-    total = f"{placed.currency} {amount:g}" if amount is not None else "the total"
+    # Out the door first, before the watcher and long before the model writes
+    # anything. Every second here comes off the window they have to pay in.
+    await payments.notify(
+        user.phone,
+        f"Tap to pay for {offer.title}"
+        + (f" from {offer.venue}" if offer.venue else "")
+        + (f" — {total}" if total else "")
+        + f", it opens your UPI app:\n{placed.payment_url}",
+    )
+    payments.watch(user.phone, provider, placed, ctx, offer.title, order_id)
     logger.info(f"[skills] {offer.title!r} awaiting payment — order {placed.order_id}")
 
     return SkillResult(
         SkillStatus.OK,
         f"PAYMENT NEEDED before this order is placed. {offer.title}"
         + (f" from {offer.venue}" if offer.venue else "")
-        + f", {total}.\n"
-        f"Give them this link EXACTLY as-is, on its own line, and say it opens "
-        f"their UPI app:\n{placed.payment_url}\n"
-        f"Tell them you'll confirm here the moment it goes through — they do NOT "
-        f"need to reply. Do NOT say the order is placed, do NOT invent an ETA, "
-        f"and never ask for a UPI id, PIN or card details.",
+        + (f", {total}" if total else ", amount shown on the payment page") + ".\n"
+        f"The payment link has ALREADY been sent to them in a separate message. "
+        f"Do NOT repeat it, do NOT write out any URL. Add one short line only: "
+        f"they pay whenever they're ready and you'll confirm here the moment it "
+        f"lands, so there's nothing to reply to. Do NOT say the order is placed, "
+        f"do NOT invent an ETA, and never ask for a UPI id, PIN or card details.",
     )
 
 

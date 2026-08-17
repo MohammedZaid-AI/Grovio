@@ -21,6 +21,7 @@ from core.logger import logger
 from ai.providers.base import (
     PENDING_PAYMENT,
     PLACED,
+    Coupon,
     ItemUnavailable,
     Offer,
     OrderStatus,
@@ -125,13 +126,19 @@ def _payment_method_of(entry: dict):
         return UPI, None, True
 
     intent = _first(entry, "intentApp", "id")
+    label = str(_first(entry, "displayName", "name", "label") or "")
+
+    # The QR option is not an app. Observed live with BOTH shapes — once as
+    # {"displayName": "Pay with QR", "generateUPIQR": true} and once as
+    # {"id": "PayWithQR"} with no flag at all. An intentApp is a launchable URI
+    # scheme ("gpay://upi/"); anything calling itself QR is the QR option, and
+    # sending "PayWithQR" as an app to open would be the same class of mistake
+    # as sending "gpay://upi/" as a payment method.
+    if "qr" in f"{intent} {label}".lower():
+        return UPI, None, True
+
     if declared == "UPI" or intent:
         return UPI, str(intent) if intent else None, False
-
-    # A QR option often carries no id at all; the label is the only signal.
-    label = str(_first(entry, "displayName", "name", "label") or "")
-    if "qr" in label.lower():
-        return UPI, None, True
     return None
 
 
@@ -229,6 +236,27 @@ def _best_coupon(coupons: list, cart_total) -> dict | None:
     if not affordable:
         return None
     return sorted(affordable, key=lambda c: (-c["saving"], c["code"]))[0]
+
+
+def _cart_rejected(cart: dict):
+    """Swiggy's own verdict on the cart it just built, or None if it's fine.
+
+    `update_food_cart` answers isError=False and prints a tidy cart summary even
+    when the cart is unusable — observed live:
+
+        statusCode 1 · successful False · errorCodes ['INVALID_ADDON']
+        "Apologies! one or more items in your cart are no longer available"
+
+    Reading that back is the only warning we get before checkout dies with the
+    useless "Some error while creating the order".
+    """
+    if not isinstance(cart, dict) or not cart:
+        return None          # nothing to read is not a verdict
+    codes = cart.get("errorCodes")
+    if cart.get("successful") is False or _num(cart.get("statusCode")) \
+            or (isinstance(codes, list) and codes):
+        return str(cart.get("statusMessage") or codes or "cart rejected")[:200]
+    return None
 
 
 def _error_text(result) -> str:
@@ -360,6 +388,7 @@ class SwiggyFoodProvider:
     # session rather than trusted blindly.
     supports_tracking = True
     supports_cancellation = False
+    supports_coupons = True
 
     PAYMENT_METHOD = "Cash"   # COD only, per Swiggy's MCP documentation
 
@@ -477,13 +506,148 @@ class SwiggyFoodProvider:
             )
         return offers
 
-    async def place(self, offer: Offer, quantity: int, ctx: SearchContext) -> PlacedOrder:
+    async def coupons(self, offer: Offer, quantity: int, ctx: SearchContext) -> list[Coupon]:
+        """What this cart could be discounted with, best saving first.
+
+        Discounts are scoped to a built cart, so this commits the basket — the
+        same basket `place` then checks out. Best effort throughout: no coupon
+        list is a reason to pay full price, never a reason to lose the order.
+        """
         client = await self._session()
         address_id = ctx.address_id or await client.default_address_id()
-        restaurant_id, item_id = _unpack_id(offer.id)
+        await self._build_cart(client, offer, quantity, address_id)
 
+        if not (client.supports("coupons") and client.supports("apply_coupon")):
+            return []
+        try:
+            available = _coupons(await client.coupons(address_id))
+        except Exception as e:
+            logger.info(f"[{self.name}] could not fetch coupons: {e!r}")
+            return []
+
+        affordable = [
+            c for c in available
+            if not c["minimum"] or offer.price is None or offer.price >= c["minimum"]
+        ]
+        affordable.sort(key=lambda c: (-c["saving"], c["code"]))
+        logger.info(
+            f"[{self.name}] coupons for this cart: "
+            f"{[(c['code'], c['saving']) for c in affordable]}"
+        )
+        return [
+            Coupon(code=c["code"], label=c["label"],
+                   saving=c["saving"] or None, minimum=c["minimum"] or None)
+            for c in affordable
+        ]
+
+    async def place(self, offer: Offer, quantity: int, ctx: SearchContext,
+                    coupon: str | None = None) -> PlacedOrder:
+        client = await self._session()
+        address_id = ctx.address_id or await client.default_address_id()
+        await self._build_cart(client, offer, quantity, address_id)
+
+        # Three-valued, per the protocol: a code is the one the user chose, ""
+        # is them declining, and None means nobody was asked — so pick the best
+        # for them. Purely additive either way: if anything here fails the order
+        # proceeds at full price.
+        if coupon:
+            applied = coupon if await self._apply_coupon(client, address_id, coupon) else None
+        elif coupon is None:
+            applied = await self._apply_best_coupon(client, address_id, offer.price)
+        else:
+            applied = None
+
+        # Ask what THIS cart can be paid with rather than assuming. Hardcoding
+        # "Cash" is what made every order fail once Swiggy disabled it.
+        chosen = await self._payment_choice(client, address_id)
+        logger.info(f"[{self.name}] paying with {chosen}")
+
+        result = await client.place_order(
+            address_id,
+            payment_method=chosen["method"],
+            intent_app=chosen["intent_app"],
+            generate_upi_qr=chosen["qr"],
+        )
+        if getattr(result, "isError", False):
+            detail = _error_text(result)
+            logger.error(f"[{self.name}] checkout failed: {detail}")
+            if _is_payment_problem(detail):
+                # Not the item, not the user — the platform will not take the
+                # payment method we send. Flagged so the layers above stop
+                # offering a retry that cannot possibly work.
+                error = ProviderError(f"payment method refused: {detail[:120]}")
+                error.failure = Failure.PAYMENT_UNAVAILABLE
+                raise error
+            if _is_item_problem(detail):
+                raise ItemUnavailable(f"checkout rejected {offer.id}: item problem")
+            raise ProviderError("order rejected at checkout")
+
+        # isError is False, so Swiggy ACCEPTED the order. An unparseable id is a
+        # reporting gap, never grounds to call a placed order failed — doing that
+        # sends the user into the retry flow and risks ordering twice.
+        payload = mcp.payload_of(result)
+        order_id = str(_first(payload, "orderId", "order_id", "id") or "")
+        if not order_id:
+            logger.warning(
+                f"[{self.name}] order accepted but no id in the response. "
+                f"Keys: {list(payload.keys())[:12]}"
+            )
+
+        # A UPI order arrives PENDING_PAYMENT with a hosted payment page. It is
+        # NOT placed — saying so would be claiming food is coming that nobody
+        # has paid for.
+        bridge_url = str(_first(payload, "bridgeUrl", "bridge_url",
+                                "redirectUrl", "paymentUrl") or "")
+        if bridge_url:
+            logger.info(f"[{self.name}] order {order_id} awaiting payment")
+            return PlacedOrder(
+                provider=self.name,
+                order_id=order_id,
+                status=PENDING_PAYMENT,
+                # No fallback to offer.price here, unlike a placed order. That
+                # number is what the SEARCH listed (₹269 live) and is neither
+                # the dish price (₹159) nor what the payment page will charge
+                # (₹251) — printing it next to "tap to pay" states a figure
+                # nobody is being asked for.
+                total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
+                                  "total", "amount")),
+                items=(offer.title,),
+                payment_url=bridge_url,
+                payment_ref=str(_first(payload, "paasId", "paas_id") or "") or None,
+                note=f"coupon {applied} applied" if applied else None,
+                poll_interval_ms=_int(_first(payload, "pollingIntervalInMs")),
+                poll_timeout_ms=_int(_first(payload, "maxTimeToPollForInMs")),
+            )
+
+        return PlacedOrder(
+            provider=self.name,
+            order_id=order_id,
+            status=PLACED,
+            eta_minutes=_eta(payload) or offer.eta_minutes,
+            total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
+                              "total", "amount")) or offer.price,
+            items=(offer.title,),
+            note=f"coupon {applied} applied" if applied else None,
+        )
+
+    async def _build_cart(self, client, offer: Offer, quantity: int, address_id: str):
+        """Put exactly this item in the cart, replacing whatever was there.
+
+        Called by BOTH `coupons` and `place`, so it runs twice for one order.
+        The flush is what makes that safe: without it a second add could stack
+        quantities and someone gets — and pays for — two dinners. If the flush
+        itself fails we carry on, which is precisely the behaviour that shipped
+        before the coupon step existed.
+        """
+        restaurant_id, item_id = _unpack_id(offer.id)
         if not restaurant_id:
             raise ProviderError(f"offer {offer.id!r} carries no restaurant id")
+
+        if client.supports("flush_cart"):
+            try:
+                await client.call("flush_cart", {"addressId": address_id})
+            except Exception as e:
+                logger.warning(f"[{self.name}] could not flush the cart first: {e!r}")
 
         # search_menu returns the id as `menu_item_id`, so the cart is sent both
         # spellings: the tool schema for update_food_cart is not published in the
@@ -516,86 +680,24 @@ class SwiggyFoodProvider:
         # Confirm the item actually landed BEFORE spending. The Instamart
         # provider learned this the hard way: update_cart can report success
         # while adding nothing, and the emptiness only surfaces as an opaque
-        # checkout failure. Advisory here — the cart tool's argument shape is
-        # unverified, so a failure to read it must not block a valid order.
+        # checkout failure.
+        #
+        # A cart we cannot READ stays advisory — the tool's argument shape is
+        # unverified, and a read failure must never block a valid order. A cart
+        # Swiggy explicitly REJECTS is a different thing entirely, and stopping
+        # here is what turns "something went wrong, shall I try again?" into
+        # "that one's unavailable, here are the others".
         try:
             cart_state = mcp.payload_of(await client.call("cart", {"addressId": address_id}))
-            logger.info(f"[{self.name}] get_food_cart: {str(cart_state)[:500]}")
         except Exception as e:
             logger.info(f"[{self.name}] could not read the cart back: {e!r}")
+            return
 
-        # Best coupon, applied for them. A friend doesn't hand you a list of
-        # codes to try — they just get you the discount. Purely additive: if
-        # anything here fails the order proceeds at full price.
-        applied = await self._apply_best_coupon(client, address_id, offer.price)
-
-        # Ask what THIS cart can be paid with rather than assuming. Hardcoding
-        # "Cash" is what made every order fail once Swiggy disabled it.
-        chosen = await self._payment_choice(client, address_id)
-        logger.info(f"[{self.name}] paying with {chosen}")
-
-        result = await client.place_order(
-            address_id,
-            payment_method=chosen["method"],
-            intent_app=chosen["intent_app"],
-            generate_upi_qr=chosen["qr"],
-        )
-        if getattr(result, "isError", False):
-            detail = _error_text(result)
-            logger.error(f"[{self.name}] checkout failed: {detail}")
-            if _is_payment_problem(detail):
-                # Not the item, not the user — the platform will not take the
-                # payment method we send. Flagged so the layers above stop
-                # offering a retry that cannot possibly work.
-                error = ProviderError(f"payment method refused: {detail[:120]}")
-                error.failure = Failure.PAYMENT_UNAVAILABLE
-                raise error
-            if _is_item_problem(detail):
-                raise ItemUnavailable(f"checkout rejected {item_id}: item problem")
-            raise ProviderError("order rejected at checkout")
-
-        # isError is False, so Swiggy ACCEPTED the order. An unparseable id is a
-        # reporting gap, never grounds to call a placed order failed — doing that
-        # sends the user into the retry flow and risks ordering twice.
-        payload = mcp.payload_of(result)
-        order_id = str(_first(payload, "orderId", "order_id", "id") or "")
-        if not order_id:
-            logger.warning(
-                f"[{self.name}] order accepted but no id in the response. "
-                f"Keys: {list(payload.keys())[:12]}"
-            )
-
-        # A UPI order arrives PENDING_PAYMENT with a hosted payment page. It is
-        # NOT placed — saying so would be claiming food is coming that nobody
-        # has paid for.
-        bridge_url = str(_first(payload, "bridgeUrl", "bridge_url",
-                                "redirectUrl", "paymentUrl") or "")
-        if bridge_url:
-            logger.info(f"[{self.name}] order {order_id} awaiting payment")
-            return PlacedOrder(
-                provider=self.name,
-                order_id=order_id,
-                status=PENDING_PAYMENT,
-                total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
-                                  "total", "amount")) or offer.price,
-                items=(offer.title,),
-                payment_url=bridge_url,
-                payment_ref=str(_first(payload, "paasId", "paas_id") or "") or None,
-                note=f"coupon {applied} applied" if applied else None,
-                poll_interval_ms=_int(_first(payload, "pollingIntervalInMs")),
-                poll_timeout_ms=_int(_first(payload, "maxTimeToPollForInMs")),
-            )
-
-        return PlacedOrder(
-            provider=self.name,
-            order_id=order_id,
-            status=PLACED,
-            eta_minutes=_eta(payload) or offer.eta_minutes,
-            total=_num(_first(payload, "cartTotal", "orderTotal", "grandTotal",
-                              "total", "amount")) or offer.price,
-            items=(offer.title,),
-            note=f"coupon {applied} applied" if applied else None,
-        )
+        logger.info(f"[{self.name}] get_food_cart: {str(cart_state)[:500]}")
+        rejected = _cart_rejected(cart_state)
+        if rejected:
+            logger.error(f"[{self.name}] cart is unusable after adding {item_id}: {rejected}")
+            raise ItemUnavailable(f"cart rejected {item_id}: {rejected}")
 
     async def _widen(self, client, query, address_id, payload, wanted):
         """Pull more pages so ranking has a real field to choose from.
@@ -654,27 +756,31 @@ class SwiggyFoodProvider:
         best = _best_coupon(available, cart_total)
         if not best:
             return None
+        return best["code"] if await self._apply_coupon(client, address_id, best["code"]) else None
 
+    async def _apply_coupon(self, client, address_id, code: str) -> bool:
+        """Put one code on the cart. False on any failure — never an exception,
+        because a discount that won't stick must not cost someone their dinner."""
+        if not client.supports("apply_coupon"):
+            return False
         try:
-            result = await client.apply_coupon(address_id, best["code"])
+            result = await client.apply_coupon(address_id, code)
         except Exception as e:
             logger.warning(
-                f"[{self.name}] apply_food_coupon({best['code']}) raised: {e!r}. "
+                f"[{self.name}] apply_food_coupon({code}) raised: {e!r}. "
                 f"If this is an argument-name error, fix COUPON_CODE_ARG in "
                 f"integrations/swiggy/swiggy_food_mcp.py — see its comment."
             )
-            return None
+            return False
 
         if getattr(result, "isError", False):
             # Commonly the cart no longer qualifies. Not worth troubling the
             # user with; they simply pay full price.
-            logger.info(
-                f"[{self.name}] coupon {best['code']} not applied: {_error_text(result)}"
-            )
-            return None
+            logger.info(f"[{self.name}] coupon {code} not applied: {_error_text(result)}")
+            return False
 
-        logger.info(f"[{self.name}] applied coupon {best['code']}")
-        return best["code"]
+        logger.info(f"[{self.name}] applied coupon {code}")
+        return True
 
     async def _payment_choice(self, client, address_id: str) -> dict:
         """Pick how to pay, from what the platform actually offers.
