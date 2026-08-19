@@ -211,9 +211,17 @@ class SwiggyFood:
     #   inspect_tools.py food apply_food_coupon fetch_food_coupons
     COUPON_CODE_ARG = "couponCode"
 
-    async def coupons(self, address_id: str) -> dict:
-        """Offers available for the current cart."""
-        return payload_of(await self.call("coupons", {"addressId": address_id}))
+    async def coupons(self, address_id: str):
+        """Offers available for the current cart — the RAW result.
+
+        Not put through payload_of, deliberately. This server answers some tools
+        with JSON and others with prose (`update_food_cart` returns "Cart
+        updated.
+Restaurant: ..."), and payload_of turns prose into {}, which
+        is indistinguishable from a cart that genuinely has no offers. The
+        provider reads both shapes and logs whatever it could not parse.
+        """
+        return await self.call("coupons", {"addressId": address_id})
 
     async def apply_coupon(self, address_id: str, code: str):
         return await self.call("apply_coupon", {
@@ -251,6 +259,19 @@ class SwiggyFood:
         if paas_id:
             args["paasId"] = paas_id
         return payload_of(await self.call("confirm", args))
+
+    async def past_orders(self, limit: int = 20):
+        """The user's own order history — the RAW result, like coupons.
+
+        Swiggy answers some Food tools with prose, so payload_of would flatten a
+        real history into {} and it would read as "never ordered anything".
+        """
+        return await self.call("orders", {"limit": limit})
+
+    async def addresses(self):
+        """Every saved address, raw. `default_address_id` only needs the id;
+        this is for reading the AREA, which is what recommendations use."""
+        return payload_of(await self.call("addresses", {}))
 
     async def track(self, order_id: str):
         return payload_of(await self.call("order_status", {"orderId": order_id}))

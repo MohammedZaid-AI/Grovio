@@ -256,6 +256,21 @@ session, run without it.
   basket to list them and `place()` checks that same basket out. Both call
   `_build_cart`, which flushes first. Remove the flush and a second add can
   stack quantities — someone pays for two dinners.
+- **What a user eats is READ, not asked for.** `skills.learn_about` imports
+  their real order history and delivery area from every linked provider, once,
+  on their first search, into the same food memory conversation writes to. There
+  is deliberately no agent here: an LLM could only re-derive what the platform
+  already stated, and ranking has to stay explainable. Facts prefixed `_` are
+  bookkeeping and are filtered out of the prompt by `memory.describe`.
+- **Store the AREA, never the street address.** `provider.locality` reads only
+  explicit area/city fields; a one-line address is left alone rather than sliced
+  on a guess. The area is all a recommendation needs, and it goes into an LLM
+  prompt.
+- **Swiggy answers some Food tools with JSON and others with PROSE.**
+  `payload_of` turns prose into `{}`, which reads exactly like "no offers" —
+  that is why coupons silently never appeared. `swiggy_food._available_coupons`
+  reads both shapes, checks `isError`, and logs the raw reply when it parses
+  nothing. Never let a parse failure return an empty list quietly.
 - **Read the cart back and BELIEVE it.** `update_food_cart` answers
   `isError=False` and prints a tidy summary for a cart that is unusable —
   observed live: `statusCode 1 · errorCodes ['INVALID_ADDON']`. Checking out

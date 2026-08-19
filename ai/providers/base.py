@@ -94,6 +94,19 @@ class Coupon:
         return " — ".join(bits)
 
 
+@dataclass(frozen=True)
+class PastOrder:
+    """Something this person actually ate, read from their own account.
+
+    Every field is real or None. `when` is the provider's own timestamp string,
+    kept opaque — parsing it into a date we then reason about would be inventing
+    precision the platform never promised.
+    """
+    title: str
+    venue: str | None = None
+    when: str | None = None
+
+
 @runtime_checkable
 class Provider(Protocol):
     """Implement this to plug in a platform.
@@ -199,8 +212,19 @@ class OrderingProvider(Provider, Protocol):
     # commits the basket. A provider that can't list them leaves this False and
     # the flow goes straight to `place` — no coupon step, nothing invented.
     supports_coupons: bool
+    # The user's own order history and saved area, when the platform exposes
+    # them. False means we learn what they like from conversation alone, which
+    # is slower but never wrong.
+    supports_history: bool
 
     async def coupons(self, offer: Offer, quantity: int, ctx: SearchContext) -> list[Coupon]:
+        ...
+
+    async def history(self, ctx: SearchContext, limit: int = 20) -> list[PastOrder]:
+        ...
+
+    async def locality(self, ctx: SearchContext) -> str | None:
+        """The AREA they get food delivered to — never the street address."""
         ...
 
     async def place(self, offer: Offer, quantity: int, ctx: SearchContext,

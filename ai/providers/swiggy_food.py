@@ -15,6 +15,7 @@ missing; it never becomes a number.
 """
 import asyncio
 import os
+import re
 
 from core.logger import logger
 
@@ -23,6 +24,7 @@ from ai.providers.base import (
     PLACED,
     Coupon,
     ItemUnavailable,
+    PastOrder,
     Offer,
     OrderStatus,
     PlacedOrder,
@@ -238,6 +240,66 @@ def _best_coupon(coupons: list, cart_total) -> dict | None:
     return sorted(affordable, key=lambda c: (-c["saving"], c["code"]))[0]
 
 
+def _past_orders(payload: dict) -> list:
+    """Read an order history out of JSON, whatever it calls its keys."""
+    if not isinstance(payload, dict):
+        return []
+    found = []
+    for entry in mcp.items_of(payload, "orders", "items", "results", "history"):
+        if not isinstance(entry, dict):
+            continue
+        venue = _first(entry, "restaurantName", "restaurant_name", "name")
+        restaurant = entry.get("restaurant")
+        if not venue and isinstance(restaurant, dict):
+            venue = _first(restaurant, "name", "restaurantName")
+        when = _first(entry, "orderTime", "order_time", "placedAt", "createdAt", "date")
+
+        # An order is its DISHES. A restaurant name alone still tells us where
+        # they eat, so it is kept with no title rather than dropped.
+        items = entry.get("items") or entry.get("orderItems") or []
+        titles = [
+            str(_first(i, "name", "itemName", "title") or "")
+            for i in items if isinstance(i, dict)
+        ]
+        titles = [t for t in titles if t]
+        for title in titles or ([str(venue)] if venue else []):
+            found.append(PastOrder(title=title, venue=str(venue) if venue else None,
+                                   when=str(when) if when else None))
+    return found
+
+
+def _past_orders_from_text(text: str) -> list:
+    """Read an order history out of a printed listing.
+
+    Same reason as coupons: this server answers plenty of tools in prose. Lines
+    are expected to name a dish and its restaurant, as Swiggy prints carts:
+
+        Chicken Biryani from Meghana Foods
+        2 x Bold Chicken Sandwich Burger - Popeyes
+    """
+    found = []
+    for line in (text or "").splitlines():
+        cleaned = line.strip().lstrip("-*. ").strip()
+        if not cleaned or len(cleaned) < 4:
+            continue
+        # "Your recent orders:" is a heading and "TO PAY: 251" is a total.
+        # Neither is something anybody ate.
+        if cleaned.endswith(":") or _TOTAL_LINE.match(cleaned):
+            continue
+        title, venue = cleaned, None
+        for separator in (" from ", " - ", " | ", " @ "):
+            if separator in cleaned:
+                title, _, venue = cleaned.partition(separator)
+                break
+        title = _QUANTITY.sub("", title).strip(" .:")
+        # Prices, totals and headings are not dishes.
+        if not title or _RUPEES.search(title) or title.endswith(":"):
+            continue
+        found.append(PastOrder(title=title,
+                               venue=venue.strip(" .:") if venue else None))
+    return found
+
+
 def _cart_rejected(cart: dict):
     """Swiggy's own verdict on the cart it just built, or None if it's fine.
 
@@ -259,14 +321,79 @@ def _cart_rejected(cart: dict):
     return None
 
 
-def _error_text(result) -> str:
-    """A provider's own error message, for LOGS only — never shown to a user.
-    Without it a failure is just isError=True, which nobody can act on."""
+def _text_of(result, limit: int = 400) -> str:
+    """Whatever a tool actually said, as text. LOGS and PARSING only — never
+    shown to a user. Without it a failure is just isError=True, and an
+    unparseable success is just [], neither of which anyone can act on."""
     content = getattr(result, "content", None)
     if content and getattr(content[0], "text", None):
-        return str(content[0].text)[:400]
+        return str(content[0].text)[:limit]
     structured = getattr(result, "structuredContent", None)
-    return str(structured)[:400] if structured else "<no error detail returned>"
+    return str(structured)[:limit] if structured else ""
+
+
+def _error_text(result) -> str:
+    return _text_of(result) or "<no error detail returned>"
+
+
+# A coupon line has to carry BOTH a code-shaped token and a discount, or it is
+# just a sentence. Requiring both is what stops "TO PAY" being offered as a
+# coupon — inventing a code is the same sin as inventing a restaurant.
+_CODE = re.compile(r"\b([A-Z][A-Z0-9]{3,19})\b")
+_RUPEES = re.compile(r"₹\s*(\d+)")
+_PERCENT = re.compile(r"(\d+)\s*%")
+# "2 x Bold Chicken Sandwich Burger" — the count is not part of the dish.
+_QUANTITY = re.compile(r"^\s*\d+\s*[xX*]\s*")
+# "Item total: 159", "TO PAY: 251" — a label and a number, not a dish.
+_TOTAL_LINE = re.compile(r"^[A-Za-z &]+:\s*[₹\d.,]+$")
+# "on orders above ₹149" states what the cart must reach, not what comes
+# off it. Read separately so it cannot be mistaken for the saving.
+_MINIMUM = re.compile(r"(?:above|over|minimum|min\.?)\s*₹\s*(\d+)", re.I)
+_NOT_A_CODE = frozenset({
+    "COUPON", "COUPONS", "OFFER", "OFFERS", "CODE", "CODES", "APPLY", "APPLIED",
+    "DISCOUNT", "TOTAL", "ITEM", "ITEMS", "CART", "DELIVERY", "TAXES", "CHARGES",
+    "RESTAURANT", "ORDER", "ORDERS", "ABOVE", "UPTO", "FREE", "SAVE", "FLAT",
+    "AVAILABLE", "USING", "WITH", "YOUR", "THIS", "NULL", "NONE", "TRUE", "FALSE",
+})
+
+
+def _coupons_from_text(text: str) -> list:
+    """Read a prose coupon listing, one coupon per line.
+
+    Swiggy answers several Food tools with human-readable text rather than
+    JSON — `update_food_cart` replies with a printed cart summary — so a
+    listing can arrive looking like:
+
+        TRYNEW - Get ₹80 off on orders above ₹149
+
+    Only lines carrying a plausible code AND a stated discount are accepted, so
+    a stray "TO PAY" line can never be offered to someone as a coupon.
+    """
+    found, seen = [], set()
+    for line in (text or "").splitlines():
+        floor = _MINIMUM.search(line)
+        # Take the threshold out before looking for the saving, or "above ₹149"
+        # reads as a ₹149 discount.
+        rest = line.replace(floor.group(0), " ") if floor else line
+        # A rupee figure is the saving; a bare percentage ("20% off up to ₹100")
+        # has its real ceiling in rupees on the same line, so rupees win either
+        # way. Percent alone is a discount we cannot price — it still counts as a
+        # coupon, it just sorts last rather than pretending to a number.
+        amount = _RUPEES.search(rest)
+        if not amount and not _PERCENT.search(rest):
+            continue
+        for code in _CODE.findall(line):
+            if code in _NOT_A_CODE or code in seen:
+                continue
+            seen.add(code)
+            found.append({
+                "code": code,
+                "saving": float(amount.group(1)) if amount else 0.0,
+                "minimum": float(floor.group(1)) if floor else 0.0,
+                "label": line.strip().lstrip("-*. ").strip(),
+            })
+            break        # one coupon per line; the rest are words about it
+    return found
 
 
 def _price_of(entry):
@@ -389,6 +516,7 @@ class SwiggyFoodProvider:
     supports_tracking = True
     supports_cancellation = False
     supports_coupons = True
+    supports_history = True
 
     PAYMENT_METHOD = "Cash"   # COD only, per Swiggy's MCP documentation
 
@@ -517,14 +645,7 @@ class SwiggyFoodProvider:
         address_id = ctx.address_id or await client.default_address_id()
         await self._build_cart(client, offer, quantity, address_id)
 
-        if not (client.supports("coupons") and client.supports("apply_coupon")):
-            return []
-        try:
-            available = _coupons(await client.coupons(address_id))
-        except Exception as e:
-            logger.info(f"[{self.name}] could not fetch coupons: {e!r}")
-            return []
-
+        available = await self._available_coupons(client, address_id)
         affordable = [
             c for c in available
             if not c["minimum"] or offer.price is None or offer.price >= c["minimum"]
@@ -630,6 +751,65 @@ class SwiggyFoodProvider:
             note=f"coupon {applied} applied" if applied else None,
         )
 
+    async def history(self, ctx: SearchContext, limit: int = 20) -> list[PastOrder]:
+        """What this person has actually ordered before, from their own account.
+
+        This is the single most useful thing we can know about someone, and it
+        already exists — they have been ordering for years. Learning it from
+        conversation instead would take months and be worse.
+
+        Best effort in every direction: a platform that will not tell us simply
+        means we learn the slow way. Nothing here may raise into a search.
+        """
+        client = await self._session()
+        if not client.supports("orders"):
+            return []
+        try:
+            result = await client.past_orders(limit)
+        except Exception as e:
+            logger.info(f"[{self.name}] could not read order history: {e!r}")
+            return []
+        if getattr(result, "isError", False):
+            logger.info(f"[{self.name}] get_food_orders failed: {_error_text(result)}")
+            return []
+
+        past = _past_orders(mcp.payload_of(result))
+        if not past:
+            body = _text_of(result, 1500)
+            past = _past_orders_from_text(body)
+            if not past and body:
+                logger.info(
+                    f"[{self.name}] no history parsed from get_food_orders. "
+                    f"Raw reply: {body[:600]!r}"
+                )
+        logger.info(f"[{self.name}] read {len(past)} past orders")
+        return past[:limit]
+
+    async def locality(self, ctx: SearchContext):
+        """The AREA they order to — "Attavar, Mangaluru", never the flat number.
+
+        Deliberately not the full address. It goes into the model's prompt to
+        make "there is a good place near you" mean something, and a street
+        address is not needed for that. Only explicit area fields are read; a
+        one-line address string is left alone rather than sliced on a guess.
+        """
+        client = await self._session()
+        try:
+            payload = await client.addresses()
+        except Exception as e:
+            logger.info(f"[{self.name}] could not read addresses: {e!r}")
+            return None
+
+        entries = mcp.items_of(payload, "addresses", "items", "results")
+        if not entries or not isinstance(entries[0], dict):
+            return None
+        first = entries[0]
+        area = _first(first, "area", "locality", "subLocality", "sub_locality",
+                      "areaName", "landmark")
+        city = _first(first, "city", "cityName")
+        parts = [str(p).strip() for p in (area, city) if p]
+        return ", ".join(dict.fromkeys(parts)) or None
+
     async def _build_cart(self, client, offer: Offer, quantity: int, address_id: str):
         """Put exactly this item in the cart, replacing whatever was there.
 
@@ -732,6 +912,44 @@ class SwiggyFoodProvider:
         logger.info(f"[{self.name}] {seen} candidates for {query!r}")
         return payload
 
+    async def _available_coupons(self, client, address_id) -> list:
+        """Every coupon this cart qualifies for, read from whichever shape
+        Swiggy answered in.
+
+        Returning [] used to be indistinguishable between three very different
+        things: the server erroring, the cart genuinely having no offers, and us
+        failing to parse a reply we did get. Live logs showed only
+        "no coupons offered for this cart" and there was no way to tell which —
+        so anything unparsed is logged verbatim here.
+        """
+        if not (client.supports("coupons") and client.supports("apply_coupon")):
+            logger.info(f"[{self.name}] this server exposes no coupon tools")
+            return []
+        try:
+            result = await client.coupons(address_id)
+        except Exception as e:
+            logger.warning(f"[{self.name}] fetch_food_coupons raised: {e!r}")
+            return []
+
+        if getattr(result, "isError", False):
+            logger.warning(
+                f"[{self.name}] fetch_food_coupons failed: {_error_text(result)}. "
+                f"If this is an argument-name error, the call sends only addressId "
+                f"— check it against inspect_tools.py."
+            )
+            return []
+
+        found = _coupons(mcp.payload_of(result))
+        if not found:
+            body = _text_of(result, 1200)
+            found = _coupons_from_text(body)
+            if not found and body:
+                logger.info(
+                    f"[{self.name}] no coupons parsed from fetch_food_coupons. "
+                    f"Raw reply: {body[:600]!r}"
+                )
+        return found
+
     async def _apply_best_coupon(self, client, address_id, cart_total):
         """Find the best coupon and apply it. Returns its code, or None.
 
@@ -739,15 +957,7 @@ class SwiggyFoodProvider:
         stop an order going through — every failure logs and returns None, and
         the order proceeds at full price.
         """
-        if not (client.supports("coupons") and client.supports("apply_coupon")):
-            return None
-
-        try:
-            available = _coupons(await client.coupons(address_id))
-        except Exception as e:
-            logger.info(f"[{self.name}] could not fetch coupons: {e!r}")
-            return None
-
+        available = await self._available_coupons(client, address_id)
         if not available:
             logger.info(f"[{self.name}] no coupons offered for this cart")
             return None

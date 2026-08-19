@@ -902,7 +902,11 @@ class CouponClient(FoodClient):
         self.applied = []
 
     async def coupons(self, address_id):
-        return self.coupon_payload
+        # The RAW result, as the real client now returns: payload_of turned a
+        # prose reply into {}, which read identically to "no offers".
+        if isinstance(self.coupon_payload, str):
+            return Result(text=self.coupon_payload)
+        return Result(structured=self.coupon_payload)
 
     async def apply_coupon(self, address_id, code):
         self.applied.append(code)
@@ -1166,6 +1170,135 @@ check("the user is told it's unavailable, not that something broke",
       outcome.status == skills.SkillStatus.UNAVAILABLE_ITEM)
 check("and pointed at the options already on the table",
       "other options" in outcome.message)
+
+# ======================================================================
+print("[20] Coupons arrive as prose as often as JSON")
+# This server answers some tools with JSON and others with a printed summary —
+# update_food_cart replies with a cart listing, not a document. payload_of turns
+# prose into {}, so a real coupon listing read as "no offers" and the user was
+# never asked. Live logs showed only "no coupons offered for this cart", which
+# could equally have meant the cart genuinely had none — indistinguishable.
+PROSE = """Available coupons for this cart:
+TRYNEW - Get ₹80 off on orders above ₹149
+GET20 - 20% off up to ₹100
+TO PAY: ₹251"""
+
+parsed = swiggy_food._coupons_from_text(PROSE)
+check("a prose listing yields real coupons",
+      [c["code"] for c in parsed] == ["TRYNEW", "GET20"])
+check("the saving is what comes OFF, not the cart minimum",
+      parsed[0]["saving"] == 80.0 and parsed[0]["minimum"] == 149.0)
+check("a percentage coupon keeps its capped amount", parsed[1]["saving"] == 100.0)
+check("the label is Swiggy's own words, never ours",
+      parsed[0]["label"].startswith("TRYNEW - Get"))
+check("a cart summary is not a coupon list",
+      swiggy_food._coupons_from_text("""Item total: ₹159
+TO PAY: ₹251
+Restaurant: Popeyes""") == [])
+check("and neither is prose without a discount",
+      swiggy_food._coupons_from_text("No offers are available right now.") == [])
+
+prose_client = CouponClient(coupons=PROSE)
+listed = run(food_provider(prose_client).coupons(offers[0], 1, SearchContext()))
+check("so the user is offered them, not told there are none",
+      [c.code for c in listed] == ["GET20", "TRYNEW"])
+
+# ======================================================================
+print("[21] What someone already eats is read from their own account")
+# The single most useful thing about a person is their order history, and a
+# linked account has years of it. Learning it from conversation instead would
+# take months and be worse. One deterministic call — not an agent, which could
+# only re-derive what the platform already stated, and might get it wrong.
+from ai import memory
+
+HISTORY_JSON = {"orders": [
+    {"restaurantName": "Meghana Foods", "orderTime": "2026-08-01",
+     "items": [{"name": "Chicken Biryani"}, {"name": "Paneer Butter Masala"}]},
+    {"restaurant": {"name": "Popeyes"}, "items": [{"itemName": "Bold Chicken Burger"}]},
+    {"restaurantName": "Truffles"},
+]}
+
+parsed = swiggy_food._past_orders(HISTORY_JSON)
+check("every dish is read, not just the restaurant",
+      [o.title for o in parsed][:3]
+      == ["Chicken Biryani", "Paneer Butter Masala", "Bold Chicken Burger"])
+check("the venue comes with it", parsed[0].venue == "Meghana Foods")
+check("a nested restaurant object is read too", parsed[2].venue == "Popeyes")
+check("an order with no itemised dishes still records where they ate",
+      parsed[3].title == "Truffles")
+
+PROSE_HISTORY = """Your recent orders:
+Chicken Biryani from Meghana Foods
+2 x Bold Chicken Sandwich Burger - Popeyes
+TO PAY: 251"""
+prose = swiggy_food._past_orders_from_text(PROSE_HISTORY)
+check("a printed history is read as well as a JSON one",
+      [o.title for o in prose] == ["Chicken Biryani", "Bold Chicken Sandwich Burger"])
+check("the quantity is not part of the dish name", prose[1].title.startswith("Bold"))
+check("and a total is not a dish", all("251" not in o.title for o in prose))
+
+
+class HistoryProvider(Spy):
+    """A provider that knows this person already."""
+    supports_history = True
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.history_calls = 0
+        self.area_calls = 0
+
+    async def history(self, ctx, limit=20):
+        from ai.providers.base import PastOrder
+        self.history_calls += 1
+        return [PastOrder(title="Chicken Biryani", venue="Meghana Foods"),
+                PastOrder(title="Chicken Biryani", venue="Meghana Foods"),
+                PastOrder(title="Bold Chicken Burger", venue="Popeyes")]
+
+    async def locality(self, ctx):
+        self.area_calls += 1
+        return "Attavar, Mangaluru"
+
+
+registry.clear()
+knower = HistoryProvider("history_food", ProviderKind.RESTAURANT)
+registry.register(knower)
+knows = "919155500200"
+identity.load(knows)
+
+learned = run(skills.learn_about(identity.load(knows)))
+check("their history is imported", learned == 3)
+profile = memory.load(knows)
+check("and becomes what they order regularly",
+      profile.favourites()[0] == "Chicken Biryani")
+check("the delivery AREA is stored", profile.facts["delivery_area"] == "Attavar, Mangaluru")
+check("the street address is not — the area is all a recommendation needs",
+      not any("Flat" in str(v) or "#" in str(v) for v in profile.facts.values()))
+
+run(skills.learn_about(identity.load(knows)))
+check("it runs once, not on every search", knower.history_calls == 1)
+check("the bookkeeping marker stays out of the prompt",
+      "_history_imported" not in profile.describe())
+check("but the area does not, because it is genuinely about them",
+      "Attavar" in profile.describe())
+
+
+class RefusesHistory(Spy):
+    supports_history = True
+
+    async def history(self, ctx, limit=20):
+        raise RuntimeError("history service down")
+
+    async def locality(self, ctx):
+        raise RuntimeError("no addresses")
+
+
+registry.clear()
+registry.register(RefusesHistory("shy_food", ProviderKind.RESTAURANT))
+shy = "919155500201"
+identity.load(shy)
+check("a provider that will not say costs nothing",
+      run(skills.learn_about(identity.load(shy))) == 0)
+check("and the user is still usable", memory.load(shy).facts.get("_history_imported") == "yes")
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

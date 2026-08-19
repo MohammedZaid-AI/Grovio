@@ -37,7 +37,7 @@ class UserModel:
 
     @property
     def is_new(self) -> bool:
-        return not self.facts and not self.history
+        return not any(not k.startswith("_") for k in self.facts) and not self.history
 
     def favourites(self, limit=5) -> list:
         """Most frequently ordered or liked items, most common first."""
@@ -62,9 +62,13 @@ class UserModel:
             return "This is a new user. Nothing is known about them yet."
 
         lines = []
-        if self.facts:
+        # Keys starting with "_" are our own bookkeeping (what has been imported,
+        # when) and are not things anyone told us about themselves. They stay out
+        # of the prompt so the model never reads them back as a preference.
+        shown = {k: v for k, v in self.facts.items() if not k.startswith("_")}
+        if shown:
             lines.append("Known preferences:")
-            lines += [f"  - {key}: {value}" for key, value in sorted(self.facts.items())]
+            lines += [f"  - {key}: {value}" for key, value in sorted(shown.items())]
         favourites = self.favourites()
         if favourites:
             lines.append(f"Frequently orders: {', '.join(favourites)}")

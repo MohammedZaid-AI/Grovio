@@ -137,6 +137,15 @@ async def find_food(user, query: str, kind: str, max_price: float | None = None,
     if gaps:
         return await _link_prompt(user, gaps[0], pending_message or query)
 
+    # First real search after linking: read what they already order. Runs once,
+    # before ranking, because it is the difference between "here are five
+    # biryanis" and "the Meghana one, like usual".
+    if await learn_about(user):
+        # Reload, or this very search ranks against the empty profile we had a
+        # moment ago — the one search where knowing them matters most.
+        from ai import memory
+        user.profile = memory.load(user.phone)
+
     offers, errors = await registry.search(
         provider_kind, query, SearchContext(max_price=max_price, limit=20), phone=user.phone
     )
@@ -175,6 +184,83 @@ async def find_food(user, query: str, kind: str, max_price: float | None = None,
             "number:\n" + "\n".join(lines)
         ),
     )
+
+
+# ----------------------------------------------------------------------
+# Learning who someone is, from their own account
+# ----------------------------------------------------------------------
+# A linked account already knows what this person eats and where they eat it.
+# Asking them to tell us all over again, one conversation at a time, would be
+# worse for them and slower for us.
+#
+# This is NOT an agent. It is one call per provider, parsed deterministically,
+# written into the same food memory that conversation writes to. An LLM in this
+# loop could only re-derive what the platform already stated, with a chance of
+# getting it wrong — and ranking must stay explainable.
+IMPORTED = "_history_imported"
+AREA = "delivery_area"
+
+# Enough to see a pattern, few enough that one old phase doesn't drown the rest.
+HISTORY_LIMIT = 25
+
+
+async def learn_about(user) -> int:
+    """Import order history and delivery area from every linked provider.
+
+    Runs ONCE per user — the marker is an internal fact, hidden from the prompt.
+    Entirely best effort: a provider that cannot answer costs nothing, and no
+    failure here may stop a search. Returns how many past orders were learned.
+    """
+    from ai import memory
+
+    if user.facts.get(IMPORTED):
+        return 0
+
+    learned = 0
+    for provider in _history_providers():
+        ctx, _ = await _ordering_context(user, provider)
+        if ctx is None:
+            continue          # not linked to this one; nothing to read
+
+        try:
+            past = await provider.history(ctx, limit=HISTORY_LIMIT)
+        except Exception as e:
+            logger.info(f"[skills] history unavailable from {provider.name}: {e!r}")
+            past = []
+
+        for order in past:
+            try:
+                memory.remember_food(user.phone, order.title, memory.ORDERED, order.venue)
+                learned += 1
+            except Exception:
+                logger.info(f"[skills] skipped an unreadable past order", exc_info=True)
+
+        if not user.facts.get(AREA):
+            try:
+                area = await provider.locality(ctx)
+            except Exception as e:
+                logger.info(f"[skills] area unavailable from {provider.name}: {e!r}")
+                area = None
+            if area:
+                memory.remember_fact(user.phone, AREA, area)
+                logger.info(f"[skills] learned delivery area for {user.phone}")
+
+    # Marked even when nothing came back. A user with no order history is a real
+    # answer, and re-asking the platform on every single search would be a call
+    # per message for no new information.
+    memory.remember_fact(user.phone, IMPORTED, "yes")
+    logger.info(f"[skills] learned {learned} past orders for {user.phone}")
+    return learned
+
+
+def _history_providers():
+    seen, out = set(), []
+    for kind in registry.available_kinds():
+        for provider in registry.for_kind(kind):
+            if getattr(provider, "supports_history", False) and provider.name not in seen:
+                seen.add(provider.name)
+                out.append(provider)
+    return out
 
 
 # ----------------------------------------------------------------------
