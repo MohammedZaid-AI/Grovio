@@ -139,7 +139,7 @@ class FoodClient:
     """Fake Swiggy Food MCP client."""
 
     def __init__(self, payload=None, checkout=None, cart_error=False,
-                 payment_options=None, statuses=None):
+                 payment_options=None, statuses=None, restaurants=None):
         self.payload = payload if payload is not None else RESTAURANT_PAYLOAD
         self.checkout = checkout or Result(
             structured={"orderId": "FOOD-77", "data": {"cartTotal": 340, "eta": 24}}
@@ -149,6 +149,10 @@ class FoodClient:
         self.options = payment_options if payment_options is not None else {"cod": True}
         self.statuses = list(statuses or [])
         self.searches = 0
+        self.restaurant_searches = 0
+        # Empty by default: a server that tells us nothing about delivery must
+        # leave every ETA None rather than have one appear from somewhere.
+        self.restaurant_payload = restaurants if restaurants is not None else {}
         self.carts = []
         self.calls = []
         self.paid_with = []
@@ -163,6 +167,11 @@ class FoodClient:
     async def search_dishes(self, query, address_id, offset=0):
         self.searches += 1
         return self.payload
+
+    async def search_restaurants(self, query, address_id):
+        # search_menu returns no ETA and no distance; this is where both live.
+        self.restaurant_searches += 1
+        return self.restaurant_payload
 
     async def call(self, key, args):
         self.calls.append(key)
@@ -1299,6 +1308,60 @@ identity.load(shy)
 check("a provider that will not say costs nothing",
       run(skills.learn_about(identity.load(shy))) == 0)
 check("and the user is still usable", memory.load(shy).facts.get("_history_imported") == "yes")
+
+# ======================================================================
+print("[22] Delivery time comes from the restaurant search, or not at all")
+# search_menu returns dishes and nothing about getting them to you — no ETA, no
+# distance, verified live. So _speed_score was 0 for every restaurant and the
+# whole "further out but rated higher" trade-off had no data behind it.
+# search_restaurants answers the same query where both fields live.
+DELIVERY = {"restaurants": [
+    {"restaurant_id": "R-1", "sla": {"deliveryTime": 22}, "distance": 1.4},
+    {"restaurant_id": "R-2", "deliveryTime": "38 mins"},
+    {"restaurant_id": "R-9"},
+]}
+
+mapped = swiggy_food._delivery_map(DELIVERY)
+check("a nested sla is read", mapped["R-1"] == (22, 1.4))
+check("so is a plain string ETA", mapped["R-2"] == (38, None))
+check("a restaurant that states neither is not in the map", "R-9" not in mapped)
+
+joined = FoodClient(payload=LIVE_MENU_PAYLOAD, restaurants=DELIVERY)
+enriched = run(food_provider(joined).search("biryani", SearchContext(limit=10)))
+check("the restaurant search is consulted once", joined.restaurant_searches == 1)
+check("dishes gain their restaurant's ETA", enriched[0].eta_minutes == 22)
+check("and its distance", enriched[0].distance_km == 1.4)
+check("a second restaurant gets its own", enriched[1].eta_minutes == 38)
+check("distance stays None when unstated", enriched[1].distance_km is None)
+
+
+class NoRestaurantSearch(FoodClient):
+    async def search_restaurants(self, query, address_id):
+        raise RuntimeError("search_restaurants is not available")
+
+
+degraded = run(food_provider(NoRestaurantSearch(payload=LIVE_MENU_PAYLOAD))
+               .search("biryani", SearchContext(limit=10)))
+check("losing it costs the ETA and nothing else", len(degraded) == 2)
+check("prices survive", degraded[0].price == 340)
+check("and no ETA is invented to fill the gap",
+      all(o.eta_minutes is None for o in degraded))
+
+# Now ranking can actually weigh it, which is the whole point.
+from ai import recommendation
+from ai.memory import UserModel
+
+near = swiggy_food.Offer(provider="p", kind=ProviderKind.RESTAURANT, id="a::1",
+                         title="Biryani", venue="Close By", price=300,
+                         rating=4.0, eta_minutes=15)
+far = swiggy_food.Offer(provider="p", kind=ProviderKind.RESTAURANT, id="b::2",
+                        title="Biryani", venue="Worth The Wait", price=300,
+                        rating=4.8, eta_minutes=40)
+ranked = recommendation.rank([near, far], UserModel(phone="919155500300"))
+check("a much better place still wins despite being further",
+      ranked[0].offer.venue == "Worth The Wait")
+check("and the trade-off is stated, not buried",
+      any("rather than round the corner" in r for r in ranked[0].reasons))
 
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")

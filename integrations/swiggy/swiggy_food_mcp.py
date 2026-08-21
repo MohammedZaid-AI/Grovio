@@ -194,6 +194,13 @@ class SwiggyFood:
             args["offset"] = offset
         return payload_of(await self.call("search", args))
 
+    async def search_restaurants(self, query: str, address_id: str):
+        """Restaurant-level results. Same query as search_menu, but these carry
+        delivery time and distance, which the dish results do not."""
+        return payload_of(await self.call("restaurants", {
+            "addressId": address_id, "query": query,
+        }))
+
     async def add_to_cart(self, address_id: str, restaurant_id: str, cart_items: list,
                           restaurant_name: str = None):
         args = {

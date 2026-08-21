@@ -300,6 +300,35 @@ def _past_orders_from_text(text: str) -> list:
     return found
 
 
+def _delivery_map(payload: dict) -> dict:
+    """{restaurant_id: (eta_minutes, distance_km)} from a restaurant search.
+
+    search_menu returns dishes and nothing about getting them to you — no ETA,
+    no distance, verified against the live server. search_restaurants answers
+    the same query at the restaurant level, where both live. Joining the two is
+    the only way ranking can weigh "further but better", and the only way the
+    concierge can say a delivery time it did not invent.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    found = {}
+    for entry in mcp.items_of(payload, "restaurants", "items", "results", "cards"):
+        if not isinstance(entry, dict):
+            continue
+        # The card may wrap the restaurant one level down.
+        inner = entry.get("restaurant") if isinstance(entry.get("restaurant"), dict) else entry
+        key = _first(inner, "restaurant_id", "restaurantId", "resId", "id")
+        if not key:
+            continue
+        eta = _eta(inner) or _eta(entry)
+        distance = (_num(_first(inner, "distanceKm", "distance", "distance_km"))
+                    or _num(_first(entry, "distanceKm", "distance", "distance_km")))
+        if eta is None and distance is None:
+            continue          # nothing worth joining; never store a guess
+        found[str(key)] = (eta, distance)
+    return found
+
+
 def _cart_rejected(cart: dict):
     """Swiggy's own verdict on the cart it just built, or None if it's fine.
 
@@ -557,6 +586,7 @@ class SwiggyFoodProvider:
             address_id = ctx.address_id or await client.default_address_id()
             payload = await client.search_dishes(query, address_id)
             payload = await self._widen(client, query, address_id, payload, ctx.limit)
+            delivery = await self._delivery_times(client, query, address_id)
         except (mcp.ToolSurfaceMismatch, mcp.NoDeliveryAddress) as e:
             self._drop_session()
             logger.error(f"[{self.name}] {e}")
@@ -601,9 +631,14 @@ class SwiggyFoodProvider:
                        or _first(restaurant, "name", "restaurantName", "storeName")),
                 price=price,
                 rating=_rating(entry) or _rating(restaurant),
-                eta_minutes=_eta(entry) or _eta(restaurant),
+                # The dish payload rarely carries either, so the restaurant
+                # search fills them in. Still None when nobody said — a delivery
+                # time we made up is worse than none at all.
+                eta_minutes=(_eta(entry) or _eta(restaurant)
+                             or delivery.get(str(restaurant_id), (None, None))[0]),
                 distance_km=(_num(_first(entry, "distanceKm", "distance"))
-                             or _num(_first(restaurant, "distanceKm", "distance"))),
+                             or _num(_first(restaurant, "distanceKm", "distance"))
+                             or delivery.get(str(restaurant_id), (None, None))[1]),
                 available=_first(entry, "inStock", "isAvailable", "available") is not False,
                 tags=tuple(t for t in (_first(entry, "cuisine", "category", "variantName"),) if t),
             ))
@@ -878,6 +913,23 @@ class SwiggyFoodProvider:
         if rejected:
             logger.error(f"[{self.name}] cart is unusable after adding {item_id}: {rejected}")
             raise ItemUnavailable(f"cart rejected {item_id}: {rejected}")
+
+    async def _delivery_times(self, client, query, address_id) -> dict:
+        """Restaurant-level ETA and distance for this query, or {}.
+
+        One extra call per search, best effort. Failing here costs the "further
+        but better rated" trade-off and nothing else — the dishes, prices and
+        ratings are already in hand.
+        """
+        if not client.supports("restaurants"):
+            return {}
+        try:
+            found = _delivery_map(await client.search_restaurants(query, address_id))
+        except Exception as e:
+            logger.info(f"[{self.name}] no delivery times for {query!r}: {e!r}")
+            return {}
+        logger.info(f"[{self.name}] delivery times for {len(found)} restaurants")
+        return found
 
     async def _widen(self, client, query, address_id, payload, wanted):
         """Pull more pages so ranking has a real field to choose from.

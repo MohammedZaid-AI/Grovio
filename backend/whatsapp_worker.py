@@ -133,10 +133,10 @@ async def _worker_loop(phone):
             await _flush_outbound(phone)
 
             while True:
-                msg = db.claim_next_inbound(phone)
-                if not msg:
+                batch = db.claim_pending_inbound(phone)
+                if not batch:
                     break
-                await _process_inbound(msg)
+                await _process_inbound(batch)
                 await _flush_outbound(phone)
         except Exception:
             logger.error(f"[whatsapp_worker] worker loop error for {phone}", exc_info=True)
@@ -154,25 +154,54 @@ async def _worker_loop(phone):
 # ----------------------------------------------------------------------
 # Processing + sending
 # ----------------------------------------------------------------------
-async def _process_inbound(msg):
-    inbound_id = msg["id"]
-    phone = msg["phone"]
-    body = msg["body"] or ""
+async def _process_inbound(batch):
+    """Answer everything waiting for one person as a SINGLE turn.
+
+    Whoever sent three messages while the model was still thinking about the
+    first is mid-thought, not asking three questions. Replying to each in turn
+    answers a conversation that has already moved on — and with a slow local
+    model, the first reply lands after the user has changed their mind twice.
+
+    So the reply belongs to the LATEST message, and the earlier ones ride along
+    as context. All of them are marked done; only one answer goes out.
+    """
+    phone = batch[0]["phone"]
+    latest = batch[-1]
+    earlier = [m["id"] for m in batch[:-1]]
+
+    # Attachments carry no text to fold in, so they only decide the reply when
+    # there is nothing to read at all.
+    said = [m["body"].strip() for m in batch if (m["body"] or "").strip()]
+    body = "\n".join(said)
+
+    if len(batch) > 1:
+        logger.info(
+            f"[whatsapp_worker] answering {len(batch)} queued messages from "
+            f"{phone} as one turn"
+        )
+
     try:
-        if msg.get("num_media"):
+        if not body and any(m.get("num_media") for m in batch):
             reply = MEDIA_REDIRECT_MESSAGE
         else:
             reply = await respond(phone=phone, message=body)
         if not reply:
             reply = _FALLBACK_REPLY
         parts = _split(reply)
+        # The earlier messages are settled first: if the reply write then fails,
+        # the retry answers the latest message rather than replaying the lot.
+        db.finish_inbound(earlier)
         # Persist reply parts AND mark inbound DONE atomically.
-        db.save_reply_and_finish(inbound_id, phone, parts)
+        db.save_reply_and_finish(latest["id"], phone, parts)
     except Exception:
-        logger.error(f"[whatsapp_worker] processing failed for inbound={inbound_id}", exc_info=True)
+        logger.error(
+            f"[whatsapp_worker] processing failed for inbound={latest['id']}",
+            exc_info=True,
+        )
         # Record the failure and still deliver a note — never leave the user hung.
         try:
-            db.save_error_reply(inbound_id, phone, _ERROR_REPLY)
+            db.finish_inbound(earlier)
+            db.save_error_reply(latest["id"], phone, _ERROR_REPLY)
         except Exception:
             logger.error("[whatsapp_worker] could not queue error reply", exc_info=True)
 

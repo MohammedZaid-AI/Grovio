@@ -394,6 +394,66 @@ def claim_next_inbound(phone):
         conn.close()
 
 
+def claim_pending_inbound(phone):
+    """Claim EVERY pending message for one phone, oldest first.
+
+    Someone who fires off three messages while a slow model is still thinking
+    about the first is having one thought, not three. Claiming the lot lets the
+    worker answer the LATEST message with the earlier ones as context, instead of
+    replying three times to a conversation that has already moved on.
+
+    Same atomic guarantee as claiming one: the UPDATE ... WHERE status='PENDING'
+    means each row is claimed by exactly one worker.
+    """
+    conn = get_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, message_sid, phone, body, num_media, attempts "
+            "FROM whatsapp_inbound WHERE phone = ? AND status = 'PENDING' "
+            "ORDER BY id ASC",
+            (phone,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            return []
+
+        claimed = []
+        for row in rows:
+            cursor.execute(
+                "UPDATE whatsapp_inbound SET status = 'PROCESSING', "
+                "attempts = attempts + 1, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = ? AND status = 'PENDING'",
+                (row[0],),
+            )
+            if cursor.rowcount:
+                claimed.append({
+                    "id": row[0], "message_sid": row[1], "phone": row[2],
+                    "body": row[3], "num_media": row[4], "attempts": row[5],
+                })
+        conn.commit()
+        return claimed
+    finally:
+        conn.close()
+
+
+def finish_inbound(inbound_ids):
+    """Mark messages DONE with no reply of their own — they were answered as
+    part of a later message's turn."""
+    if not inbound_ids:
+        return
+    conn = get_connection()
+    try:
+        conn.executemany(
+            "UPDATE whatsapp_inbound SET status = 'DONE', "
+            "updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            [(i,) for i in inbound_ids],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def save_reply_and_finish(inbound_id, phone, parts):
     """Persist the reply parts (ordered) AND mark the inbound message DONE in a
     SINGLE transaction. Doing both atomically means a crash can never leave a

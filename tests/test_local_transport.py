@@ -365,6 +365,82 @@ check("a stranger is denied", authz.is_authorized_user("910000000000") is False)
 os.environ["AUTHORIZED_PHONES"] = ""
 check("FAILS CLOSED with no allowlist", authz.is_authorized_user("917795871481") is False)
 
+# ======================================================================
+print("[12] A failed dial must not kill the transport for good")
+# Observed live: "failed to WebSocket dial: TLS handshake timeout" on the first
+# connect. The thread caught it, logged, and exited. The app still said "startup
+# complete" and then silently answered nobody — indistinguishable from the bot
+# being broken. neonize retries once a socket is up; getting there is on us.
+import inspect
+import whatsapp.local_client as lc
+
+check("there is a ceiling on the backoff, so logs stay readable",
+      lc.RECONNECT_MAX_SECONDS >= lc.RECONNECT_SECONDS > 0)
+
+source = inspect.getsource(lc)
+run_body = source[source.index("    def run():"):source.index("connection thread stopped")]
+check("the dial is retried, not attempted once",
+      "while " in run_body and "_client.connect()" in run_body)
+check("the backoff actually waits", "time.sleep" in run_body)
+check("an unlinked device stops the retry — the session is dead",
+      "_unlinked.is_set()" in run_body)
+check("being logged out sets that flag",
+      "_unlinked.set()" in source)
+check("and a fresh start clears it", "_unlinked.clear()" in source)
+
+delays = []
+attempt = 0
+for _ in range(8):
+    attempt += 1
+    delays.append(min(lc.RECONNECT_MAX_SECONDS,
+                      lc.RECONNECT_SECONDS * 2 ** min(attempt - 1, 4)))
+check("backoff grows then holds", delays[0] < delays[3] and delays[-1] == lc.RECONNECT_MAX_SECONDS)
+check("and never retries in a tight loop", min(delays) >= 1)
+
+# ======================================================================
+print("[13] REGRESSION: plumbing is not an attachment")
+# Observed live: a user said "hi" and got "I can't open attachments yet" after
+# EVERY message. Each ordinary text also arrives as one or more bodyless events
+# (senderKeyDistributionMessage, messageContextInfo, protocolMessage), and
+# "no text" was being read as "must be media".
+
+
+class Payload:
+    def __init__(self, **fields):
+        self.conversation = fields.pop("conversation", "")
+        for name, value in fields.items():
+            setattr(self, name, value)
+
+    def __getattr__(self, name):
+        return None
+
+
+def event_for(payload):
+    source = type("S", (), {"IsFromMe": False, "IsGroup": False,
+                            "Sender": type("J", (), {"User": "919000000001",
+                                                     "Server": "s.whatsapp.net"})(),
+                            "Chat": type("J", (), {"User": "919000000001",
+                                                   "Server": "s.whatsapp.net"})()})()
+    info = type("I", (), {"ID": "MSG-1", "MessageSource": source})()
+    return type("E", (), {"Info": info, "MessageSource": source, "Message": payload})()
+
+
+text_event = lc.parse_event(event_for(Payload(conversation="hi")))
+check("a text message is a text message", text_event["body"] == "hi")
+check("and is never flagged as an attachment", text_event["unsupported"] is False)
+
+key_event = lc.parse_event(event_for(Payload(senderKeyDistributionMessage=object())))
+check("a key-distribution event is dropped entirely", key_event is None)
+check("a bare context event is dropped too",
+      lc.parse_event(event_for(Payload(messageContextInfo=object()))) is None)
+check("so is an empty payload", lc.parse_event(event_for(Payload())) is None)
+
+photo = lc.parse_event(event_for(Payload(imageMessage=object())))
+check("a real photo still reaches the worker", photo is not None)
+check("and is honestly reported as unreadable", photo["unsupported"] is True)
+check("a voice note as well",
+      lc.parse_event(event_for(Payload(audioMessage=object())))["unsupported"] is True)
+
 print("\n" + "=" * 70)
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:

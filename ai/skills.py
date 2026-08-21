@@ -93,11 +93,12 @@ async def _link_prompt(user, provider_name: str, pending_message: str) -> SkillR
         link_url=url,
         message=(
             f"NEEDS_LINK: this user has not connected their {label} account, so no "
-            f"real results exist yet. Tell them warmly that you can take it from "
-            f"here once they connect {label}, and include this link EXACTLY as-is "
-            f"on its own line: {url}\n"
-            f"Mention that you'll pick up right where they left off. Do NOT invent "
-            f"any food options in the meantime."
+            f"real results exist yet. In ONE short line ask them to connect "
+            f"{label} so you can see real menus and prices, then give this link "
+            f"EXACTLY as-is on its own line:\n{url}\n"
+            f"That line plus the link is the WHOLE message — no preamble, no "
+            f"enthusiasm, no explanation of what happens afterwards. Do NOT "
+            f"invent any food options in the meantime."
         ),
     )
 

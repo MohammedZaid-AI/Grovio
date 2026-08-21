@@ -329,6 +329,55 @@ async def test_retryable_then_success():
     check("no error code on success", rows and rows[0][5] is None)
 
 
+async def test_answers_the_latest_message():
+    print("\n[15] A burst of messages gets ONE answer, to the latest")
+    # Someone firing off three messages while a slow local model is still
+    # thinking about the first is mid-thought, not asking three questions.
+    # Answering each in turn replies to a conversation that has already moved on.
+    phone = "whatsapp:+910000000015"
+    seen = []
+
+    async def capture(phone=None, message=None):
+        seen.append(message)
+        return "one answer"
+
+    sender = AsyncMock(return_value="SID-OUT")
+    with patch.object(worker, "respond", new=AsyncMock(side_effect=capture)),          patch.object(worker, "send_text", sender):
+        await worker.enqueue_and_wake("SID-15a", phone, "i want biryani", 0)
+        await worker.enqueue_and_wake("SID-15b", phone, "actually", 0)
+        await worker.enqueue_and_wake("SID-15c", phone, "make it under 300", 0)
+        await drain(phone)
+
+    check("the concierge is consulted once, not three times", len(seen) == 1)
+    check("the latest message is what it answers",
+          seen and seen[0].endswith("make it under 300"))
+    check("and the earlier ones ride along as context",
+          seen and "i want biryani" in seen[0] and "actually" in seen[0])
+    check("exactly one reply is sent", len(outbound_rows(phone)) == 1)
+    check("every message is marked DONE - none is stranded",
+          inbound_status(phone) == ["DONE", "DONE", "DONE"])
+
+
+async def test_single_message_unchanged():
+    print("\n[16] One message still behaves exactly as before")
+    phone = "whatsapp:+910000000016"
+    with patch.object(worker, "respond", new=AsyncMock(return_value="just one")),          patch.object(worker, "send_text", AsyncMock(return_value="SID-OUT")):
+        await worker.enqueue_and_wake("SID-16", phone, "hey", 0)
+        await drain(phone)
+    check("answered normally", outbound_rows(phone)[0][1] == "just one")
+    check("and marked DONE", inbound_status(phone) == ["DONE"])
+
+
+async def test_photo_alone_still_answered():
+    print("\n[17] A photo with no text still gets an honest answer")
+    phone = "whatsapp:+910000000017"
+    with patch.object(worker, "respond", new=AsyncMock(return_value="should not run")),          patch.object(worker, "send_text", AsyncMock(return_value="SID-OUT")):
+        await worker.enqueue_and_wake("SID-17", phone, "", 1)
+        await drain(phone)
+    check("the media redirect is used",
+          outbound_rows(phone)[0][1] == worker.MEDIA_REDIRECT_MESSAGE)
+
+
 async def main():
     await test_dedup()
     await test_basic_delivery()
@@ -342,6 +391,9 @@ async def main():
     await test_error_classification()
     await test_permanent_error_no_retry()
     await test_retryable_then_success()
+    await test_answers_the_latest_message()
+    await test_single_message_unchanged()
+    await test_photo_alone_still_answered()
 
     print("\n" + "=" * 78)
     print(f"RESULT: {_passed} passed, {_failed} failed")

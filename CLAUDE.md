@@ -234,6 +234,17 @@ session, run without it.
   `whatsapp_worker.enqueue_and_wake` in the same shape. Nothing above
   `whatsapp/` may learn which one is running — `tests/test_local_transport.py`
   §10 tokenises the local client and fails the build if it names the AI layer.
+- **A burst of messages gets ONE reply, to the LATEST.** The worker claims
+  every pending inbound for a phone (`db.claim_pending_inbound`) and answers
+  them as a single turn, earlier messages folded in as context. Someone typing
+  three times while a slow model thinks is mid-thought, not asking three
+  questions — replying to each answers a conversation that has moved on.
+- **A bodyless inbound event is PLUMBING, not an attachment.** Every ordinary
+  text also arrives as `senderKeyDistributionMessage` / `messageContextInfo` /
+  `protocolMessage` with no body. Reading "no text" as "must be media" replied
+  "I can't open attachments yet" to every single message a user sent.
+  `local_client.media_kind` requires a real media field; anything else with no
+  text is dropped silently.
 - **Phone numbers are canonical MSISDNs** — `917795871481`, never
   `whatsapp:+91…`. `whatsapp.canonical_phone` normalises at ingress and
   `db._migrate_phone_keys` rewrites older rows on startup. A second format
@@ -256,6 +267,11 @@ session, run without it.
   basket to list them and `place()` checks that same basket out. Both call
   `_build_cart`, which flushes first. Remove the flush and a second add can
   stack quantities — someone pays for two dinners.
+- **`search_menu` returns NO ETA and NO distance.** Dishes come back with
+  price, rating and ids only, so ranking's speed and distance terms were dead
+  weight and "further out but rated higher" could never be said. `search_menu`
+  is joined with `search_restaurants` on `restaurant_id` to fill both in — one
+  extra call per search, best effort, and still None when neither states it.
 - **What a user eats is READ, not asked for.** `skills.learn_about` imports
   their real order history and delivery area from every linked provider, once,
   on their first search, into the same food memory conversation writes to. There

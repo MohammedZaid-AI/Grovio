@@ -33,6 +33,7 @@ import asyncio
 import os
 import sys
 import threading
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -64,6 +65,13 @@ _loop = None            # the app's event loop, for the listener thread to post 
 _connected = threading.Event()
 _qr_count = 0          # QR codes rotate; numbering them makes that visible
 _paired = threading.Event()
+# Set only when reconnecting is pointless: the phone unlinked this device, so the
+# stored session is dead and no amount of retrying will revive it.
+_unlinked = threading.Event()
+
+# First retry delay, and the ceiling it backs off to.
+RECONNECT_SECONDS = 5
+RECONNECT_MAX_SECONDS = 60
 # canonical phone -> (jid user, jid server) of the chat it arrived on.
 # Dev-scale and in-memory on purpose: it repopulates from the next
 # inbound message, and a cold miss just falls back to <phone>@s.whatsapp.net.
@@ -112,6 +120,33 @@ def message_text(message) -> str:
             if value:
                 return value
     return ""
+
+
+# What a person can actually SEND that is not text. Anything here is worth an
+# honest "I can't read that yet"; anything NOT here and with no text is
+# WhatsApp's own plumbing and must be ignored silently.
+MEDIA_FIELDS = (
+    "imageMessage", "videoMessage", "audioMessage", "documentMessage",
+    "stickerMessage", "locationMessage", "liveLocationMessage", "contactMessage",
+    "contactsArrayMessage", "ptvMessage", "pollCreationMessage",
+)
+
+
+def media_kind(message) -> str | None:
+    """The kind of attachment, or None if this is not one.
+
+    Every ordinary text message ALSO arrives as one or more bodyless events —
+    senderKeyDistributionMessage, messageContextInfo, protocolMessage, receipts.
+    Treating "no text" as "must be an attachment" answered every single one of
+    them with "I can't open attachments yet", so a user saying "hi" got that
+    line after every message they sent. Observed live.
+    """
+    if message is None:
+        return None
+    for field in MEDIA_FIELDS:
+        if getattr(message, field, None) is not None:
+            return field
+    return None
 
 
 def _is_lid(jid) -> bool:
@@ -177,14 +212,21 @@ def parse_event(event) -> dict | None:
     if chat is not None and getattr(chat, "User", ""):
         _chat_jids[phone] = (chat.User, getattr(chat, "Server", "") or DIRECT_SERVER)
 
-    body = message_text(getattr(event, "Message", None))
+    payload = getattr(event, "Message", None)
+    body = message_text(payload)
+    attachment = media_kind(payload) if not body else None
+    if not body and not attachment:
+        # WhatsApp's own plumbing, not something a person sent. Silence is the
+        # only correct answer; replying makes the concierge talk to the protocol.
+        return None
+
     return {
         "message_id": str(getattr(info, "ID", "") or ""),
         "phone": phone,
         "body": body,
-        # No text means media, a sticker, a location — same honest handling as
-        # the Cloud API path: keep it so the worker can say it can't read it.
-        "unsupported": not body,
+        # A real photo, voice note or location — kept so the worker can say
+        # honestly that it cannot read it yet, exactly as the Cloud API path does.
+        "unsupported": bool(attachment),
         "type": "text" if body else "unsupported",
     }
 
@@ -361,6 +403,8 @@ async def start() -> None:
     global _client, _thread, _loop
     if _thread is not None:
         return
+    # A previous session may have ended unlinked; this start is a fresh attempt.
+    _unlinked.clear()
 
     from neonize.client import NewClient
     from neonize.events import (
@@ -414,6 +458,7 @@ async def start() -> None:
         # like a crash rather than "you need to pair again".
         _connected.clear()
         _paired.clear()
+        _unlinked.set()
         logger.error(
             f"[whatsapp] LOGGED OUT — this device was unlinked from the phone. "
             f"The saved session is dead; reconnecting cannot fix it. Stop the app, "
@@ -423,11 +468,37 @@ async def start() -> None:
     _client.event.qr(_print_qr)
 
     def run():
-        try:
-            _client.connect()
-        except Exception:
-            logger.error("[whatsapp] connection thread died", exc_info=True)
-            _connected.clear()
+        """Stay connected, and keep trying if the first dial fails.
+
+        This used to be a single connect() in a try block: one TLS timeout
+        reaching web.whatsapp.com and the thread was gone for good. The app still
+        reported "startup complete" and then silently answered nobody, which
+        looks identical to the bot being broken. neonize retries by itself once
+        a socket is up — getting there in the first place is on us.
+        """
+        attempt = 0
+        while _client is not None and not _unlinked.is_set():
+            try:
+                _client.connect()          # blocks for the life of the socket
+            except Exception as e:
+                _connected.clear()
+                logger.error(
+                    f"[whatsapp] connection attempt {attempt + 1} failed: {e}",
+                    exc_info=attempt == 0,
+                )
+            if _client is None or _unlinked.is_set():
+                break
+
+            attempt += 1
+            # Back off to a minute and stay there. A dev leaving this running
+            # through a VPN drop should find it connected when they come back,
+            # without a log full of retries.
+            delay = min(RECONNECT_MAX_SECONDS, RECONNECT_SECONDS * 2 ** min(attempt - 1, 4))
+            logger.warning(f"[whatsapp] reconnecting in {delay}s")
+            time.sleep(delay)
+
+        _connected.clear()
+        logger.info("[whatsapp] connection thread stopped")
 
     _thread = threading.Thread(target=run, name="whatsapp-web", daemon=True)
     _thread.start()
