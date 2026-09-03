@@ -23,6 +23,7 @@ corrupting the flow.
 """
 import json
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 
@@ -390,6 +391,11 @@ _ORDINALS = {
 }
 
 
+# "-1" is not option 1. _normalise strips the sign, so this has to see
+# the raw text before that happens.
+_NEGATIVE = re.compile(r"-\s*\d")
+
+
 def resolve_selection(text: str, count: int):
     """Turn a reply into a 1-based option number, or None.
 
@@ -406,6 +412,13 @@ def resolve_selection(text: str, count: int):
     """
     if count <= 0:
         return None
+
+    # _normalise strips punctuation, so "-1" would arrive here as "1" and order
+    # the first item. A negative number is not a choice anybody means to make;
+    # returning None sends it to the model instead of spending money on it.
+    if _NEGATIVE.search(text or ""):
+        return None
+
     normalised = _normalise(text)
     if not normalised:
         return None

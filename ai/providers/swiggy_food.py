@@ -286,11 +286,17 @@ def _past_orders_from_text(text: str) -> list:
         # Neither is something anybody ate.
         if cleaned.endswith(":") or _TOTAL_LINE.match(cleaned):
             continue
-        title, venue = cleaned, None
+        # An order line NAMES ITS RESTAURANT — "Chicken Biryani from Meghana
+        # Foods". A line without one is a sentence, and treating sentences as
+        # dishes wrote "No previous orders" into a user's food memory as
+        # something they order regularly. Caught end to end, 2026-09-02.
+        title, venue = None, None
         for separator in (" from ", " - ", " | ", " @ "):
             if separator in cleaned:
                 title, _, venue = cleaned.partition(separator)
                 break
+        if not title:
+            continue
         title = _QUANTITY.sub("", title).strip(" .:")
         # Prices, totals and headings are not dishes.
         if not title or _RUPEES.search(title) or title.endswith(":"):

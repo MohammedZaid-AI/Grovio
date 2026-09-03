@@ -13,3 +13,8 @@ __pycache__/
 
 # Local WhatsApp Web session (WHATSAPP_PROVIDER=local). Contains device keys.
 .data/
+
+# Baileys gateway: WhatsApp session credentials and node deps.
+belaku-whatsapp-gateway/auth/
+belaku-whatsapp-gateway/.env
+belaku-whatsapp-gateway/node_modules/
