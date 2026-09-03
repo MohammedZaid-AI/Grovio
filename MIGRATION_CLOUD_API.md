@@ -1,5 +1,11 @@
 # Migration report: Twilio → WhatsApp Business Cloud API
 
+> **HISTORICAL RECORD — SUPERSEDED.** This documents the Twilio → WhatsApp
+> Business Cloud API migration. The Cloud API transport has since been replaced
+> by the Baileys WhatsApp gateway (`whatsapp-gateway/`, `whatsapp/gateway.py`).
+> Kept because it records why the phone-key format and the fail-closed posture
+> are what they are; nothing in it describes the current transport.
+
 Complete replacement. Twilio is gone — not deprecated, not behind a flag, not
 kept as a fallback. There is one messaging provider.
 

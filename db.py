@@ -254,12 +254,21 @@ def init_db():
             phone TEXT NOT NULL,
             provider TEXT NOT NULL,
             code_verifier TEXT,                     -- ENCRYPTED (PKCE)
+            client_id TEXT,                         -- the client the code is issued TO
             pending_message TEXT,                   -- resumed after linking
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             expires_at TIMESTAMP NOT NULL,
             used_at TIMESTAMP                       -- NULL until consumed
         )
         ''')
+
+        # RFC 6749 4.1.3: the token request must identify the client the code
+        # was issued to. Registration is cached in memory, so a restart between
+        # authorize and callback used to re-register and could present a
+        # different client. Safe migration for existing databases.
+        cursor.execute("PRAGMA table_info(oauth_states)")
+        if "client_id" not in {row[1] for row in cursor.fetchall()}:
+            cursor.execute("ALTER TABLE oauth_states ADD COLUMN client_id TEXT")
 
         # ------------------------------------------------------------------
         # Ordering (Phase 5)
@@ -892,14 +901,18 @@ def revoke_provider_link(phone, provider, delete=False):
         conn.close()
 
 
-def save_oauth_state(state, phone, provider, code_verifier, pending_message, expires_at):
+def save_oauth_state(state, phone, provider, code_verifier, pending_message, expires_at,
+                     client_id=None):
+    """Stash everything the callback will need. `client_id` is recorded because
+    the token request must name the client the code was issued to, and our
+    registration cache does not survive a restart."""
     conn = get_connection()
     try:
         conn.execute(
             "INSERT INTO oauth_states "
-            "(state, phone, provider, code_verifier, pending_message, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (state, phone, provider, code_verifier, pending_message, expires_at),
+            "(state, phone, provider, code_verifier, pending_message, expires_at, client_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (state, phone, provider, code_verifier, pending_message, expires_at, client_id),
         )
         conn.commit()
     finally:
@@ -925,13 +938,15 @@ def claim_oauth_state(state):
             conn.rollback()
             return None
         row = cursor.execute(
-            "SELECT state, phone, provider, code_verifier, pending_message, expires_at "
+            "SELECT state, phone, provider, code_verifier, pending_message, expires_at, "
+            "client_id "
             "FROM oauth_states WHERE state = ?", (state,)
         ).fetchone()
         conn.commit()
     finally:
         conn.close()
-    keys = ("state", "phone", "provider", "code_verifier", "pending_message", "expires_at")
+    keys = ("state", "phone", "provider", "code_verifier", "pending_message",
+            "expires_at", "client_id")
     return dict(zip(keys, row))
 
 

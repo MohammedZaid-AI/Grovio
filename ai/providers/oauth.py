@@ -361,7 +361,17 @@ async def _register_client(metadata: dict, provider: str) -> str | None:
     if not endpoint:
         return None
 
-    cached = _client_cache.get(endpoint)
+    callback = redirect_uri(provider)
+    # A registration is issued FOR a specific redirect_uri, so that PAIR is its
+    # identity — not the endpoint alone. Two providers on the same vendor share
+    # one registration server (Swiggy runs one for both its MCP servers), so
+    # keying on the endpoint handed whichever registered first its client_id to
+    # the other, whose redirect_uri that client was never registered against.
+    # The server answers exactly that with:
+    #   {"error":"invalid_request",
+    #    "error_description":"client_id and redirect_uri are required"}
+    key = (endpoint, callback)
+    cached = _client_cache.get(key)
     if cached:
         return cached
 
@@ -369,7 +379,7 @@ async def _register_client(metadata: dict, provider: str) -> str | None:
         async with httpx.AsyncClient(timeout=TOKEN_TIMEOUT) as client:
             response = await client.post(endpoint, json={
                 "client_name": CLIENT_NAME,
-                "redirect_uris": [redirect_uri(provider)],
+                "redirect_uris": [callback],
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
                 "token_endpoint_auth_method": "none",   # public client + PKCE
@@ -384,8 +394,14 @@ async def _register_client(metadata: dict, provider: str) -> str | None:
 
     client_id = (response.json() or {}).get("client_id")
     if client_id:
-        _client_cache[endpoint] = client_id
-        logger.info(f"[oauth] registered dynamically with {provider}")
+        _client_cache[key] = client_id
+        logger.info(f"[oauth] registered dynamically with {provider} "
+                    f"for {callback}")
+    else:
+        logger.warning(
+            f"[oauth] {provider} registration returned no client_id. "
+            f"Response keys: {sorted((response.json() or {}).keys())}"
+        )
     return client_id
 
 
@@ -413,6 +429,11 @@ async def begin(phone: str, provider: str, config: OAuthConfig,
     verifier, challenge = _pkce()
     state = secrets.token_urlsafe(32)
 
+    # Resolved BEFORE the state row is written, so the callback can name the
+    # exact client this code will be issued to (RFC 6749 4.1.3) even if the
+    # process restarts in between and the in-memory registration cache is gone.
+    client_id = await _resolve_client_id(config, metadata, provider)
+
     db.save_oauth_state(
         state=state,
         phone=phone,
@@ -421,6 +442,7 @@ async def begin(phone: str, provider: str, config: OAuthConfig,
         pending_message=pending_message,
         expires_at=(datetime.now(timezone.utc) + timedelta(minutes=STATE_TTL_MINUTES))
         .strftime("%Y-%m-%d %H:%M:%S"),
+        client_id=client_id,
     )
 
     params = {
@@ -430,14 +452,29 @@ async def begin(phone: str, provider: str, config: OAuthConfig,
         "code_challenge": challenge,
         "code_challenge_method": "S256",
     }
-    client_id = await _resolve_client_id(config, metadata, provider)
     if client_id:
         params["client_id"] = client_id
+    else:
+        # Silently omitting it produced an authorization URL that every server
+        # rejects, with nothing in the log to say why.
+        logger.error(
+            f"[oauth] NO client_id for {provider} — none configured"
+            + (f" in {config.client_id_env}" if config.client_id_env else "")
+            + " and dynamic registration did not return one. The authorization "
+              "request WILL be rejected."
+        )
     if config.scopes:
         params["scope"] = " ".join(config.scopes)
 
-    logger.info(f"[oauth] link started provider={provider} state={state[:8]}…")
     callback = redirect_uri(provider)
+    # client_id and redirect_uri are public parts of an authorization request —
+    # they appear in the browser URL. The state is truncated and the PKCE
+    # verifier never leaves the vault, so nothing secret is written here.
+    logger.info(
+        f"[oauth] link started provider={provider} state={state[:8]}… "
+        f"client_id={client_id or '<NONE>'} redirect_uri={callback} "
+        f"authorize={metadata['authorization_endpoint']}"
+    )
     if callback.startswith("http://localhost"):
         # The commonest dead end in local development: the link is delivered
         # over WhatsApp, so it gets tapped on the PHONE — where localhost is the
@@ -536,7 +573,12 @@ async def complete(state: str, code: str, config_for) -> dict:
         raise OAuthError("stored PKCE verifier could not be read")
 
     metadata = await discover(config)
-    client_id = await _resolve_client_id(config, metadata, provider)
+    # The client the code was issued to, recorded at begin(). Re-resolving here
+    # could re-register after a restart and present a DIFFERENT client to the
+    # token endpoint, which RFC 6749 4.1.3 does not allow. Older rows predate
+    # the column, so fall back rather than break a link already in flight.
+    client_id = row.get("client_id") or await _resolve_client_id(
+        config, metadata, provider)
     payload = await _post_token(metadata, config, {
         "grant_type": "authorization_code",
         "code": code,

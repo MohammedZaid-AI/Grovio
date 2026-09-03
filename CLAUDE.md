@@ -25,7 +25,7 @@ half.
 |---|---|---|
 | 1 | Audit + migration plan (`MIGRATION.md`) | ✅ Done |
 | 2 | Delete the ERP | ✅ Done |
-| 3 | Planner + providers + memory + Cloud API transport | ✅ Done |
+| 3 | Planner + providers + memory + Baileys gateway transport | ✅ Done |
 | 3.5 | Product feasibility audit (`FEASIBILITY.md`) | ✅ Done |
 | 4 | Identity + provider account linking (`IDENTITY.md`) | ✅ Done |
 | 5 | End-to-end journey: recommend → order → track | ✅ Done |
@@ -34,7 +34,7 @@ half.
 ## Architecture
 
 ```
-WhatsApp  →  webhook (verify, enqueue, return 200 in ms)
+WhatsApp  →  Baileys gateway (Node)  →  POST /webhook/inbound
                  ↓
           whatsapp_worker      durable queue, per-phone ordering, retries
                  ↓
@@ -72,7 +72,7 @@ rather than decorative.
 ```
 backend/
   app.py                FastAPI app + lifespan (schema, providers, recovery)
-  routes.py             ONE capability: GET/POST /webhook
+  routes.py             ONE capability: POST /webhook/inbound
   whatsapp_worker.py    async delivery worker — do not casually modify
 ai/
   concierge.py          turn entry point (run planner, persist, stay friendly)
@@ -90,10 +90,10 @@ ai/
     swiggy.py           the ONLY file allowed to know Swiggy exists
 core/                   llm (async, tool-calling), crypto, config, logger, authz
 whatsapp/
-  __init__.py           the seam — import send_text/mark_read from here;
-                        selects the transport via WHATSAPP_PROVIDER
-  cloud_api.py          the ONLY module that knows Meta exists (production)
-  local_client.py       personal WhatsApp Web session (DEVELOPMENT ONLY)
+  __init__.py           the seam — import send_text/canonical_phone from here
+  gateway.py            the ONLY module that talks to the gateway
+whatsapp-gateway/       Node + Baileys. The ONLY thing that knows WhatsApp
+                        exists. Never imported by Python.
 db.py                   delivery queue + user model
 ```
 
@@ -145,36 +145,37 @@ Set **`OLLAMA_KEEP_ALIVE=30m`**. Ollama unloads an idle model after 5 minutes
 and reloading `gemma4:e4b` costs ~50s on a 6 GB card — the difference between a
 3-second reply and a user assuming it is broken.
 
-### Testing without a Meta account
+### Running the WhatsApp gateway
 
-Meta requires an approved business account and a public webhook. To exercise the
-concierge before that exists, `WHATSAPP_PROVIDER=local` links a **personal**
-WhatsApp number over WhatsApp Web instead:
+The transport is a **separate Node process** using Baileys. The backend never
+imports it and never sees a Baileys object — it posts `{phone, text}` to
+`/send` and receives inbound messages on `/webhook/inbound`.
 
 ```powershell
-venv\Scripts\python.exe -m pip install neonize "qrcode[pil]"
-$env:WHATSAPP_PROVIDER="local"
-venv\Scripts\python.exe -m uvicorn backend.app:app --reload --port 8000
+cd whatsapp-gateway
+npm install
+copy .env.example .env   # then set WHATSAPP_GATEWAY_SECRET in BOTH .env files
+npm start
 ```
 
-A QR prints in the terminal (and lands in `.data/whatsapp-session/qr.png`).
-Scan it once: **WhatsApp → Settings → Linked devices → Link a device**. The
-session persists in `.data/whatsapp-session/` — gitignored — and survives
-restarts until you unlink from the phone. Then message that number.
+A QR prints in the terminal. Scan it once: **WhatsApp → Settings → Linked
+devices → Link a device**. Credentials persist in `whatsapp-gateway/auth/` —
+gitignored — so the QR appears on the first run and not again. Delete that
+directory to force fresh pairing.
 
-Switch back with `WHATSAPP_PROVIDER=cloud` (or just unset it — cloud is the
-default, so production is never opt-in).
+Then start the backend as usual. `GET /health` reports the gateway URL and
+whether the shared secret is set.
 
-⚠️ **Development only.** This is an unofficial client: WhatsApp can ban the
-number, so use a spare one, never a number tied to a business account. There is
-also no webhook, so no `X-Hub-Signature-256` to verify — the transport is
-trusted, which is exactly why it must not ship. **A linked device receives
-every message that number gets**, so anyone who texts the number will be
-answered by the concierge. They cannot spend anything —
-`AUTHORIZED_PHONES` gates ordering — but they will get replies.
+⚠️ **Baileys is an UNOFFICIAL WhatsApp Web protocol client**, not the Meta
+Business Cloud API, chosen deliberately for this prototype. WhatsApp can ban the
+number, so use a spare one, never one tied to a business account. There is **no
+cryptographic signature** on inbound messages — the shared
+`WHATSAPP_GATEWAY_SECRET` is the only thing making the gateway trusted, which is
+why it fails closed on both sides. **A linked device receives every message that
+number gets**, so anyone who texts it will be answered. They cannot spend
+anything — `AUTHORIZED_PHONES` gates ordering — but they get replies.
 
-`--reload` restarts the WhatsApp socket on every code change. For a long
-session, run without it.
+`npm test` runs 51 gateway checks with no network and no socket.
 
 ## Environment
 
@@ -184,12 +185,8 @@ session, run without it.
 | `OPENAI_BASE_URL`, `LLM_MODEL` | Provider + model override |
 | | Local: `OPENAI_API_KEY=ollama`, `OPENAI_BASE_URL=http://localhost:11434/v1` |
 | `AUTHORIZED_PHONES` | Who may ORDER. Chat is open to all. **Fails closed.** |
-| `WHATSAPP_PROVIDER` | `cloud` (production, default) or `local` (dev) |
-| `WHATSAPP_ACCESS_TOKEN` | Cloud API system-user token |
-| `WHATSAPP_PHONE_NUMBER_ID` | Cloud API sender id |
-| `WHATSAPP_APP_SECRET` | Webhook signature verification. **Fails closed.** |
-| `WHATSAPP_VERIFY_TOKEN` | Echoed during webhook registration. **Fails closed.** |
-| `META_API_VERSION` | Graph API version (default in `whatsapp/cloud_api.py`) |
+| `WHATSAPP_GATEWAY_SECRET` | Shared secret with the gateway, both directions. **Fails closed.** |
+| `WHATSAPP_GATEWAY_URL` | Where the gateway listens (default `http://localhost:8100`) |
 | `TOKEN_ENCRYPTION_KEY` | Fernet key for provider tokens. **Fails closed.** |
 | `PUBLIC_BASE_URL` | Base for OAuth callbacks; must be https in production |
 | `SWIGGY_OAUTH_CLIENT_ID` | Optional — Swiggy issues client ids by dynamic registration |
@@ -229,11 +226,18 @@ session, run without it.
 - **OAuth metadata may live at the ORIGIN ROOT**, not under the server path.
   `_metadata_urls` probes the RFC 8414 §3.1 form, the appended form and the
   root. Swiggy serves only the root. See `OAUTH.md`.
-- **The transport is a seam, not a fork.** Both transports expose the same
-  `send_text`/`classify_send_error` and hand inbound messages to
-  `whatsapp_worker.enqueue_and_wake` in the same shape. Nothing above
-  `whatsapp/` may learn which one is running — `tests/test_local_transport.py`
-  §10 tokenises the local client and fails the build if it names the AI layer.
+- **The backend must never import Baileys.** The gateway is a separate Node
+  process; Python talks to it over two routes and nothing else.
+  `tests/test_gateway_transport.py` §8 tokenises `ai/`, `backend/` and `core/`
+  and fails the build if any of them names the transport.
+- **`key.fromMe` is THE loop guard.** Baileys delivers our own replies back
+  through `messages.upsert`. Answering them puts the concierge in a conversation
+  with itself, forever, spending real money every lap. It is dropped in the
+  gateway's `normalize.js` and asserted from three directions.
+- **A `@lid` is a privacy id, NOT a phone number.** Keying a user by one gives
+  the same human a second identity with no memory, no history and no place on
+  `AUTHORIZED_PHONES`. The gateway resolves `senderPn`/`participantPn`, and
+  drops the message when neither exists rather than inventing a user.
 - **A burst of messages gets ONE reply, to the LATEST.** The worker claims
   every pending inbound for a phone (`db.claim_pending_inbound`) and answers
   them as a single turn, earlier messages folded in as context. Someone typing
@@ -243,17 +247,24 @@ session, run without it.
   text also arrives as `senderKeyDistributionMessage` / `messageContextInfo` /
   `protocolMessage` with no body. Reading "no text" as "must be media" replied
   "I can't open attachments yet" to every single message a user sent.
-  `local_client.media_kind` requires a real media field; anything else with no
-  text is dropped silently.
+  The gateway's `normalizeMessage` requires a real media field; anything else
+  with no text is dropped silently, before it ever reaches Python.
 - **Phone numbers are canonical MSISDNs** — `917795871481`, never
   `whatsapp:+91…`. `whatsapp.canonical_phone` normalises at ingress and
   `db._migrate_phone_keys` rewrites older rows on startup. A second format
   means the same human becomes a second user with no memory or order history.
-- **The transport is a seam, not a fork.** Both transports expose the same
-  `send_text`/`classify_send_error` and hand inbound messages to
-  `whatsapp_worker.enqueue_and_wake` in the same shape. Nothing above
-  `whatsapp/` may learn which one is running — `tests/test_local_transport.py`
-  §10 tokenises the local client and fails the build if it names the AI layer.
+- **The backend must never import Baileys.** The gateway is a separate Node
+  process; Python talks to it over two routes and nothing else.
+  `tests/test_gateway_transport.py` §8 tokenises `ai/`, `backend/` and `core/`
+  and fails the build if any of them names the transport.
+- **`key.fromMe` is THE loop guard.** Baileys delivers our own replies back
+  through `messages.upsert`. Answering them puts the concierge in a conversation
+  with itself, forever, spending real money every lap. It is dropped in the
+  gateway's `normalize.js` and asserted from three directions.
+- **A `@lid` is a privacy id, NOT a phone number.** Keying a user by one gives
+  the same human a second identity with no memory, no history and no place on
+  `AUTHORIZED_PHONES`. The gateway resolves `senderPn`/`participantPn`, and
+  drops the message when neither exists rather than inventing a user.
 - **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so

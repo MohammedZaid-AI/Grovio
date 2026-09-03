@@ -1,18 +1,19 @@
 """
 HTTP surface for the AI Food Concierge.
 
-One capability: the WhatsApp webhook. There is no dashboard, no admin panel and
-no upload endpoints — WhatsApp is the entire product.
+One capability: POST /webhook/inbound, where the Baileys WhatsApp gateway
+delivers messages. There is no dashboard, no admin panel and no upload
+endpoints — WhatsApp is the entire product.
 
-The webhook does the minimum possible work: verify the sender, persist the
+The route does the minimum possible work: authenticate the gateway, persist the
 inbound message, return 200 in milliseconds. All reasoning and delivery happens
 in the background worker (backend/whatsapp_worker.py), because LLM and provider
-calls take far longer than any webhook timeout allows.
+calls take far longer than the gateway's timeout allows.
 """
+import hmac
 import os
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import PlainTextResponse
 
 import whatsapp
 from core.logger import logger
@@ -91,38 +92,42 @@ async def _queue(message_id, phone, body, unsupported=False):
         logger.error(f"webhook enqueue failed: {e}", exc_info=True)
 
 
-@router.get("/webhook")
-def verify_webhook(request: Request):
-    """Meta's one-time subscription handshake.
+def _gateway_secret_ok(request: Request) -> bool:
+    """The gateway is trusted only because it proves it holds the shared secret.
 
-    Echo hub.challenge as plain text when the verify token matches. Fails
-    closed when WHATSAPP_VERIFY_TOKEN is unset — otherwise anyone could
-    complete the subscription and start receiving this number's messages.
+    SECURITY: fails CLOSED. An unset WHATSAPP_GATEWAY_SECRET denies every
+    request rather than accepting forged messages — anyone who can POST here
+    could otherwise put words in a user's mouth and spend their money. There is
+    no cryptographic signature to fall back on: this is a WhatsApp Web session,
+    not a signed platform webhook.
     """
-    if whatsapp.verify_token_matches(request.query_params):
-        logger.info("[webhook] verification handshake accepted")
-        return PlainTextResponse(request.query_params.get("hub.challenge", ""))
+    expected = os.getenv("WHATSAPP_GATEWAY_SECRET") or ""
+    provided = request.headers.get("x-gateway-secret") or ""
+    if not expected or not provided:
+        return False
+    # Constant-time: a fast reject leaks the secret byte by byte.
+    return hmac.compare_digest(expected, provided)
 
-    logger.warning("[webhook] verification rejected (token mismatch or unconfigured)")
-    raise HTTPException(status_code=403, detail="Verification failed")
 
+@router.post("/webhook/inbound")
+async def inbound(request: Request):
+    """One message from the Baileys gateway.
 
-@router.post("/webhook")
-async def webhook(request: Request):
-    """Every Cloud API event: messages, statuses, receipts, errors.
+        {"message_id": "3EB0…", "phone": "919876543210",
+         "text": "I need milk", "timestamp": "1755000000", "type": "text"}
 
-    Returns 200 for anything that passes signature verification, including
-    events we don't act on. A non-200 makes Meta redeliver the whole batch,
-    so one unrecognised event would replay every message beside it.
+    Does the minimum: authenticate, validate, persist, return 200 in
+    milliseconds. All reasoning happens in the background worker, because LLM
+    and provider calls take far longer than the gateway's timeout allows.
+
+    Status codes matter here — the gateway retries on 5xx and gives up on 4xx:
+      200  accepted, or deliberately ignored
+      401  bad or missing secret
+      400  unusable payload; retrying would fail identically
     """
-    raw = await request.body()
-
-    # SECURITY: fail CLOSED. An unset app secret must deny everyone rather than
-    # let anyone POST forged messages straight into the concierge — that is a
-    # path to putting words in a user's mouth and spending their money.
-    if not whatsapp.verify_signature(raw, request.headers.get("x-hub-signature-256", "")):
-        logger.warning("[webhook] rejected: invalid X-Hub-Signature-256")
-        raise HTTPException(status_code=403, detail="Invalid signature")
+    if not _gateway_secret_ok(request):
+        logger.warning("[webhook] rejected: bad or missing X-Gateway-Secret")
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
     try:
         payload = await request.json()
@@ -131,64 +136,31 @@ async def webhook(request: Request):
         raise HTTPException(status_code=400, detail="Malformed payload")
 
     if not isinstance(payload, dict):
-        logger.warning(f"[webhook] ignoring non-object payload ({type(payload).__name__})")
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+
+    phone = whatsapp.canonical_phone(payload.get("phone"))
+    message_id = str(payload.get("message_id") or "")
+    if not phone or not message_id:
+        # Not retryable: the same payload would fail identically forever. The
+        # message id is also the deduplication key, so a message without one
+        # could be processed twice.
+        logger.warning("[webhook] rejecting a message with no phone or no id")
+        raise HTTPException(status_code=400,
+                            detail="phone and message_id are required")
+
+    kind = str(payload.get("type") or "text")
+    body = str(payload.get("text") or "")
+    if not body and kind == "text":
+        # The gateway already drops protocol plumbing; an empty text that gets
+        # this far is nothing to answer.
         return {"status": "ignored"}
 
-    if payload.get("object") and payload["object"] != "whatsapp_business_account":
-        # Some other Meta product subscribed to this endpoint. Not ours.
-        logger.info(f"[webhook] ignoring object={payload['object']!r}")
-        return {"status": "ignored"}
+    if _debug_enabled():
+        logger.info(f"[webhook] 📩 {phone}: {body!r}")
+    else:
+        logger.info(f"[webhook] inbound {message_id} from {phone} ({kind})")
 
-    messages = whatsapp.parse_inbound(payload)
-    statuses = whatsapp.parse_statuses(payload)
-    errors = whatsapp.parse_errors(payload)
-    logger.info(f"[webhook] received {len(messages)} message(s), "
-                f"{len(statuses)} status(es), {len(errors)} error(s)")
-
-    for message in messages:
-        if _debug_enabled():
-            logger.info(f"[webhook] 📩 {message['phone']}: {message['body']!r}")
-        await _queue(message["message_id"], message["phone"], message["body"],
-                     message["unsupported"])
-
-    _record_statuses(statuses)
-
-    for error in errors:
-        # Account-level problems — number quality, template rejections. Nothing
-        # to reply to; they need a human looking at Business Manager.
-        logger.error(f"[webhook] Meta account error {error['code']}: {error['title']}")
-
+    # UNCHANGED contract: message_sid is WhatsApp's own id, which is what the
+    # queue deduplicates on.
+    await _queue(message_id, phone, body, unsupported=(kind != "text"))
     return {"status": "received"}
-
-
-def _record_statuses(statuses: list) -> None:
-    """Persist delivery and read receipts against the message we sent.
-
-    Best effort: a receipt is bookkeeping, and losing one must never make us
-    fail a webhook Meta would then redeliver in full.
-    """
-    import db
-
-    for status in statuses:
-        if not status["message_id"]:
-            continue
-        try:
-            db.record_delivery_status(
-                provider_sid=status["message_id"],
-                status=status["status"],
-                error_code=status["error_code"],
-            )
-        except Exception as e:
-            logger.error(f"[webhook] could not record status: {e!r}")
-
-        if status["status"] == "failed":
-            logger.error(
-                f"[webhook] delivery FAILED to {status['recipient']} "
-                f"(message_id={status['message_id']}, code={status['error_code']}, "
-                f"{status['error_title']})"
-            )
-        else:
-            logger.info(
-                f"[webhook] {status['status']} — {status['message_id']} "
-                f"to {status['recipient']}"
-            )

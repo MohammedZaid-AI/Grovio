@@ -87,19 +87,43 @@ async def _link_prompt(user, provider_name: str, pending_message: str) -> SkillR
             provider_label=label,
         )
 
+    # OUT THE DOOR VERBATIM, not through the model.
+    #
+    # This URL is ~300 characters of query string, and handing it to the model
+    # to retype is how it got mangled: observed live, a local model wrote
+    #   ...authorize?response_type=code&redirect_uri=http%3A%2F
+    # and stopped mid-parameter. Swiggy answered "client_id and redirect_uri
+    # are required", which reads as an OAuth bug and is not one. Worse, the
+    # broken link was then stored in conversation history and reproduced on
+    # later turns without OAuth running at all.
+    #
+    # Same durable outbound queue as the payment link in _await_payment, and
+    # for the same reason: a credential-bearing URL must arrive byte for byte.
+    from ai import payments
+
+    await payments.notify(user.phone, url)
+    logger.info(f"[skills] sent the {label} link to {user.phone} "
+                f"({len(url)} chars, delivered verbatim)")
+
+    message = (
+        f"NEEDS_LINK: this user has not connected their {label} account, so no "
+        f"real results exist yet. The connect link has ALREADY been sent to "
+        f"them in a separate message. Say ONE short line asking them to tap it "
+        f"to connect {label} so you can see real menus and prices. Do NOT "
+        f"repeat the link, do NOT write out any URL, and do NOT invent any "
+        f"food options in the meantime."
+    )
+    # A URL in the model's input is a URL the model can retype, badly. This is
+    # the whole point of the change, so it is asserted rather than assumed.
+    assert "http" not in message, "the OAuth URL must never reach the model"
+
     return SkillResult(
         status=SkillStatus.NEEDS_LINK,
         provider_label=label,
+        # Kept for callers and tests that need the real URL. It is NOT model
+        # input — nothing puts link_url into a prompt.
         link_url=url,
-        message=(
-            f"NEEDS_LINK: this user has not connected their {label} account, so no "
-            f"real results exist yet. In ONE short line ask them to connect "
-            f"{label} so you can see real menus and prices, then give this link "
-            f"EXACTLY as-is on its own line:\n{url}\n"
-            f"That line plus the link is the WHOLE message — no preamble, no "
-            f"enthusiasm, no explanation of what happens afterwards. Do NOT "
-            f"invent any food options in the meantime."
-        ),
+        message=message,
     )
 
 

@@ -24,15 +24,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import httpx
 
-# Pin the Cloud API transport BEFORE anything imports it: section 10 asserts
-# Meta's error-code semantics through the worker, which only hold when the
-# worker is bound to that classifier. The local transport has its own retry
-# rules and its own suite (tests/test_local_transport.py).
-os.environ["WHATSAPP_PROVIDER"] = "cloud"
-
-# The messaging layer itself is covered by tests/test_cloud_api.py; this suite
+# The messaging layer itself is covered by tests/test_gateway_transport.py; this suite
 # proves the DELIVERY pipeline — ordering, dedup, retries, restart recovery —
-# is unchanged by the move to the Cloud API.
+# is unchanged by the move to the Baileys gateway.
 
 # Isolated temp DB BEFORE importing anything that touches db.
 import db
@@ -43,13 +37,13 @@ db.init_db()
 
 import backend.whatsapp_worker as worker
 from whatsapp import classify_send_error
-from whatsapp.cloud_api import NotConfigured
+from whatsapp.gateway import NotConfigured
 
 
-def meta_error(status, code=None):
-    """A Cloud API failure, as httpx would raise it."""
-    payload = {"error": {"code": code}} if code is not None else {}
-    request = httpx.Request("POST", "https://graph.facebook.com/v23.0/1/messages")
+def gateway_error(status, detail=None):
+    """A gateway failure, as httpx would raise it."""
+    payload = {"error": detail} if detail else {}
+    request = httpx.Request("POST", "http://localhost:8100/send")
     return httpx.HTTPStatusError(
         "boom", request=request,
         response=httpx.Response(status, json=payload, request=request))
@@ -279,20 +273,20 @@ async def test_no_duplicate_resend():
 
 
 async def test_error_classification():
-    print("\n[10] Cloud API send-error classification")
-    # Permanent Meta codes — no retry can change any of these.
-    for code in (131047, 131026, 190, 200, 100):
-        c = classify_send_error(meta_error(400, code))
-        check(f"code {code} is non-retryable", c.retryable is False and c.code == code)
-    check("HTTP 401 expired token is non-retryable",
-          classify_send_error(meta_error(401)).retryable is False)
-    check("HTTP 403 permission is non-retryable",
-          classify_send_error(meta_error(403)).retryable is False)
-    check("HTTP 429 rate limit IS retryable",
-          classify_send_error(meta_error(429)).retryable is True)
+    print("\n[10] Gateway send-error classification")
+    # A wrong shared secret or a refused message: no retry can change either.
+    check("HTTP 401 (our secret is wrong) is non-retryable",
+          classify_send_error(gateway_error(401)).retryable is False)
+    check("HTTP 400 (message refused) is non-retryable",
+          classify_send_error(gateway_error(400)).retryable is False)
+    check("HTTP 404 is non-retryable",
+          classify_send_error(gateway_error(404)).retryable is False)
+    # WhatsApp not connected yet is exactly what the durable queue exists for.
+    check("HTTP 503 (WhatsApp not connected) IS retryable",
+          classify_send_error(gateway_error(503)).retryable is True)
     for status in (500, 502, 503):
         check(f"HTTP {status} is retryable",
-              classify_send_error(meta_error(status)).retryable is True)
+              classify_send_error(gateway_error(status)).retryable is True)
     check("ConnectionError is retryable",
           classify_send_error(httpx.ConnectError("reset")).retryable is True)
     check("timeout is retryable",
@@ -304,7 +298,7 @@ async def test_error_classification():
 async def test_permanent_error_no_retry():
     print("\n[11] 63038 daily limit -> fail immediately, record code, no retries")
     phone = "whatsapp:+910000000012"
-    sender = AsyncMock(side_effect=meta_error(400, 131047))
+    sender = AsyncMock(side_effect=gateway_error(400))
     with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
          patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-12", phone, "x", 0)
@@ -312,13 +306,13 @@ async def test_permanent_error_no_retry():
     rows = outbound_rows(phone)
     check("send attempted exactly once (no retries)", sender.call_count == 1)
     check("marked FAILED", rows and rows[0][2] == "FAILED")
-    check("Meta error code 131047 recorded", rows and rows[0][5] == 131047)
+    check("the gateway status is recorded for debugging", rows and rows[0][5] == 400)
 
 
 async def test_retryable_then_success():
     print("\n[12] Transient HTTP 503 retried, then succeeds")
     phone = "whatsapp:+910000000013"
-    sender = AsyncMock(side_effect=[meta_error(503), "wamid.OK"])
+    sender = AsyncMock(side_effect=[gateway_error(503), "wamid.OK"])
     with patch.object(worker, "respond", new=AsyncMock(return_value="hi")), \
          patch.object(worker, "send_text", sender):
         await worker.enqueue_and_wake("SID-13", phone, "x", 0)

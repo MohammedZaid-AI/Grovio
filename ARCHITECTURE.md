@@ -10,11 +10,16 @@ official MCP interface.
 ## System
 
 ```
- WhatsApp Cloud API
-        │  signed webhook (HMAC SHA-256, fails closed)
+ WhatsApp
+        │
         ▼
  ┌──────────────────┐
- │  FastAPI webhook │  verify → persist → 200 OK in milliseconds
+ │ Baileys gateway  │  Node · the ONLY process that knows WhatsApp exists
+ └────────┬─────────┘  QR pairing · fromMe filter · @lid → phone · dedup
+          │  POST /webhook/inbound  (X-Gateway-Secret, fails closed)
+          ▼
+ ┌──────────────────┐
+ │  FastAPI route   │  authenticate → persist → 200 OK in milliseconds
  └────────┬─────────┘
           ▼
  ┌──────────────────┐

@@ -164,7 +164,7 @@ matter most:
 | Phase | Scope | State |
 |---|---|---|
 | 1–2 | Audit + delete the predecessor ERP | ✅ |
-| 3 | Planner, providers, memory, Cloud API messaging | ✅ |
+| 3 | Planner, providers, memory, Baileys gateway messaging | ✅ |
 | 4 | Identity + provider account linking | ✅ |
 | 5 | End-to-end journey: recommend → order → track | ✅ |
 | 6 | Production hardening | ✅ |

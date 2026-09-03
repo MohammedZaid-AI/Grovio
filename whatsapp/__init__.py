@@ -1,85 +1,48 @@
 """
 Messaging layer.
 
-Import from here, never from a transport module directly:
+Import from here, never from the transport module directly:
 
-    from whatsapp import send_text, mark_read
+    from whatsapp import send_text, canonical_phone
 
-Two transports, selected by WHATSAPP_PROVIDER:
+ONE transport: the Baileys WhatsApp gateway, reached over plain HTTP.
 
-    cloud   WhatsApp Business Cloud API (Meta official). PRODUCTION. Default.
-    local   personal WhatsApp Web session via neonize. DEVELOPMENT ONLY —
-            unofficial, the number can be banned, and there is no webhook
-            signature to verify. See whatsapp/local_client.py.
+    WhatsApp  <->  Baileys gateway (Node)  <->  this backend
 
-Nothing above this package can tell which is running: both expose the same
-`send_text`, `mark_read` and `classify_send_error`, and both hand inbound
-messages to `backend.whatsapp_worker.enqueue_and_wake` in the same shape.
+The backend never imports Baileys and never sees a Baileys object. It posts
+`{phone, text}` to the gateway's `/send`, and the gateway posts inbound messages
+to `/webhook/inbound` here. Anything else that spoke those two routes would drop
+in without a line changing above this package.
 
-Webhook helpers (`verify_signature`, `parse_inbound`, `parse_statuses`,
-`verify_token_matches`) always come from the Cloud API module. They are Meta
-protocol parsers — in `local` mode the webhook simply never fires, and leaving
-them bound means backend/routes.py needs no knowledge of the choice.
+⚠️ Baileys is an UNOFFICIAL WhatsApp Web protocol client, not the Meta WhatsApp
+Business Cloud API. It is used deliberately for this prototype: WhatsApp can ban
+the number, so use a spare one, never one tied to a business account. There is
+no cryptographic signature on inbound messages — the shared
+`WHATSAPP_GATEWAY_SECRET` is what makes the gateway trusted, which is why it
+fails closed in both directions.
 """
-import os
-
-# Always available: the webhook surface, and the one phone format the whole
-# system stores. canonical_phone is shared by both transports so a user has the
-# same key whichever one wrote the row.
-from whatsapp.cloud_api import (  # noqa: F401
+from whatsapp.gateway import (  # noqa: F401
+    MAX_MESSAGE_LENGTH,
+    NotConfigured,
     SendErrorClass,
     canonical_phone,
-    parse_errors,
-    parse_inbound,
-    parse_statuses,
-    verify_signature,
-    verify_token_matches,
+    classify_send_error,
+    gateway_url,
+    is_configured,
+    mark_read,
+    send_document,
+    send_image,
+    send_template,
+    send_text,
+    start,
+    stop,
 )
 
-PROVIDER = os.getenv("WHATSAPP_PROVIDER", "cloud").strip().lower()
-
-if PROVIDER == "local":
-    from whatsapp import local_client as _transport
-elif PROVIDER == "cloud":
-    from whatsapp import cloud_api as _transport
-else:
-    raise RuntimeError(
-        f"WHATSAPP_PROVIDER={PROVIDER!r} is not a transport. Use 'cloud' "
-        f"(production) or 'local' (development)."
-    )
-
-NotConfigured = _transport.NotConfigured
-api_version = _transport.api_version
-classify_send_error = _transport.classify_send_error
-is_configured = _transport.is_configured
-mark_read = _transport.mark_read
-send_document = _transport.send_document
-send_image = _transport.send_image
-send_template = _transport.send_template
-send_text = _transport.send_text
-
-
-async def start() -> None:
-    """Bring the transport up, if it needs bringing up.
-
-    The Cloud API is stateless — Meta pushes to our webhook, so there is
-    nothing to start. The local transport has to open and hold a socket.
-    """
-    starter = getattr(_transport, "start", None)
-    if starter is not None:
-        await starter()
-
-
-async def stop() -> None:
-    stopper = getattr(_transport, "stop", None)
-    if stopper is not None:
-        await stopper()
-
+PROVIDER = "baileys"
 
 __all__ = [
-    "PROVIDER", "NotConfigured", "SendErrorClass", "api_version",
-    "canonical_phone", "classify_send_error", "is_configured", "mark_read",
-    "parse_errors", "parse_inbound", "parse_statuses", "send_document",
-    "send_image", "send_template", "send_text", "start", "stop",
-    "verify_signature", "verify_token_matches",
+    "MAX_MESSAGE_LENGTH", "PROVIDER", "NotConfigured", "SendErrorClass",
+    "canonical_phone", "classify_send_error", "gateway_url", "is_configured",
+    "mark_read", "send_document", "send_image", "send_template", "send_text",
+    "start", "stop",
 ]

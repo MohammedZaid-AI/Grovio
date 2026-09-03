@@ -17,11 +17,14 @@ Two root causes, pinned separately:
 
 No network. Every fetch is faked.
 """
+import base64
+import hashlib
 import asyncio
 import os
 import sys
 import tempfile
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlparse
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -366,6 +369,225 @@ check("discovery for /food would probe the Swiggy root",
       in oauth._metadata_urls("https://mcp.swiggy.com/food", "oauth-authorization-server"))
 
 print("\n" + "=" * 70)
+# ======================================================================
+print("\n[9] REGRESSION: one registration server, two providers")
+# Swiggy runs ONE registration endpoint for both its MCP servers. Caching the
+# issued client id by endpoint ALONE handed whichever provider registered first
+# its client_id to the other — whose redirect_uri that client was never
+# registered against. The server answers exactly that with:
+#   {"error":"invalid_request",
+#    "error_description":"client_id and redirect_uri are required"}
+# Reproduced against the live server 2026-09-03.
+SHARED = {
+    "authorization_endpoint": "https://mcp.swiggy.com/auth/authorize",
+    "token_endpoint": "https://mcp.swiggy.com/auth/token",
+    "registration_endpoint": "https://mcp.swiggy.com/auth/register",
+}
+
+registered = []
+
+
+class Registration:
+    """A server that issues a client id BOUND to the redirect_uri it was sent."""
+
+    status_code = 201
+
+    def json(self):
+        return {"client_id": f"cid::{registered[-1]['redirect_uris'][0]}"}
+
+
+async def _register(url, json=None, **kw):
+    registered.append(json)
+    return Registration()
+
+
+def _registering_client():
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.post = _register
+    return client
+
+
+registered.clear()
+oauth._client_cache.clear()
+with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)), \
+     patch.object(httpx, "AsyncClient", return_value=_registering_client()):
+    grocery_url = run(oauth.begin("919000000009", "swiggy_instamart",
+                                  swiggy.SwiggyInstamartProvider().oauth))
+    food_url = run(oauth.begin("919000000009", "swiggy_food",
+                               swiggy_food.SwiggyFoodProvider().oauth))
+
+grocery_params = parse_qs(urlparse(grocery_url).query)
+food_params = parse_qs(urlparse(food_url).query)
+
+check("each provider registers for itself, not once for both",
+      len(registered) == 2)
+check("every authorization URL carries a client_id",
+      "client_id" in grocery_params and "client_id" in food_params)
+check("every authorization URL carries a redirect_uri",
+      "redirect_uri" in grocery_params and "redirect_uri" in food_params)
+check("the two providers get DIFFERENT client ids",
+      grocery_params["client_id"][0] != food_params["client_id"][0])
+check("the grocery client is bound to the grocery callback",
+      grocery_params["client_id"][0].endswith(grocery_params["redirect_uri"][0]))
+check("the food client is bound to the FOOD callback — this was the bug",
+      food_params["client_id"][0].endswith(food_params["redirect_uri"][0]))
+check("the redirect_uri is the one the flow needs, unchanged",
+      food_params["redirect_uri"][0]
+      == "http://localhost:8000/link/swiggy_food/callback")
+check("PKCE still travels with it",
+      food_params["code_challenge_method"] == ["S256"]
+      and bool(food_params["code_challenge"][0]))
+check("and each link gets its own state",
+      grocery_params["state"][0] != food_params["state"][0])
+
+# The cache must still WORK: the same provider twice must not re-register.
+_before = len(registered)
+with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)), \
+     patch.object(httpx, "AsyncClient", return_value=_registering_client()):
+    run(oauth.begin("919000000009", "swiggy_food",
+                    swiggy_food.SwiggyFoodProvider().oauth))
+check("asking twice for the SAME provider reuses its registration",
+      len(registered) == _before)
+
+# A configured client id must still beat registration entirely.
+os.environ["SWIGGY_OAUTH_CLIENT_ID"] = "pre-issued-client"
+try:
+    oauth._client_cache.clear()
+    registered.clear()
+    with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)):
+        pinned = run(oauth.begin("919000000009", "swiggy_food",
+                                 swiggy_food.SwiggyFoodProvider().oauth))
+    check("a configured client id still wins",
+          parse_qs(urlparse(pinned).query)["client_id"] == ["pre-issued-client"])
+    check("and no registration call is made at all", registered == [])
+finally:
+    os.environ.pop("SWIGGY_OAUTH_CLIENT_ID", None)
+    oauth._client_cache.clear()
+
+# ======================================================================
+print("\n[10] A restart between authorize and callback must not re-register")
+# RFC 6749 4.1.3: the token request identifies the client the code was issued
+# to. Registration is cached IN MEMORY, so a restart used to re-register and
+# could present a different client to the token endpoint. Swiggy's static
+# "swiggy-mcp" masks this; a server issuing per-client ids would fail with an
+# opaque token error and no way to tell why.
+issued = []
+
+
+class PerClientRegistration:
+    """A server that issues a UNIQUE client id per registration call."""
+
+    status_code = 201
+
+    def json(self):
+        issued.append(f"client-{len(issued) + 1}")
+        return {"client_id": issued[-1]}
+
+
+async def _issue(url, json=None, **kw):
+    return PerClientRegistration()
+
+
+def _issuing_client():
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.__aexit__.return_value = False
+    client.post = _issue
+    return client
+
+
+issued.clear()
+oauth._client_cache.clear()
+with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)), \
+     patch.object(httpx, "AsyncClient", return_value=_issuing_client()):
+    started = run(oauth.begin("919000000010", "swiggy_food",
+                              swiggy_food.SwiggyFoodProvider().oauth))
+
+authorized_client = parse_qs(urlparse(started).query)["client_id"][0]
+check("the authorization URL names the registered client",
+      authorized_client == "client-1")
+
+state_row = db.get_connection().execute(
+    "SELECT client_id, code_verifier FROM oauth_states WHERE state = ?",
+    (parse_qs(urlparse(started).query)["state"][0],)).fetchone()
+check("the client id is PERSISTED with the state, not just in memory",
+      state_row[0] == authorized_client)
+check("and the PKCE verifier is stored encrypted beside it",
+      state_row[1] and state_row[1] != "" and "code" not in str(state_row[1]).lower())
+
+# THE RESTART: process memory is gone, the database is not.
+oauth._client_cache.clear()
+
+exchanged = {}
+
+
+class TokenResponse:
+    status_code = 200
+
+    def json(self):
+        return {"access_token": "at", "refresh_token": "rt", "expires_in": 432000}
+
+
+async def _token(url, data=None, headers=None, **kw):
+    exchanged.update(data or {})
+    return TokenResponse()
+
+
+token_client = AsyncMock()
+token_client.__aenter__.return_value = token_client
+token_client.__aexit__.return_value = False
+token_client.post = _token
+
+with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)), \
+     patch.object(httpx, "AsyncClient", return_value=token_client):
+    run(oauth.complete(parse_qs(urlparse(started).query)["state"][0], "auth-code-xyz",
+                       lambda name: swiggy_food.SwiggyFoodProvider().oauth))
+
+check("the token exchange names the SAME client the code was issued to",
+      exchanged.get("client_id") == authorized_client,
+      )
+check("no second registration happened across the restart", len(issued) == 1)
+check("grant_type is authorization_code", exchanged.get("grant_type") == "authorization_code")
+check("the code is sent", exchanged.get("code") == "auth-code-xyz")
+check("the redirect_uri is repeated, as the spec requires",
+      exchanged.get("redirect_uri") == "http://localhost:8000/link/swiggy_food/callback")
+check("the PKCE verifier is sent, and it is NOT the challenge",
+      exchanged.get("code_verifier")
+      and exchanged["code_verifier"] != parse_qs(urlparse(started).query)["code_challenge"][0])
+check("the verifier hashes to the challenge that was published",
+      base64.urlsafe_b64encode(
+          hashlib.sha256(exchanged["code_verifier"].encode()).digest()
+      ).decode().rstrip("=") == parse_qs(urlparse(started).query)["code_challenge"][0])
+
+# The state is spent, so a replayed callback gets nothing.
+replayed = None
+try:
+    with patch.object(oauth, "discover", AsyncMock(return_value=SHARED)):
+        run(oauth.complete(parse_qs(urlparse(started).query)["state"][0], "auth-code-xyz",
+                           lambda name: swiggy_food.SwiggyFoodProvider().oauth))
+except Exception as e:
+    replayed = e
+check("a replayed callback is refused — state is single-use", replayed is not None)
+
+# The authorization request matches the LIVE metadata document, not our guesses.
+LIVE = {
+    "response_types_supported": ["code"],
+    "code_challenge_methods_supported": ["S256"],
+    "scopes_supported": ["mcp:tools", "mcp:resources", "mcp:prompts"],
+    "grant_types_supported": ["authorization_code", "refresh_token"],
+}
+sent = parse_qs(urlparse(started).query)
+check("response_type is one the server supports",
+      sent["response_type"][0] in LIVE["response_types_supported"])
+check("code_challenge_method is one the server supports",
+      sent["code_challenge_method"][0] in LIVE["code_challenge_methods_supported"])
+check("every scope requested is one the server supports",
+      all(s in LIVE["scopes_supported"] for s in sent["scope"][0].split()))
+check("the grant we exchange with is supported",
+      exchanged["grant_type"] in LIVE["grant_types_supported"])
+
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:
     os.unlink(_tmp.name)

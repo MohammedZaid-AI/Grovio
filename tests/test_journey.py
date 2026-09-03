@@ -155,7 +155,16 @@ check("starts un-onboarded", identity.load(DINER).onboarding_status == identity.
 check("a reply comes back", bool(reply))
 tool_msg = next(m["content"] for m in script.calls[1] if m.get("role") == "tool")
 check("unlinked user is asked to connect, not fobbed off", tool_msg.startswith("NEEDS_LINK"))
-check("a real link URL is offered", "https://p.example/authorize" in tool_msg)
+# The URL is DELIVERED, not dictated. Handing a 300-character link to the model
+# to retype is what shipped a truncated one to a real user; the model now gets
+# no URL at all, so it has nothing to truncate.
+check("the model is NOT given the link to retype",
+      "https://p.example/authorize" not in tool_msg and "http" not in tool_msg)
+_link_rows = db.get_connection().execute(
+    "SELECT body FROM whatsapp_outbound WHERE phone = ? AND body LIKE ?",
+    (DINER, "%p.example/authorize%")).fetchall()
+check("a real link URL reaches the user, verbatim, on the outbound path",
+      len(_link_rows) == 1 and _link_rows[0][0].startswith("https://p.example/authorize"))
 check("model told not to invent food meanwhile", "do not invent" in tool_msg.lower())
 check("their original request was stored for resumption",
       db.get_connection().execute(

@@ -12,6 +12,7 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
+from urllib.parse import parse_qs, urlparse
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -482,6 +483,88 @@ check("the vault references no platform in code",
       not (vault_names & {"swiggy", "swiggyinstamart", "instamart"}))
 
 print("\n" + "=" * 70)
+# ----------------------------------------------------------------------
+print("\n[11] REGRESSION: the link is DELIVERED, never dictated to the model")
+# Observed live 2026-09-03. The ~300-character authorization URL was handed to
+# the model to retype; a local model wrote
+#   ...authorize?response_type=code&redirect_uri=http%3A%2F
+# and stopped mid-parameter. Swiggy answered "client_id and redirect_uri are
+# required", which reads as an OAuth bug and is not one — oauth_states proved
+# begin() had produced a correct 306-character URL seconds earlier. The broken
+# link was then stored in history and reproduced on later turns with OAuth
+# never running at all.
+registry.clear()
+registry.register(groceries)
+
+LINKER = "919222200077"
+identity.load(LINKER)
+conn = db.get_connection()
+conn.execute("DELETE FROM whatsapp_outbound WHERE phone = ?", (LINKER,))
+conn.commit()
+conn.close()
+
+with patch.object(oauth, "discover", new=AsyncMock(return_value=METADATA)):
+    linked = run(skills.find_food(identity.load(LINKER), "milk", "grocery",
+                                  pending_message="I need milk"))
+
+check("the user still gets NEEDS_LINK", linked.status == skills.SkillStatus.NEEDS_LINK)
+
+queued = db.get_connection().execute(
+    "SELECT body FROM whatsapp_outbound WHERE phone = ? ORDER BY id", (LINKER,)
+).fetchall()
+bodies = [row[0] for row in queued]
+
+check("the link was queued on the outbound WhatsApp path", len(bodies) == 1, )
+check("it is the URL and nothing else — sent VERBATIM",
+      bodies and bodies[0] == linked.link_url)
+check("the complete URL survives, every parameter intact",
+      bodies and all(p in bodies[0] for p in
+                     ("redirect_uri=", "state=", "code_challenge=",
+                      "code_challenge_method=S256", "response_type=code")))
+check("nothing truncated it — the live failure was 80 chars",
+      bodies and len(bodies[0]) > 200)
+# The live failure delivered redirect_uri="http:/" — a fragment. Decode it and
+# require a whole callback URL.
+delivered = parse_qs(urlparse(bodies[0]).query)
+check("the redirect_uri is a COMPLETE url, not the 'http:/' fragment that shipped",
+      delivered["redirect_uri"][0].endswith("/callback")
+      and delivered["redirect_uri"][0].startswith("https://"))
+check("state and PKCE arrive whole",
+      len(delivered["state"][0]) > 20 and len(delivered["code_challenge"][0]) > 20)
+
+# THE POINT: what the model is handed carries no URL at all.
+check("the model's instruction contains NO url", "http" not in linked.message)
+check("nor the authorization host", "swiggy" not in linked.message.lower()
+      and "authorize" not in linked.message.lower())
+check("the model is told the link is already sent",
+      "ALREADY been sent" in linked.message)
+check("and told explicitly not to repeat it",
+      "Do NOT repeat the link" in linked.message)
+
+# A reply with no URL in it is a COMPLETE reply — the model has nothing to
+# truncate, so a short confirmation is all that is needed.
+check("a bare confirmation is a valid reply to this instruction",
+      "http" not in "Tap the link I just sent to connect Acme Groceries.")
+
+# The URL still reaches callers that legitimately need it.
+check("link_url still carries the real URL for callers and tests",
+      linked.link_url and linked.link_url.startswith("https://"))
+check("and it is the same one the user received", linked.link_url == bodies[0])
+
+# The follow-up answers no inbound message: it is queued the same way a payment
+# link is, so it inherits ordering, retries and restart recovery.
+answers = db.get_connection().execute(
+    "SELECT inbound_id FROM whatsapp_outbound WHERE phone = ?", (LINKER,)
+).fetchone()
+check("it rides the durable queue as a follow-up", answers[0] is None)
+
+# OAuth behaviour itself is untouched by this change.
+state_row = db.get_connection().execute(
+    "SELECT provider, pending_message FROM oauth_states ORDER BY rowid DESC LIMIT 1"
+).fetchone()
+check("begin() still ran and stored its state", state_row[0] == groceries.name)
+check("and still remembers what they asked for", state_row[1] == "I need milk")
+
 print(f"RESULT: {_passed} passed, {_failed} failed")
 try:
     os.unlink(_tmp.name)

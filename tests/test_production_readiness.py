@@ -1,12 +1,13 @@
 """
 End-to-end production readiness, starting at the HTTP webhook.
 
-Every other suite starts below the transport. This one starts where Meta does:
-a signed POST to /webhook, through routes, the durable queue, the worker, the
-concierge, the planner, skills, the registry, and back out as a Cloud API send.
+Every other suite starts below the transport. This one starts where the Baileys
+gateway does: an authenticated POST to /webhook/inbound, through routes, the
+durable queue, the worker, the concierge, the planner, skills, the registry, and
+back out as a POST to the gateway's /send.
 
 WHAT IS REAL HERE
-  * the FastAPI route and its signature check (real HMAC over the real body)
+  * the FastAPI route and its shared-secret check
   * the SQLite queue, dedup, per-phone ordering, the worker loop
   * concierge, planner tool dispatch, skills, the conversation state machine
   * the recommendation engine and both provider adapters
@@ -14,15 +15,13 @@ WHAT IS REAL HERE
 WHAT IS STUBBED, AND WHY
   * the LLM - scripted, so assertions are about the product, not model mood
   * the MCP session - no network, and NOTHING here places a real order
-  * the outbound HTTP call to Meta - asserted on, never actually made
+  * the gateway process - asserted on, never actually run
 
-So this proves OUR code works end to end. It does NOT prove Swiggy or Meta
-accept it; that needs live credentials and a public webhook, and is listed as
-unverified in the report.
+So this proves OUR code works end to end. It does NOT prove Swiggy accepts an
+order or that WhatsApp delivers a message; both need live credentials and are
+listed as unverified in the report.
 """
 import asyncio
-import hashlib
-import hmac
 import json
 import os
 import sys
@@ -34,19 +33,14 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from cryptography.fernet import Fernet
 
-APP_SECRET = "test-app-secret"
-VERIFY_TOKEN = "test-verify-token"
-SECRET_TOKEN = "EAAsecret-token-that-must-never-be-logged"
+GATEWAY_SECRET = "test-gateway-secret-never-logged"
 USER = "919911100077"
 STRANGER = "919911100078"
 
 os.environ["TOKEN_ENCRYPTION_KEY"] = Fernet.generate_key().decode()
 os.environ["MCP_USE_ANONYMIZED_TELEMETRY"] = "false"
-os.environ["WHATSAPP_PROVIDER"] = "cloud"
-os.environ["WHATSAPP_APP_SECRET"] = APP_SECRET
-os.environ["WHATSAPP_VERIFY_TOKEN"] = VERIFY_TOKEN
-os.environ["WHATSAPP_ACCESS_TOKEN"] = SECRET_TOKEN
-os.environ["WHATSAPP_PHONE_NUMBER_ID"] = "555000111"
+os.environ["WHATSAPP_GATEWAY_SECRET"] = GATEWAY_SECRET
+os.environ["WHATSAPP_GATEWAY_URL"] = "http://localhost:8100"
 os.environ["AUTHORIZED_PHONES"] = USER
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
 
@@ -92,49 +86,27 @@ def run(coro):
 
 
 # ----------------------------------------------------------------------
-# Real Meta payloads, signed the way Meta signs them
+# What the Baileys gateway actually posts
 # ----------------------------------------------------------------------
-def signature(raw):
-    return "sha256=" + hmac.new(APP_SECRET.encode(), raw, hashlib.sha256).hexdigest()
-
-
-def post(payload, sign=True, header=None):
-    raw = json.dumps(payload).encode()
+def post(payload, secret=GATEWAY_SECRET):
     headers = {"Content-Type": "application/json"}
-    if header is not None:
-        headers["X-Hub-Signature-256"] = header
-    elif sign:
-        headers["X-Hub-Signature-256"] = signature(raw)
-    return client.post("/webhook", content=raw, headers=headers)
+    if secret is not None:
+        headers["X-Gateway-Secret"] = secret
+    return client.post("/webhook/inbound",
+                       content=json.dumps(payload).encode(), headers=headers)
 
 
-def inbound(text, message_id, phone=USER):
+def inbound(text, message_id, phone=USER, kind="text"):
+    """Exactly the shape whatsapp-gateway/src/normalize.js emits."""
     return {
-        "object": "whatsapp_business_account",
-        "entry": [{"id": "WABA", "changes": [{"field": "messages", "value": {
-            "messaging_product": "whatsapp",
-            "metadata": {"display_phone_number": "15550001",
-                         "phone_number_id": "555000111"},
-            "contacts": [{"profile": {"name": "Maaiz"}, "wa_id": phone}],
-            "messages": [{"from": phone, "id": message_id, "timestamp": "1755000000",
-                          "type": "text", "text": {"body": text}}],
-        }}]}],
+        "message_id": message_id,
+        "phone": phone,
+        "text": text,
+        "timestamp": "1755000000",
+        "type": kind,
     }
 
 
-def receipt(message_id, status):
-    return {
-        "object": "whatsapp_business_account",
-        "entry": [{"id": "WABA", "changes": [{"field": "messages", "value": {
-            "messaging_product": "whatsapp",
-            "metadata": {"phone_number_id": "555000111"},
-            "statuses": [{"id": message_id, "status": status,
-                          "timestamp": "1755000001", "recipient_id": USER}],
-        }}]}],
-    }
-
-
-# ----------------------------------------------------------------------
 # Fake MCP clients - the payload shapes captured from the live servers
 # ----------------------------------------------------------------------
 class Result:
@@ -368,10 +340,10 @@ link_accounts(USER)
 link_accounts(STRANGER)
 
 
-def deliver(payload, sign=True, header=None):
-    """POST a webhook and let the worker finish, the way production does."""
+def deliver(payload, secret=GATEWAY_SECRET):
+    """POST an inbound message and let the worker finish, as production does."""
     with patch.object(worker, "send_text", sender):
-        response = post(payload, sign=sign, header=header)
+        response = post(payload, secret=secret)
         run(_drain(USER))
         run(_drain(STRANGER))
     return response
@@ -393,39 +365,34 @@ print("END-TO-END PRODUCTION READINESS")
 print("=" * 70)
 
 # ======================================================================
-print("\n[1] Webhook verification (the real GET handshake)")
-ok = client.get("/webhook", params={"hub.mode": "subscribe",
-                                    "hub.verify_token": VERIFY_TOKEN,
-                                    "hub.challenge": "1158201444"})
-check("valid handshake returns 200", ok.status_code == 200, f"got {ok.status_code}")
-check("the challenge is echoed EXACTLY, as plain text", ok.text == "1158201444",
-      f"got {ok.text!r}")
-check("content-type is text, not JSON — Meta compares the raw body",
-      ok.headers["content-type"].startswith("text/plain"))
-
-bad = client.get("/webhook", params={"hub.mode": "subscribe",
-                                     "hub.verify_token": "wrong",
-                                     "hub.challenge": "x"})
-check("a wrong verify token is rejected", bad.status_code == 403)
-check("a missing mode is rejected",
-      client.get("/webhook", params={"hub.verify_token": VERIFY_TOKEN}).status_code == 403)
-
-# ======================================================================
-print("\n[2] Signature verification (security, fails closed)")
-check("a forged signature is rejected",
-      post(inbound("hi", "wamid.F1"), header="sha256=" + "0" * 64).status_code == 403)
-check("a missing signature is rejected",
-      post(inbound("hi", "wamid.F2"), sign=False).status_code == 403)
-check("a malformed signature header is rejected",
-      post(inbound("hi", "wamid.F3"), header="garbage").status_code == 403)
+print("[1] Gateway authentication (security, fails closed)")
+check("a wrong secret is rejected",
+      post(inbound("hi", "WAMSG-F1"), secret="wrong-secret").status_code == 401)
+check("a missing secret is rejected",
+      post(inbound("hi", "WAMSG-F2"), secret=None).status_code == 401)
+check("an empty secret is rejected",
+      post(inbound("hi", "WAMSG-F3"), secret="").status_code == 401)
 check("none of them reached the queue", inbound_rows() == [])
 
-_secret = os.environ.pop("WHATSAPP_APP_SECRET")
-check("NO app secret denies everyone — fails closed",
-      post(inbound("hi", "wamid.F4")).status_code == 403)
-os.environ["WHATSAPP_APP_SECRET"] = _secret
+_saved = os.environ.pop("WHATSAPP_GATEWAY_SECRET")
+check("NO secret configured denies everyone - fails closed",
+      post(inbound("hi", "WAMSG-F4")).status_code == 401)
+os.environ["WHATSAPP_GATEWAY_SECRET"] = _saved
 
 # ======================================================================
+print("[2] Payload validation - never trust what arrived")
+check("a message with no phone is refused",
+      post({"message_id": "x", "text": "hi"}).status_code == 400)
+check("a message with no id is refused - it could not be deduplicated",
+      post({"phone": USER, "text": "hi"}).status_code == 400)
+check("a JSON array body is refused", post([1, 2, 3]).status_code == 400)
+raw = b"not json at all"
+check("a non-JSON body is refused",
+      client.post("/webhook/inbound", content=raw,
+                  headers={"X-Gateway-Secret": GATEWAY_SECRET}).status_code == 400)
+check("an empty text is ignored, not answered",
+      post(inbound("", "WAMSG-EMPTY")).json() == {"status": "ignored"})
+check("nothing above was queued", inbound_rows() == [])
 print("\n[3] 'Hey' — inbound to outbound, through the real stack")
 llm.queue("Hey, I'm Grovio. What are you in the mood for?")
 with patch("ai.planner.get_llm", return_value=llm):
@@ -455,44 +422,32 @@ check("but it is not queued twice", len(inbound_rows()) == before,
 check("and no second reply is sent", len(outbound_rows()) == 1)
 
 # ======================================================================
-print("\n[5] Delivery and read receipts")
-check("a delivered receipt is accepted", deliver(receipt("wamid.OUT1", "delivered")).status_code == 200)
-check("a read receipt is accepted", deliver(receipt("wamid.OUT1", "read")).status_code == 200)
+print("[5] Media and voice are classified honestly, never guessed at")
+before = len(inbound_rows())
+check("a photo is accepted",
+      post(inbound("", "WAMSG-PHOTO", kind="image")).status_code == 200)
+check("a voice note is accepted",
+      post(inbound("", "WAMSG-VOICE", kind="audio")).status_code == 200)
+check("both are queued as attachments, not as text",
+      len(inbound_rows()) == before + 2)
 conn = db.get_connection()
-status = conn.execute("SELECT status FROM whatsapp_outbound WHERE provider_sid = ?",
-                      ("wamid.OUT1",)).fetchone()
+flagged = conn.execute(
+    "SELECT num_media FROM whatsapp_inbound WHERE message_sid IN (?, ?)",
+    ("WAMSG-PHOTO", "WAMSG-VOICE")).fetchall()
 conn.close()
-check("the receipt moves the message forward to READ",
-      status and status[0] == "READ", str(status))
-check("receipts are NOT treated as user messages", len(inbound_rows()) == before)
-# A late `delivered` after a `read` must not walk the status backwards.
-deliver(receipt("wamid.OUT1", "delivered"))
-conn = db.get_connection()
-late = conn.execute("SELECT status FROM whatsapp_outbound WHERE provider_sid = ?",
-                    ("wamid.OUT1",)).fetchone()
-conn.close()
-check("a late receipt cannot un-read a message", late[0] == "READ", str(late))
-check("a receipt for an unknown message id is harmless",
-      deliver(receipt("wamid.NEVER-SENT", "read")).status_code == 200)
+check("so the worker says honestly that it cannot read them",
+      [row[0] for row in flagged] == [1, 1])
 
 # ======================================================================
-print("\n[6] Unknown events are ignored safely")
-check("an unknown field returns 200, not a 500",
-      deliver({"object": "whatsapp_business_account",
-               "entry": [{"changes": [{"field": "flows", "value": {"x": 1}}]}]}).status_code == 200)
-check("another Meta product is ignored",
-      deliver({"object": "instagram", "entry": []}).json() == {"status": "ignored"})
-check("an empty entry list is fine",
-      deliver({"object": "whatsapp_business_account", "entry": []}).status_code == 200)
-check("a JSON array body is ignored, not crashed on",
-      deliver([1, 2, 3]).status_code == 200)
-raw = b"not json at all"
-check("a non-JSON body is rejected as malformed",
-      client.post("/webhook", content=raw,
-                  headers={"X-Hub-Signature-256": signature(raw)}).status_code == 400)
-check("nothing above was queued", len(inbound_rows()) == before)
-
-# ======================================================================
+print("[6] No Meta surface remains")
+check("the Meta webhook GET route is gone",
+      client.get("/webhook", params={"hub.mode": "subscribe"}).status_code == 404)
+check("the Meta webhook POST route is gone",
+      client.post("/webhook", json={}).status_code == 404)
+check("the transport is the Baileys gateway", whatsapp.PROVIDER == "baileys")
+check("no Meta signature check is exposed",
+      not hasattr(whatsapp, "verify_signature"))
+check("no Meta webhook parser is exposed", not hasattr(whatsapp, "parse_inbound"))
 print("\n[7] INSTAMART: 'I need milk' -> numbered list -> '1' -> ordered")
 clear_queues()
 conversation.reset(USER)
@@ -721,19 +676,15 @@ print("\n[14] WHATSAPP SPECIFICS")
 clear_queues()
 conversation.reset(USER)
 
-# Our own outgoing messages must never re-enter the inbound pipeline.
-echo = {
-    "object": "whatsapp_business_account",
-    "entry": [{"changes": [{"field": "messages", "value": {
-        "metadata": {"phone_number_id": "555000111"},
-        "statuses": [{"id": "wamid.OUT1", "status": "sent",
-                      "recipient_id": USER}],
-    }}]}],
-}
+# The loop guard lives in the GATEWAY (normalize.js drops key.fromMe), so our
+# own replies never reach this route at all. What the backend guarantees is the
+# other half: it never posts to itself, and an echo that somehow arrived twice
+# is collapsed by its WhatsApp message id before it can compound.
 before = len(inbound_rows())
-deliver(echo)
-check("a 'sent' status for OUR message never becomes an inbound message",
-      len(inbound_rows()) == before)
+post(inbound("1. Nandini Toned Milk", "WAMSG-ECHO"))
+post(inbound("1. Nandini Toned Milk", "WAMSG-ECHO"))
+check("a repeated message id is stored once, so no loop can compound",
+      len(inbound_rows()) == before + 1, str(len(inbound_rows())))
 
 # Phone identity: every format must be the same human.
 check("a bare MSISDN is canonical", whatsapp.canonical_phone(USER) == USER)
@@ -845,9 +796,7 @@ with patch("ai.planner.get_llm", return_value=llm):
 app_logger.removeHandler(handler)
 logged = buffer.getvalue()
 
-check("the WhatsApp access token is never logged", SECRET_TOKEN not in logged)
-check("the app secret is never logged", APP_SECRET not in logged)
-check("the verify token is never logged", VERIFY_TOKEN not in logged)
+check("the gateway shared secret is never logged", GATEWAY_SECRET not in logged)
 check("the provider access token is never logged",
       "provider-secret-token" not in logged)
 check("the refresh token is never logged", "provider-refresh-token" not in logged)
@@ -855,8 +804,7 @@ check("the refresh token is never logged", "provider-refresh-token" not in logge
 prompts = json.dumps(llm.seen)
 check("no provider token is exposed to the LLM",
       "provider-secret-token" not in prompts)
-check("no WhatsApp credential is exposed to the LLM", SECRET_TOKEN not in prompts)
-check("no app secret is exposed to the LLM", APP_SECRET not in prompts)
+check("no gateway secret is exposed to the LLM", GATEWAY_SECRET not in prompts)
 check("no encryption key is exposed to the LLM",
       os.environ["TOKEN_ENCRYPTION_KEY"] not in prompts)
 

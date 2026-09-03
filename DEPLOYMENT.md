@@ -14,7 +14,7 @@ and one SQLite file. No message broker, no cache, no separate worker service.
 |---|---|
 | Python 3.11+ | 3.13 tested |
 | A public HTTPS URL | Meta and OAuth providers both reject plain http |
-| Meta WhatsApp Business account | For the Cloud API sender |
+| A spare WhatsApp number | For the gateway to link as a device |
 | An LLM API key | Groq or any OpenAI-compatible endpoint |
 | Swiggy Builders Club access | Only for provider linking — the service runs without it |
 
@@ -51,10 +51,8 @@ TOKEN_ENCRYPTION_KEY=<the key you just generated>
 PUBLIC_BASE_URL=https://your-domain.com
 
 WHATSAPP_TRANSPORT=cloud
-WHATSAPP_ACCESS_TOKEN=...
-WHATSAPP_PHONE_NUMBER_ID=...
-WHATSAPP_APP_SECRET=...
-WHATSAPP_VERIFY_TOKEN=<any string you choose>
+WHATSAPP_GATEWAY_SECRET=<the same value as in whatsapp-gateway/.env>
+WHATSAPP_GATEWAY_URL=http://localhost:8100
 ```
 
 > **`TOKEN_ENCRYPTION_KEY` is not recoverable.** Lose it and every linked account
@@ -82,102 +80,62 @@ warns explicitly about a missing encryption key or a non-https public URL.
 
 ## 5. Connect WhatsApp
 
-Four values come out of the Meta dashboard, and they land in four env vars.
+The transport is the **Baileys gateway** — a separate Node process in
+`whatsapp-gateway/`. There is no platform app to create, no business
+verification and no public webhook to expose.
 
-### 5.1 Create the app
+> ⚠️ Baileys is an **unofficial WhatsApp Web protocol client**, not the Meta
+> WhatsApp Business Cloud API, and it is used deliberately for this prototype.
+> WhatsApp can ban the number. Use a spare number, never one tied to a business
+> account. A linked device also receives *every* message that number gets, so
+> anyone who texts it will be answered — `AUTHORIZED_PHONES` still gates
+> spending.
 
-[developers.facebook.com/apps](https://developers.facebook.com/apps) → **Create
-App** → use case **"Connect with customers through WhatsApp"** (or type
-**Business**) → add the **WhatsApp** product.
+### 5.1 Generate the shared secret
 
-### 5.2 Collect three of the four values
-
-**WhatsApp → API Setup** gives you:
-
-| Screen | Goes to |
-|---|---|
-| **Phone number ID** (under "From") | `WHATSAPP_PHONE_NUMBER_ID` |
-| **Temporary access token** | `WHATSAPP_ACCESS_TOKEN` — expires in **24 hours** |
-
-⚠️ The number under "From" is not the same as its **ID**. Copy the ID.
-
-**App Settings → Basic → App Secret → Show**:
-
-| Screen | Goes to |
-|---|---|
-| **App Secret** | `WHATSAPP_APP_SECRET` |
-
-The fourth is yours to invent — any random string, the same one on both sides:
-
-```
-WHATSAPP_VERIFY_TOKEN=any-random-string-you-choose
-```
-
-### 5.3 Add yourself as a test recipient
-
-Still in **API Setup**, under "To": **Manage phone number list** → add your
-number → confirm the code WhatsApp sends you.
-
-The free test number will only message numbers on this list — **5 maximum**.
-Until you register a real business number, nobody else can use the product.
-
-Also make sure your number is in `AUTHORIZED_PHONES` (digits are compared, so
-`+91 97…` and `9197…` both work).
-
-### 5.4 Point the webhook at your server
-
-**Start the server first.** Meta calls `GET /webhook` the moment you click save,
-and it fails if nothing answers — the single most common setup failure.
-
-**WhatsApp → Configuration → Webhook → Edit**:
-
-| Field | Value |
-|---|---|
-| Callback URL | `https://your-host/webhook` |
-| Verify token | exactly your `WHATSAPP_VERIFY_TOKEN` |
-
-Click **Verify and Save**, then **Manage** → subscribe to **`messages`**.
-
-Subscribe to `messages` only. That single field carries inbound messages,
-delivery receipts and read receipts — the others are for template and account
-events we don't consume.
-
-A tunnel is fine here. Unlike a provider's OAuth allowlist, Meta accepts any
-reachable HTTPS URL — but a free ngrok host changes on every restart, and the
-webhook then points at nothing until you paste the new one.
-
-### 5.5 Swap in a permanent token
-
-The temporary token dies in 24 hours. For anything beyond a first test:
-
-**Business Settings → Users → System Users** → **Add** (role: Admin) →
-**Add Assets** → your app *and* your WhatsApp account, with full control →
-**Generate new token** → select your app → tick:
-
-- `whatsapp_business_messaging`
-- `whatsapp_business_management`
-
-Set expiry to **Never**. Copy it into `WHATSAPP_ACCESS_TOKEN` — it is shown
-once.
-
-### 5.6 Verify
+One secret, in **both** `.env` files. It is what makes the gateway trusted:
+there is no signature to fall back on, and it fails closed on both sides.
 
 ```bash
-curl -s localhost:8000/health | python -m json.tool
+python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-Expect `"messaging_configured": true`. Then message the number: the log shows
-`[webhook] received 1 message(s)`, then `delivered`, then `read`.
+Put it in `WHATSAPP_GATEWAY_SECRET` in the repo root `.env` **and** in
+`whatsapp-gateway/.env`. The two must match exactly.
 
-If `GET /webhook` returns 403, the verify token doesn't match. If POSTs return
-403, `WHATSAPP_APP_SECRET` is wrong or unset — both fail closed by design.
+### 5.2 Start the gateway
 
-### The 24-hour window
+```bash
+cd whatsapp-gateway
+npm install
+npm start
+```
 
-You may only reply freely within 24 hours of the user's last message. After
-that Meta returns **131047** and the send fails permanently — it is not
-retried. Reopening the conversation needs an approved message template
-(`whatsapp.send_template` is implemented; no template is registered yet).
+### 5.3 Scan the QR, once
+
+A QR code prints in the terminal. On the phone:
+
+**WhatsApp → Settings → Linked devices → Link a device**
+
+Credentials are written to `whatsapp-gateway/auth/` (gitignored) and survive
+restarts, so this is a one-time step. To force fresh pairing, delete that
+directory.
+
+Never commit `auth/`. Anyone holding those files owns the linked device.
+
+### 5.4 Verify
+
+```bash
+curl http://localhost:8100/health
+# {"status":"connected","stopped":false}
+```
+
+Then start the backend and message the linked number. The backend log shows
+`[webhook] inbound … from …`, then `[whatsapp] sent text to …`.
+
+If `/health` reports `disconnected`, the QR was not scanned or the session
+dropped. If it reports `stopped: true`, the phone unlinked this device — delete
+`auth/` and pair again; reconnecting cannot revive dead credentials.
 
 ## 6. Connect providers (optional)
 
@@ -323,7 +281,7 @@ orders together reconstruct any session.
 |---|---|---|
 | `/health` → 503, `encryption: unconfigured` | No `TOKEN_ENCRYPTION_KEY` | Set it and restart |
 | Webhook verification fails | Verify token mismatch, or URL not https | Check both in the Meta dashboard |
-| Every webhook returns 403 | `WHATSAPP_APP_SECRET` wrong or unset (fails closed) | Re-copy from the Meta app |
+| Every inbound message returns 401 | `WHATSAPP_GATEWAY_SECRET` differs between the two `.env` files, or is unset (fails closed) | Make them identical, restart both |
 | Users get "I can't search restaurants yet" | Working as designed — no restaurant provider | Awaiting Builders Club access |
 | Account linking fails at the provider | Callback URL not whitelisted | Ask the provider to whitelist it |
 | Replies stop for one user only | That phone's worker hit an error | Check logs; it self-heals on the next message |

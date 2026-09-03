@@ -15,6 +15,9 @@ __pycache__/
 .data/
 
 # Baileys gateway: WhatsApp session credentials and node deps.
-belaku-whatsapp-gateway/auth/
-belaku-whatsapp-gateway/.env
-belaku-whatsapp-gateway/node_modules/
+
+# Baileys WhatsApp gateway: session credentials, secrets and node deps.
+# Anyone holding the auth directory owns the linked device.
+whatsapp-gateway/auth/
+whatsapp-gateway/.env
+whatsapp-gateway/node_modules/

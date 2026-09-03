@@ -1,0 +1,4 @@
+# WhatsApp session credentials. Anyone holding these owns the linked device.
+auth/
+.env
+node_modules/

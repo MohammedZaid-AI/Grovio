@@ -31,29 +31,21 @@ def _startup_warnings():
             "print(Fernet.generate_key().decode())\""
         )
 
-    if whatsapp.PROVIDER == "local":
-        # Deliberate for development, and needs saying every single boot: this
-        # transport is unofficial and there is no webhook signature to verify.
+    # Deliberate for this prototype, and worth saying every single boot: the
+    # transport is an unofficial WhatsApp Web client, so the number can be
+    # banned and inbound messages carry no cryptographic signature. The shared
+    # secret is the ONLY thing making the gateway trusted.
+    logger.warning(
+        "WhatsApp transport is the Baileys gateway — an UNOFFICIAL WhatsApp Web "
+        "protocol client, not the Meta Business Cloud API. Use a spare number, "
+        "never one tied to a business account."
+    )
+    if not os.getenv("WHATSAPP_GATEWAY_SECRET"):
         logger.warning(
-            "WHATSAPP_PROVIDER=local — using an unofficial WhatsApp Web session. "
-            "DEVELOPMENT ONLY: the number can be banned, and inbound messages are "
-            "NOT cryptographically verified. Set WHATSAPP_PROVIDER=cloud for "
-            "production."
+            "WHATSAPP_GATEWAY_SECRET is not set. This FAILS CLOSED both ways: "
+            "every inbound message from the gateway is rejected AND every "
+            "outgoing send fails, so the product is silent until it is set."
         )
-    else:
-        missing = [
-            name for name in ("WHATSAPP_ACCESS_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
-                              "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN")
-            if not os.getenv(name)
-        ]
-        if missing:
-            # The last two fail CLOSED, so this is not cosmetic: without them
-            # every inbound webhook is rejected and the product is silent.
-            logger.warning(
-                f"WhatsApp Cloud API is incompletely configured — missing "
-                f"{', '.join(missing)}. Webhook verification and signature checks "
-                f"fail closed, so inbound messages will be REJECTED until these are set."
-            )
 
     base_url = os.getenv("PUBLIC_BASE_URL", "")
     if not base_url:
@@ -139,7 +131,7 @@ def health():
     checks["providers"] = len(ai.providers.registry.available_kinds())
     checks["messaging"] = whatsapp.PROVIDER
     checks["messaging_configured"] = whatsapp.is_configured()
-    checks["messaging_api_version"] = whatsapp.api_version()
+    checks["messaging_gateway"] = whatsapp.gateway_url()
 
     ready = (checks["database"] == "ok" and checks["encryption"] == "ok"
              and checks["messaging_configured"])
