@@ -194,12 +194,22 @@ def init_db():
             phone TEXT NOT NULL,
             role TEXT NOT NULL,               -- 'user' | 'assistant'
             content TEXT,
+            source TEXT DEFAULT 'text',       -- 'text' | 'voice'
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         cursor.execute(
             "CREATE INDEX IF NOT EXISTS idx_history_phone ON conversation_history(phone, id)"
         )
+
+        # How the turn ARRIVED. Someone who speaks should be answered aloud on
+        # the next turn too, and that is only knowable if it was recorded.
+        # Additive migration for databases created before voice existed.
+        cursor.execute("PRAGMA table_info(conversation_history)")
+        if "source" not in {row[1] for row in cursor.fetchall()}:
+            cursor.execute(
+                "ALTER TABLE conversation_history ADD COLUMN source TEXT DEFAULT 'text'"
+            )
 
         # Food memory: what they ate, what they loved, what they turned down.
         cursor.execute('''
@@ -269,6 +279,16 @@ def init_db():
         cursor.execute("PRAGMA table_info(oauth_states)")
         if "client_id" not in {row[1] for row in cursor.fetchall()}:
             cursor.execute("ALTER TABLE oauth_states ADD COLUMN client_id TEXT")
+
+        # Which phones are mid-VOICE-turn, and in what language. Written by the
+        # webhook, claimed by the concierge, then gone.
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS voice_turns (
+            phone TEXT PRIMARY KEY,
+            language TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
 
         # ------------------------------------------------------------------
         # Ordering (Phase 5)
@@ -587,51 +607,6 @@ def mark_outbound_failed(outbound_id, error_code=None):
         conn.close()
 
 
-# Meta's receipt vocabulary -> the row status. `sent` is not written back: the
-# worker already set SENT when the API accepted it, and a later receipt must
-# never move a DELIVERED row backwards.
-_RECEIPT_STATUS = {"delivered": "DELIVERED", "read": "READ", "failed": "FAILED"}
-
-
-def record_delivery_status(provider_sid, status, error_code=None):
-    """Apply a delivery or read receipt to the message it belongs to.
-
-    Matched on the provider's message id. Receipts can arrive out of order and
-    a message can be re-reported, so this only ever moves a row FORWARD along
-    SENT -> DELIVERED -> READ; a late `delivered` cannot un-read a message.
-    """
-    mapped = _RECEIPT_STATUS.get((status or "").lower())
-    if not (provider_sid and mapped):
-        return False
-
-    rank = {"PENDING": 0, "SENT": 1, "DELIVERED": 2, "READ": 3}
-    conn = get_connection()
-    try:
-        cursor = conn.cursor()
-        if mapped == "FAILED":
-            cursor.execute(
-                "UPDATE whatsapp_outbound SET status = 'FAILED', error_code = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE provider_sid = ?",
-                (error_code, provider_sid),
-            )
-        else:
-            row = cursor.execute(
-                "SELECT status FROM whatsapp_outbound WHERE provider_sid = ?",
-                (provider_sid,),
-            ).fetchone()
-            if not row or rank.get(row[0], 0) >= rank[mapped]:
-                return False
-            cursor.execute(
-                "UPDATE whatsapp_outbound SET status = ?, "
-                "updated_at = CURRENT_TIMESTAMP WHERE provider_sid = ?",
-                (mapped, provider_sid),
-            )
-        conn.commit()
-        return cursor.rowcount > 0
-    finally:
-        conn.close()
-
-
 def has_pending_work(phone):
     """True if this phone has any inbound left to process or outbound left to
     send. Used by the worker to decide (under lock) whether it may exit."""
@@ -732,12 +707,15 @@ def set_user_fact(phone, key, value):
         conn.close()
 
 
-def add_history(phone, role, content):
+def add_history(phone, role, content, source="text"):
+    """One turn. `source` records how it arrived — 'text' or 'voice' — so a
+    later turn can tell whether this person is speaking or typing."""
     conn = get_connection()
     try:
         conn.execute(
-            "INSERT INTO conversation_history (phone, role, content) VALUES (?, ?, ?)",
-            (phone, role, content),
+            "INSERT INTO conversation_history (phone, role, content, source) "
+            "VALUES (?, ?, ?, ?)",
+            (phone, role, content, source),
         )
         conn.commit()
     finally:
@@ -754,6 +732,57 @@ def get_history(phone, limit=20):
             (phone, limit),
         ).fetchall()
         return [{"role": role, "content": content} for role, content in reversed(rows)]
+    finally:
+        conn.close()
+
+
+def note_voice_turn(phone, language):
+    """Record that this person's CURRENT turn arrived as speech.
+
+    A tiny side table rather than a new argument on `enqueue_and_wake`: that
+    contract is depended on by the webhook, the worker and restart recovery,
+    and voice is a boundary concern that has no business widening it. Keyed by
+    phone because the worker coalesces a burst per phone and the reply goes to
+    a person, not to a message.
+    """
+    conn = get_connection()
+    try:
+        conn.execute(
+            "INSERT INTO voice_turns (phone, language, updated_at) "
+            "VALUES (?, ?, CURRENT_TIMESTAMP) "
+            "ON CONFLICT(phone) DO UPDATE SET language = excluded.language, "
+            "updated_at = CURRENT_TIMESTAMP",
+            (phone, language),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def peek_voice_turn(phone):
+    """The language of the turn in progress, or None if it was typed.
+
+    Read WITHOUT clearing: both the planner and the concierge need to know
+    within the same turn — the planner to demand a spoken confirmation before
+    spending, the concierge to answer aloud. `clear_voice_turn` ends it.
+    """
+    conn = get_connection()
+    try:
+        row = conn.execute(
+            "SELECT language FROM voice_turns WHERE phone = ?", (phone,)
+        ).fetchone()
+        return (row[0] or "en-IN") if row else None
+    finally:
+        conn.close()
+
+
+def clear_voice_turn(phone):
+    """End the spoken turn. The next message decides for itself: someone who
+    speaks once and types next gets a written answer."""
+    conn = get_connection()
+    try:
+        conn.execute("DELETE FROM voice_turns WHERE phone = ?", (phone,))
+        conn.commit()
     finally:
         conn.close()
 
