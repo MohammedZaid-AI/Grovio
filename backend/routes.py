@@ -74,10 +74,38 @@ def split_message(text: str, max_length: int = 1500) -> list:
     return parts
 
 
-async def _queue(message_id, phone, body, unsupported=False):
+# Said to the user when speech cannot be handled. Plain, never technical.
+VOICE_UNAVAILABLE = (
+    "I can't listen to voice notes right now — could you type it instead? "
+    "Just a few words is plenty 🙂"
+)
+VOICE_UNREADABLE = (
+    "Sorry, I couldn't quite catch that one. Mind sending it again, or typing it?"
+)
+
+
+async def _queue(message_id, phone, body, unsupported=False, voice=False,
+                 language=None, note=None):
     """Persist one inbound message and wake its worker. Never raises — a 500
     makes the platform retry, and the loss is logged rather than silent."""
+    import db
     from backend.whatsapp_worker import enqueue_and_wake
+
+    if note:
+        # Speech could not be handled. Answer in text through the same outbound
+        # queue as any reply, and do not trouble the concierge with it.
+        from backend.whatsapp_worker import deliver
+
+        try:
+            await deliver(phone, note)
+        except Exception:
+            logger.error("[webhook] could not queue a voice fallback", exc_info=True)
+        return
+
+    if voice:
+        # Recorded BEFORE the worker is woken, or the turn could be answered
+        # before we know it should be spoken.
+        db.note_voice_turn(phone, language)
 
     try:
         _, is_new = await enqueue_and_wake(
@@ -150,6 +178,20 @@ async def inbound(request: Request):
 
     kind = str(payload.get("type") or "text")
     body = str(payload.get("text") or "")
+
+    # A VOICE NOTE becomes text right here, at the boundary. Everything below —
+    # queue, worker, concierge, planner, skills, providers — receives exactly
+    # what a typed message produces and never learns speech was involved.
+    spoken_language = None
+    if kind == "audio":
+        body, spoken_language, failure = await _transcribe(payload)
+        if failure:
+            # Never silence. A voice note that produced nothing gets a plain
+            # text answer saying so, which is queued like any other reply.
+            await _queue(message_id, phone, "", unsupported=True, note=failure)
+            return {"status": "received"}
+        kind = "voice"
+
     if not body and kind == "text":
         # The gateway already drops protocol plumbing; an empty text that gets
         # this far is nothing to answer.
@@ -161,6 +203,46 @@ async def inbound(request: Request):
         logger.info(f"[webhook] inbound {message_id} from {phone} ({kind})")
 
     # UNCHANGED contract: message_sid is WhatsApp's own id, which is what the
-    # queue deduplicates on.
-    await _queue(message_id, phone, body, unsupported=(kind != "text"))
+    # queue deduplicates on. A transcribed voice note is ordinary text by now;
+    # `voice` records only HOW it arrived, so the reply can go back the same way.
+    await _queue(message_id, phone, body,
+                 unsupported=(kind not in ("text", "voice")),
+                 voice=(kind == "voice"), language=spoken_language)
     return {"status": "received"}
+
+
+async def _transcribe(payload: dict):
+    """Voice note -> (text, language, failure_message).
+
+    FAILS SOFT, never closed: with no SARVAM_API_KEY, or if speech recognition
+    is down, the caller sends a plain text explanation instead. A voice note
+    that produces nothing at all reads as a broken bot.
+    """
+    import base64
+
+    from ai import voice
+
+    encoded = payload.get("audio")
+    if not encoded:
+        # The gateway could not decrypt the media. It said so in its own log.
+        return "", None, VOICE_UNREADABLE
+
+    if not voice.is_configured():
+        logger.warning("[webhook] a voice note arrived but SARVAM_API_KEY is not set")
+        return "", None, VOICE_UNAVAILABLE
+
+    try:
+        audio = base64.b64decode(encoded)
+    except Exception:
+        logger.error("[webhook] voice note audio was not valid base64")
+        return "", None, VOICE_UNREADABLE
+
+    try:
+        text, language, confidence = await voice.transcribe(
+            audio, str(payload.get("mimetype") or "audio/ogg")
+        )
+    except voice.VoiceUnavailable as e:
+        logger.warning(f"[webhook] could not transcribe a voice note: {e}")
+        return "", None, VOICE_UNREADABLE
+
+    return text, language, None

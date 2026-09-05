@@ -455,6 +455,74 @@ def _entry_from(pending) -> dict:
     }
 
 
+async def confirm_spoken_selection(user, selection: int) -> str:
+    """Read a SPOKEN choice back before any money moves.
+
+    Returns an instruction for the model, not a SkillResult: nothing has been
+    attempted, so there is no provider outcome to report.
+
+    WHY VOICE ONLY: a typed "2" is exactly what the person meant. A transcribed
+    "2" is a guess made by a speech model about code-switched Kannada and
+    English, where "one" and "nine" differ by a syllable — and the first anyone
+    would know of a mis-hearing is the wrong food arriving. Typed selections
+    still order immediately; this costs a spoken user one extra word.
+
+    NOTHING IS SPENT HERE. No cart is built, no provider is called: the state
+    machine parks the choice and waits.
+    """
+    state = conversation.load(user.phone)
+    entry = state.offer_at(selection)
+    if entry is None:
+        return (f"ERROR: there is no option {selection}. Only 1–{len(state.offers)} "
+                f"were offered. Ask which one they meant.")
+
+    pending = conversation.PendingOrder(
+        provider=entry["provider"],
+        offer_id=entry["id"],
+        title=entry["title"],
+        kind=entry.get("kind") or ProviderKind.RESTAURANT.value,
+        venue=entry.get("venue"),
+        price=entry.get("price"),
+        currency=entry.get("currency") or "INR",
+        eta_minutes=entry.get("eta_minutes"),
+        selection=int(selection),
+    )
+    conversation.await_spoken_confirmation(user.phone, pending)
+    logger.info(f"[skills] spoken selection {selection} -> {entry['title']!r}; "
+                f"reading it back before spending")
+
+    price = (f"{pending.currency} {pending.price:g}"
+             if pending.price is not None else "the listed price")
+    return (
+        f"HEARD ALOUD, NOT YET ORDERED: they said option {selection}, which is "
+        f"{entry['title']}"
+        + (f" from {entry['venue']}" if entry.get("venue") else "")
+        + f" at {price}.\n"
+        f"Read that back in ONE short line — the item, where it is from, and the "
+        f"price — and ask them to say yes to confirm. Speech recognition is not "
+        f"perfect, so this check is the point: do NOT skip it, do NOT claim "
+        f"anything is ordered, and do NOT call a tool. Their answer is handled "
+        f"for you."
+    )
+
+
+async def cancel_spoken_selection(user) -> SkillResult:
+    """They said no to what was read back. Nothing was charged, because nothing
+    was ever attempted."""
+    state = conversation.load(user.phone)
+    title = state.pending.title if state.pending else "that"
+    conversation.cancel_pending(user.phone)
+    remaining = len(state.offers)
+    extra = (f" The {remaining} options are still on the table if they want a "
+             f"different one.") if remaining else ""
+    return SkillResult(
+        SkillStatus.OK,
+        f"NOT ORDERED — they said no to '{title}'. Nothing was charged and "
+        f"nothing was attempted. Confirm briefly and ask what they'd like "
+        f"instead.{extra}",
+    )
+
+
 async def retry_pending_order(user) -> SkillResult:
     """Retry the order already chosen — never a fresh search.
 
@@ -655,7 +723,7 @@ async def _execute_pending(user, entry: dict, quantity: int = None,
         # yet — saying otherwise would promise food nobody has paid for.
         return await _await_payment(user, offer, placed, provider, ctx)
 
-    order_id = bookkeeping("save_order", lambda: db.save_order(
+    bookkeeping("save_order", lambda: db.save_order(
         phone=user.phone,
         provider=placed.provider,
         provider_order_id=placed.order_id,

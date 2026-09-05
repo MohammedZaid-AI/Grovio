@@ -44,6 +44,7 @@ class State:
     RECOMMENDING = "RECOMMENDING"
     AWAITING_SELECTION = "AWAITING_SELECTION"
     ORDERING = "ORDERING"
+    AWAITING_SPOKEN_CONFIRMATION = "AWAITING_SPOKEN_CONFIRMATION"
     AWAITING_COUPON = "AWAITING_COUPON"
     AWAITING_PAYMENT = "AWAITING_PAYMENT"
     AWAITING_RETRY_CONFIRMATION = "AWAITING_RETRY_CONFIRMATION"
@@ -55,7 +56,13 @@ class State:
 ALLOWED = {
     State.IDLE:                        {State.RECOMMENDING, State.AWAITING_SELECTION, State.IDLE},
     State.RECOMMENDING:                {State.AWAITING_SELECTION, State.IDLE},
-    State.AWAITING_SELECTION:          {State.ORDERING, State.AWAITING_SELECTION, State.IDLE},
+    State.AWAITING_SELECTION:          {State.ORDERING, State.AWAITING_SELECTION,
+                                        State.AWAITING_SPOKEN_CONFIRMATION, State.IDLE},
+    # A selection made ALOUD, read back before any money moves. Transcription of
+    # code-switched Kannada and English is not reliable enough to spend on
+    # unheard: "one" and "nine" are one syllable apart. Nothing is charged here.
+    State.AWAITING_SPOKEN_CONFIRMATION: {State.ORDERING, State.AWAITING_SELECTION,
+                                        State.RECOMMENDING, State.IDLE},
     # AWAITING_SELECTION and RECOMMENDING are reachable from ORDERING so a turn
     # that died mid-order can be recovered. Without them a crash between
     # begin_order and its outcome strands the conversation forever: every later
@@ -85,9 +92,11 @@ ALLOWED = {
     # success ("actually add the second one too").
     State.ORDER_COMPLETE:              {State.IDLE, State.AWAITING_SELECTION,
                                         State.RECOMMENDING, State.ORDERING,
+                                        State.AWAITING_SPOKEN_CONFIRMATION,
                                         State.ORDER_COMPLETE},
     State.ORDER_FAILED:                {State.IDLE, State.AWAITING_SELECTION,
                                         State.RECOMMENDING, State.ORDERING,
+                                        State.AWAITING_SPOKEN_CONFIRMATION,
                                         State.ORDER_FAILED},
 }
 
@@ -146,6 +155,11 @@ class Conversation:
     @property
     def has_offers(self) -> bool:
         return bool(self.offers) and not self.stale
+
+    @property
+    def awaiting_spoken_confirmation(self) -> bool:
+        return (self.state == State.AWAITING_SPOKEN_CONFIRMATION
+                and self.pending is not None)
 
     @property
     def awaiting_coupon(self) -> bool:
@@ -285,6 +299,22 @@ def choose_coupon(phone: str, code: str) -> Conversation:
         raise IllegalTransition("coupon chosen with no pending order")
     conversation.pending.coupon = code
     return _save(conversation, State.ORDERING)
+
+
+def await_spoken_confirmation(phone: str, pending: PendingOrder) -> Conversation:
+    """They chose out loud. Read it back before spending anything.
+
+    The chosen offer is parked exactly as a pending order so nothing else needs
+    to learn a new shape — but the state is NOT ORDERING, so no cart is built
+    and no money moves until they say yes.
+    """
+    conversation = load(phone)
+    pending.created_at = pending.created_at or datetime.now(timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S")
+    conversation.pending = pending
+    if conversation.stale:
+        conversation.state = State.IDLE
+    return _save(conversation, State.AWAITING_SPOKEN_CONFIRMATION)
 
 
 def awaiting_payment(phone: str) -> Conversation:

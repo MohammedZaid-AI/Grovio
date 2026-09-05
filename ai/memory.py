@@ -101,6 +101,10 @@ def remember_food(phone: str, item: str, sentiment: str, venue: str | None = Non
     return f"Recorded {item} as {sentiment}"
 
 
-def record_turn(phone: str, user_message: str, assistant_reply: str) -> None:
-    db.add_history(phone, "user", user_message)
+def record_turn(phone: str, user_message: str, assistant_reply: str,
+                source: str = "text") -> None:
+    """Store one turn. `source` is how the USER's half arrived — 'text' or
+    'voice' — so a later turn can tell whether this person speaks or types.
+    The transcript itself is stored exactly as typed text would be."""
+    db.add_history(phone, "user", user_message, source=source)
     db.add_history(phone, "assistant", assistant_reply)

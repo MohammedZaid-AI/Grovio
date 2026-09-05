@@ -23,6 +23,8 @@ from datetime import datetime
 from core.llm import get_llm
 from core.logger import logger
 
+import db
+
 from ai import conversation, identity, memory, skills
 
 # A turn may chain a few tool calls (recall -> search -> answer). Bounded so a
@@ -490,6 +492,13 @@ def _state_context(user) -> str:
     this the model has only prose to go on."""
     state = conversation.load(user.phone)
 
+    if state.awaiting_spoken_confirmation:
+        return (
+            f"IN FLIGHT: they chose {state.pending.describe()} OUT LOUD, and you "
+            f"have read it back to confirm. Nothing is charged yet. Their next "
+            f"message is a yes or a no — it is handled for you. Do NOT call a "
+            f"tool for it."
+        )
     if state.awaiting_coupon:
         return (
             f"IN FLIGHT: {state.pending.describe()} is in the basket and "
@@ -540,6 +549,28 @@ async def _resolve_state_first(user, message: str):
     through to ordinary planning.
     """
     state = conversation.load(user.phone)
+
+    # They chose out loud and we read it back. Nothing has been spent yet.
+    if state.awaiting_spoken_confirmation:
+        intent = conversation.classify_reply(message)
+
+        if intent == conversation.AFFIRMATIVE:
+            selection = state.pending.selection
+            logger.info(f"[planner] spoken selection {selection} confirmed aloud")
+            return (await skills.place_order(user, selection=selection)).message
+
+        if intent in (conversation.NEGATIVE, conversation.ALTERNATIVE):
+            return (await skills.cancel_spoken_selection(user)).message
+
+        # They said a different number instead of yes — heard again, so read
+        # THAT back rather than guessing which one they meant.
+        picked = conversation.resolve_selection(message, len(state.offers))
+        if picked and picked != state.pending.selection:
+            return await skills.confirm_spoken_selection(user, picked)
+
+        # Anything else is not an answer to "shall I order this?". Let the model
+        # handle it; the confirmation stays open and nothing is charged.
+        return None
 
     # A cart is built and discounts are on the table. Resolved here rather than
     # by the model for the same reason as everything else in this function: the
@@ -596,6 +627,14 @@ async def _resolve_state_first(user, message: str):
     if state.has_offers:
         picked = conversation.resolve_selection(message, len(state.offers))
         if picked:
+            # SPOKEN selections are read back before anything is spent.
+            # Transcription of code-switched Kannada and English is not reliable
+            # enough to spend on unheard — "one" and "nine" are a syllable
+            # apart, and the first the user would know of a mis-hearing is the
+            # wrong food at the door. Typed selections are unaffected: the digit
+            # is exactly what they meant.
+            if db.peek_voice_turn(user.phone):
+                return await skills.confirm_spoken_selection(user, picked)
             logger.info(f"[planner] selection resolved to option {picked}")
             return (await skills.place_order(user, selection=picked)).message
 
