@@ -43,6 +43,11 @@ os.environ["WHATSAPP_GATEWAY_SECRET"] = GATEWAY_SECRET
 os.environ["WHATSAPP_GATEWAY_URL"] = "http://localhost:8100"
 os.environ["AUTHORIZED_PHONES"] = USER
 os.environ["PUBLIC_BASE_URL"] = "https://concierge.example"
+# This suite exercises the voice FAIL-SOFT path, so speech must be unconfigured
+# here whatever the developer has in their own .env. Set EMPTY rather than
+# deleted: core.config calls load_dotenv() on import, and python-dotenv skips a
+# key that is already present — so popping it would let a real .env put it back.
+os.environ["SARVAM_API_KEY"] = ""
 
 import db
 
@@ -422,21 +427,39 @@ check("but it is not queued twice", len(inbound_rows()) == before,
 check("and no second reply is sent", len(outbound_rows()) == 1)
 
 # ======================================================================
-print("[5] Media and voice are classified honestly, never guessed at")
+print("[5] Media is classified honestly; voice is transcribed or explained")
 before = len(inbound_rows())
 check("a photo is accepted",
       post(inbound("", "WAMSG-PHOTO", kind="image")).status_code == 200)
-check("a voice note is accepted",
-      post(inbound("", "WAMSG-VOICE", kind="audio")).status_code == 200)
-check("both are queued as attachments, not as text",
-      len(inbound_rows()) == before + 2)
+check("it is queued as an attachment, not as text",
+      len(inbound_rows()) == before + 1)
 conn = db.get_connection()
 flagged = conn.execute(
-    "SELECT num_media FROM whatsapp_inbound WHERE message_sid IN (?, ?)",
-    ("WAMSG-PHOTO", "WAMSG-VOICE")).fetchall()
+    "SELECT num_media FROM whatsapp_inbound WHERE message_sid = ?",
+    ("WAMSG-PHOTO",)).fetchone()
 conn.close()
-check("so the worker says honestly that it cannot read them",
-      [row[0] for row in flagged] == [1, 1])
+check("so the worker says honestly that it cannot read it", flagged[0] == 1)
+
+# A voice note with no SARVAM_API_KEY set - the fail-soft path. It must never
+# be silence, and never a crash: someone who cannot type gets a plain sentence
+# telling them to type.
+import backend.routes as routes
+
+check("speech is deliberately unconfigured here, whatever is in .env",
+      not os.getenv("SARVAM_API_KEY"))
+queued_before = len(outbound_rows())
+voice_note = inbound("", "WAMSG-VOICE", kind="audio")
+voice_note["audio"] = "AAAA"
+check("a voice note is accepted", post(voice_note).status_code == 200)
+check("it does NOT reach the concierge as an empty message",
+      len(inbound_rows()) == before + 1)
+spoken = [row[1] for row in outbound_rows()][queued_before:]
+check("the user is told voice is unavailable, in plain words",
+      spoken and spoken[0] == routes.VOICE_UNAVAILABLE)
+check("and told what to do instead", "type it" in (spoken[0] if spoken else ""))
+check("no technical detail reaches them",
+      spoken and "SARVAM" not in spoken[0] and "API" not in spoken[0])
+
 
 # ======================================================================
 print("[6] No Meta surface remains")

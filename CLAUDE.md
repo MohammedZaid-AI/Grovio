@@ -35,10 +35,10 @@ half.
 
 ```
 WhatsApp  →  Baileys gateway (Node)  →  POST /webhook/inbound
-                 ↓
+                 ↓                          voice note? ai/voice.transcribe
           whatsapp_worker      durable queue, per-phone ordering, retries
                  ↓
-          ai/concierge.py      turn entry point
+          ai/concierge.py      turn entry point (spoke? speak the reply back)
                  ↓
           ai/planner.py        LLM orchestrates via tools
                  ↓             (knows nothing about OAuth or platforms)
@@ -82,6 +82,8 @@ ai/
   identity.py           user lifecycle, onboarding status
   memory.py             user model: facts, history, food memory
   recommendation.py     scoring; reasons are derived, never invented
+  voice.py              speech in/out (Sarvam). A BOUNDARY concern:
+                        never imported by the planner
   providers/
     base.py             Offer + Provider/LinkableProvider protocols
     registry.py         capability routing, fan-out, failure isolation
@@ -194,6 +196,8 @@ Get-ChildItem tests\test_*.py | ForEach-Object {
 | `AUTHORIZED_PHONES` | Who may ORDER. Chat is open to all. **Fails closed.** |
 | `WHATSAPP_GATEWAY_SECRET` | Shared secret with the gateway, both directions. **Fails closed.** |
 | `WHATSAPP_GATEWAY_URL` | Where the gateway listens (default `http://localhost:8100`) |
+| `SARVAM_API_KEY` | Voice notes (speech in/out, Kannada + English). Optional — unset means voice notes get a text reply saying so |
+| `SARVAM_SPEAKER` | Voice for spoken replies (default `shubh`). Must be a **bulbul:v3** voice — the v2 roster was retired with that model |
 | `TOKEN_ENCRYPTION_KEY` | Fernet key for provider tokens. **Fails closed.** |
 | `PUBLIC_BASE_URL` | Base for OAuth callbacks; must be https in production |
 | `SWIGGY_OAUTH_CLIENT_ID` | Optional — Swiggy issues client ids by dynamic registration |
@@ -299,6 +303,38 @@ Get-ChildItem tests\test_*.py | ForEach-Object {
   anyway burns a real call and dies with "Some error while creating the order",
   which then looks retryable and isn't. A cart we cannot READ stays advisory; a
   cart Swiggy REJECTS raises `ItemUnavailable`.
+- **Never leave a Sarvam parameter to its default.** Third live failure in the
+  same shape: `speech_sample_rate` was unset, the server used 22050 Hz, and opus
+  refused it — opus takes 8000/12000/16000/24000/48000 while the API at large
+  also takes 22050/32000/44100. Sarvam even documents the default as 24000, so
+  the documented default and the actual one disagreed. Everything is now sent
+  explicitly and `tests/test_voice.py` §12 asserts every keyword we send is one
+  the SDK declares, which is the guard that generalises past this one field.
+- **Sarvam model names expire, and voices do not survive the bump.**
+  `bulbul:v2` was deprecated mid-flight — the first sign was a real user getting
+  no voice reply. Worse, its seven voices (`anushka` and friends) do not exist
+  on `bulbul:v3`, so changing the model alone trades one API error for another.
+  `tests/test_voice.py` §12 reads the Literals out of the SDK's own type hints
+  and fails when a newer voice model appears, which is the same moment
+  deprecation starts. `saaras:v4` exists and staying on `saaras:v3` is
+  deliberate — the exemption is asserted there so it stays visible.
+- **VOICE IS A BOUNDARY CONCERN.** A voice note is transcribed in
+  `backend/routes.py` before the queue, and the reply is voiced in
+  `ai/concierge.py` after the planner returns. Everything between receives text
+  and returns text: `tests/test_voice.py` §11 parses `ai/voice.py`'s imports and
+  fails the build if it reaches for the transport, or if the planner imports
+  speech. Transcription runs in `translate` mode, so the planner is monolingual
+  — which is why the reply must be translated BACK before it is spoken, or a
+  Kannada speaker hears English in a Kannada voice.
+- **A SPOKEN selection is read back before it spends.** A typed "2" is what the
+  person meant; a transcribed "2" is a speech model's guess about code-switched
+  Kannada and English, and the first anyone would know of a mis-hearing is the
+  wrong food at the door. `State.AWAITING_SPOKEN_CONFIRMATION` parks the choice
+  and NOTHING is committed until they say yes. Typed selections are untouched.
+- **Speech never fails closed, it fails SOFT.** No `SARVAM_API_KEY`, or a
+  Sarvam outage, produces a plain text reply asking them to type — never silence
+  and never a crash. Someone who sent a voice note because they cannot type
+  gets a sentence, not nothing.
 - **The OAuth link is sent by `skills._link_prompt`, not by the model.**
   Same lesson, found the hard way twice. The authorization URL is ~300
   characters; handing it to the model to retype got it truncated at
