@@ -14,6 +14,11 @@ mcp==1.27.2
 mcp-use==1.7.0
 httpx==0.28.1
 
+# Voice notes: speech to text and text to speech, Kannada + English.
+# OPTIONAL at runtime - with no SARVAM_API_KEY the concierge answers a voice
+# note in text rather than failing. The distribution is `sarvamai`.
+sarvamai==0.1.32
+
 # Credential encryption at rest
 cryptography==48.0.0
 
