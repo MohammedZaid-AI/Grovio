@@ -7,7 +7,9 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
 
-const MAX_BODY_BYTES = 64 * 1024;
+// A synthesized voice note is base64, so the ceiling is generous. Still
+// bounded: an unbounded body is a way to exhaust this process's memory.
+const MAX_BODY_BYTES = 12 * 1024 * 1024;
 // WhatsApp's own per-message ceiling.
 const MAX_TEXT_LENGTH = 4096;
 
@@ -30,6 +32,19 @@ export function validateSend(body) {
   }
   const phone = String(body.phone ?? '').replace(/\D/g, '');
   if (!phone) return { ok: false, error: 'phone is required and must contain digits' };
+
+  // A voice note. Same route, same auth, same recipient rules — only the
+  // payload differs, so the backend needs no second endpoint to learn about.
+  if (body.audio !== undefined) {
+    if (typeof body.audio !== 'string' || !body.audio) {
+      return { ok: false, error: 'audio must be a non-empty base64 string' };
+    }
+    return {
+      ok: true, phone, audio: body.audio,
+      mimetype: typeof body.mimetype === 'string' ? body.mimetype : null,
+    };
+  }
+
   const text = body.text;
   if (typeof text !== 'string' || !text.trim()) {
     return { ok: false, error: 'text is required and must be a non-empty string' };
@@ -101,7 +116,9 @@ export function createServer(gateway, cfg, { log = console.log } = {}) {
     if (!valid.ok) return json(res, 400, { error: valid.error });
 
     try {
-      const messageId = await gateway.sendText(valid.phone, valid.text);
+      const messageId = valid.audio
+        ? await gateway.sendAudio(valid.phone, valid.audio, valid.mimetype)
+        : await gateway.sendText(valid.phone, valid.text);
       return json(res, 200, {
         status: 'sent', message_id: messageId, phone: valid.phone,
       });

@@ -30,6 +30,7 @@ from whatsapp.gateway import (  # noqa: F401
     gateway_url,
     is_configured,
     mark_read,
+    send_audio,
     send_document,
     send_image,
     send_template,
@@ -43,6 +44,7 @@ PROVIDER = "baileys"
 __all__ = [
     "MAX_MESSAGE_LENGTH", "PROVIDER", "NotConfigured", "SendErrorClass",
     "canonical_phone", "classify_send_error", "gateway_url", "is_configured",
+    "send_audio",
     "mark_read", "send_document", "send_image", "send_template", "send_text",
     "start", "stop",
 ]

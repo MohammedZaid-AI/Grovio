@@ -18,6 +18,7 @@ verdict is the whole job here.
 Business Cloud API. WhatsApp can ban the number. Use a spare one, never a number
 tied to a business account.
 """
+import base64
 import os
 from collections import namedtuple
 
@@ -165,10 +166,34 @@ async def send_text(to: str, body: str) -> str:
     return message_id
 
 
-# Media and templates are capabilities the gateway does not expose and nothing
-# above this layer asks for. Declared so an accidental call fails LOUDLY here
-# rather than silently doing nothing, and so the gap is documented rather than
-# faked.
+async def send_audio(to: str, audio: bytes, mimetype: str = "audio/ogg; codecs=opus") -> str:
+    """Send a voice note. Returns the WhatsApp message id, or "".
+
+    Base64 over the same authenticated /send route as text — one endpoint, one
+    secret, one set of error semantics, so `classify_send_error` keeps working
+    unchanged. The backend still never sees a Baileys object; `ptt: true`, the
+    flag that makes WhatsApp render this as a voice note rather than a file
+    attachment, is the gateway's business.
+    """
+    if not audio:
+        raise ValueError("no audio to send")
+    recipient = canonical_phone(to)
+    data = await _post(
+        "/send",
+        {"phone": recipient, "audio": base64.b64encode(audio).decode(),
+         "mimetype": mimetype},
+        describe=f"voice note to {recipient}",
+    )
+    message_id = str(data.get("message_id") or "")
+    logger.info(f"[whatsapp] sent voice note to {recipient} — "
+                f"message_id={message_id} ({len(audio)} bytes)")
+    return message_id
+
+
+# Images, documents and templates are capabilities the gateway does not expose
+# and nothing above this layer asks for. Declared so an accidental call fails
+# LOUDLY here rather than silently doing nothing, and so the gap is documented
+# rather than faked.
 async def send_image(to: str, link: str, caption: str = None) -> str:
     raise NotImplementedError(
         "Sending images needs a media route on the gateway. The concierge "

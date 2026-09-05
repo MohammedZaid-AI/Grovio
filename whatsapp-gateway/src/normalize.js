@@ -131,6 +131,18 @@ export function unwrap(message) {
   return current;
 }
 
+/** The container a voice note arrived in, which the speech API needs told. */
+export function mimetypeOf(message) {
+  const audio = message?.audioMessage;
+  if (audio && typeof audio.mimetype === 'string' && audio.mimetype) {
+    // WhatsApp sends "audio/ogg; codecs=opus"; the parameters are not part of
+    // the type and confuse a strict decoder.
+    return audio.mimetype.split(';')[0].trim();
+  }
+  return 'audio/ogg';
+}
+
+
 /**
  * One Baileys message -> the backend's inbound shape, or null to ignore it.
  *
@@ -173,6 +185,9 @@ export function normalizeMessage(raw) {
     phone,
     text,
     timestamp: String(raw.messageTimestamp ?? ''),
+    // A voice note is `audio`, and the backend transcribes it. Anything else
+    // without text keeps its own kind so the backend can say honestly that it
+    // cannot read that yet, rather than guessing at what was sent.
     type: text ? 'text' : media,
     // The JID this conversation actually lives on. Kept OUT of the backend
     // payload: rebuilding <phone>@s.whatsapp.net is right for an ordinary chat

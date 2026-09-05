@@ -14,7 +14,7 @@ import test, { describe } from 'node:test';
 import { createDedupe, deliverInbound, isRetryable } from '../src/backend.js';
 import { assertConfigured, config } from '../src/config.js';
 import {
-  mediaKind, normalizeMessage, resolvePhone, unwrap,
+  mediaKind, mimetypeOf, normalizeMessage, resolvePhone, unwrap,
 } from '../src/normalize.js';
 import { createServer, secretMatches, validateSend } from '../src/server.js';
 import { backoffMs, shouldReconnect } from '../src/socket.js';
@@ -162,6 +162,110 @@ describe('14. unsupported and malformed message types', () => {
     }));
     assert.equal(out.type, 'text');
     assert.equal(out.text, 'is this one good?');
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('voice notes', () => {
+  const voiceNote = (audio = { mimetype: 'audio/ogg; codecs=opus', ptt: true }) =>
+    textMessage({ key: { id: 'WAMSG-VOICE' }, message: { audioMessage: audio } });
+
+  test('a voice note is typed as audio, for the backend to transcribe', () => {
+    const out = normalizeMessage(voiceNote());
+    assert.equal(out.type, 'audio');
+    assert.equal(out.message_id, 'WAMSG-VOICE');
+    assert.equal(out.phone, '919876543210');
+  });
+
+  test('it carries no text - the backend supplies that by transcribing', () => {
+    assert.equal(normalizeMessage(voiceNote()).text, '');
+  });
+
+  test('the container format is read, so the speech API can be told', () => {
+    assert.equal(mimetypeOf({ audioMessage: { mimetype: 'audio/ogg; codecs=opus' } }),
+      'audio/ogg');
+  });
+
+  test('codec parameters are stripped - a strict decoder chokes on them', () => {
+    assert.equal(mimetypeOf({ audioMessage: { mimetype: 'audio/mp4; codecs=mp4a' } }),
+      'audio/mp4');
+  });
+
+  test('a voice note with no declared type still gets a sane default', () => {
+    assert.equal(mimetypeOf({ audioMessage: {} }), 'audio/ogg');
+    assert.equal(mimetypeOf({}), 'audio/ogg');
+  });
+
+  test('OUR OWN voice reply never comes back in - the loop guard still holds', () => {
+    assert.equal(normalizeMessage({
+      key: { remoteJid: '919876543210@s.whatsapp.net', fromMe: true, id: 'OUT' },
+      message: { audioMessage: { ptt: true } },
+      messageTimestamp: 1755000000,
+    }), null);
+  });
+
+  test('a voice note in a group is still ignored', () => {
+    assert.equal(normalizeMessage(textMessage({
+      key: { remoteJid: '123-456@g.us' },
+      message: { audioMessage: { ptt: true } },
+    })), null);
+  });
+
+  test('a voice note from a bare @lid is dropped, not keyed by a privacy id', () => {
+    assert.equal(normalizeMessage(textMessage({
+      key: { remoteJid: '188888888888888@lid' },
+      message: { audioMessage: { ptt: true } },
+    })), null);
+  });
+
+  test('the payload shape is unchanged - audio is added by the socket, later', () => {
+    const { jid, ...forBackend } = normalizeMessage(voiceNote());
+    assert.deepEqual(Object.keys(forBackend).sort(),
+      ['message_id', 'phone', 'text', 'timestamp', 'type']);
+  });
+
+  test('an audio message WITH a caption is text, because they wrote words', () => {
+    // Rare, but WhatsApp allows it, and the words are what they meant to say.
+    const out = normalizeMessage(textMessage({
+      message: { imageMessage: { caption: 'this one please' } },
+    }));
+    assert.equal(out.type, 'text');
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('sending a voice note', () => {
+  test('a /send body with audio is accepted', () => {
+    const valid = validateSend({ phone: '919876543210', audio: 'BASE64==' });
+    assert.equal(valid.ok, true);
+    assert.equal(valid.audio, 'BASE64==');
+    assert.equal(valid.phone, '919876543210');
+  });
+
+  test('audio does not need text alongside it', () => {
+    assert.equal(validateSend({ phone: '91', audio: 'AAA' }).ok, true);
+  });
+
+  test('an empty or non-string audio is refused', () => {
+    assert.equal(validateSend({ phone: '91', audio: '' }).ok, false);
+    assert.equal(validateSend({ phone: '91', audio: 123 }).ok, false);
+  });
+
+  test('a recipient is still required', () => {
+    assert.equal(validateSend({ audio: 'AAA' }).ok, false);
+  });
+
+  test('the mimetype rides along when given', () => {
+    assert.equal(validateSend({ phone: '91', audio: 'A', mimetype: 'audio/ogg' }).mimetype,
+      'audio/ogg');
+    assert.equal(validateSend({ phone: '91', audio: 'A' }).mimetype, null);
+  });
+
+  test('a text send is completely unaffected', () => {
+    const valid = validateSend({ phone: '91', text: 'hello' });
+    assert.equal(valid.ok, true);
+    assert.equal(valid.audio, undefined);
+    assert.equal(valid.text, 'hello');
   });
 });
 

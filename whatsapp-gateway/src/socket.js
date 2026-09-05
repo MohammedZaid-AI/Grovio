@@ -8,13 +8,14 @@
 import path from 'node:path';
 import makeWASocket, {
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   useMultiFileAuthState,
 } from '@whiskeysockets/baileys';
 import qrcode from 'qrcode-terminal';
 
 import { createDedupe, deliverInbound } from './backend.js';
-import { normalizeMessage } from './normalize.js';
+import { mimetypeOf, normalizeMessage, unwrap } from './normalize.js';
 
 const RECONNECT_BASE_MS = 2000;
 const RECONNECT_MAX_MS = 60000;
@@ -142,6 +143,23 @@ export function createGateway(cfg, { log = console.log } = {}) {
 
       const { jid, ...forBackend } = message;
       chats.set(message.phone, jid);
+
+      // A voice note carries no text, so the backend gets the AUDIO to
+      // transcribe. Decryption needs the original Baileys message, which is
+      // why it happens here and never crosses the HTTP boundary.
+      if (message.type === 'audio') {
+        try {
+          const buffer = await downloadMediaMessage(raw, 'buffer', {});
+          forBackend.audio = buffer.toString('base64');
+          forBackend.mimetype = mimetypeOf(unwrap(raw.message));
+          log(`[gateway] downloaded a voice note (${buffer.length} bytes)`);
+        } catch (error) {
+          // The backend will answer honestly that it could not hear it. Far
+          // better than silence, and better than a retry loop on a media
+          // download that will fail the same way.
+          log(`[gateway] could not download the voice note: ${error.message}`);
+        }
+      }
       // The id, the sender and the kind. Never the message body.
       log(`[gateway] inbound ${message.message_id} from ${message.phone} `
         + `(${message.type})`);
@@ -157,6 +175,28 @@ export function createGateway(cfg, { log = console.log } = {}) {
   function jidFor(phone) {
     const digits = String(phone).replace(/\D/g, '');
     return chats.get(digits) || `${digits}@s.whatsapp.net`;
+  }
+
+  async function sendAudio(phone, audioBase64, mimetype) {
+    if (!sock || !ready) {
+      const error = new Error('WhatsApp is not connected');
+      error.code = 'NOT_CONNECTED';
+      throw error;
+    }
+    const jid = jidFor(phone);
+    const buffer = Buffer.from(audioBase64, 'base64');
+    // ptt:true is what makes WhatsApp render it as a VOICE NOTE rather than an
+    // audio file attachment — the difference between tapping play and being
+    // sent a download.
+    const sent = await sock.sendMessage(jid, {
+      audio: buffer,
+      mimetype: mimetype || 'audio/ogg; codecs=opus',
+      ptt: true,
+    });
+    const id = sent?.key?.id ? String(sent.key.id) : '';
+    log(`[gateway] sent voice note ${id || '(no id)'} to ${phone} `
+      + `(${buffer.length} bytes)`);
+    return id;
   }
 
   async function sendText(phone, text) {
@@ -175,6 +215,7 @@ export function createGateway(cfg, { log = console.log } = {}) {
   return {
     connect,
     sendText,
+    sendAudio,
     get connected() { return ready; },
     get stopped() { return stopped; },
     // For tests and /health only.
