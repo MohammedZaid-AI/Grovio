@@ -177,6 +177,13 @@ anything — `AUTHORIZED_PHONES` gates ordering — but they get replies.
 
 `npm test` runs 51 gateway checks with no network and no socket.
 
+The Python suites total **1,064 checks** across ten files. Run them all:
+
+```powershell
+Get-ChildItem tests\test_*.py | ForEach-Object {
+    venv\Scripts\python.exe $_.FullName | Select-String "RESULT" }
+```
+
 ## Environment
 
 | Variable | Purpose |
@@ -253,18 +260,6 @@ anything — `AUTHORIZED_PHONES` gates ordering — but they get replies.
   `whatsapp:+91…`. `whatsapp.canonical_phone` normalises at ingress and
   `db._migrate_phone_keys` rewrites older rows on startup. A second format
   means the same human becomes a second user with no memory or order history.
-- **The backend must never import Baileys.** The gateway is a separate Node
-  process; Python talks to it over two routes and nothing else.
-  `tests/test_gateway_transport.py` §8 tokenises `ai/`, `backend/` and `core/`
-  and fails the build if any of them names the transport.
-- **`key.fromMe` is THE loop guard.** Baileys delivers our own replies back
-  through `messages.upsert`. Answering them puts the concierge in a conversation
-  with itself, forever, spending real money every lap. It is dropped in the
-  gateway's `normalize.js` and asserted from three directions.
-- **A `@lid` is a privacy id, NOT a phone number.** Keying a user by one gives
-  the same human a second identity with no memory, no history and no place on
-  `AUTHORIZED_PHONES`. The gateway resolves `senderPn`/`participantPn`, and
-  drops the message when neither exists rather than inventing a user.
 - **Tokens never leave the vault.** `ai/providers/vault.py` is the only module
   that decrypts a credential. `tests/test_identity.py` §10 tokenises
   `planner.py`/`concierge.py`/`skills.py` and fails the build if they can so
@@ -304,6 +299,29 @@ anything — `AUTHORIZED_PHONES` gates ordering — but they get replies.
   anyway burns a real call and dies with "Some error while creating the order",
   which then looks retryable and isn't. A cart we cannot READ stays advisory; a
   cart Swiggy REJECTS raises `ItemUnavailable`.
+- **The OAuth link is sent by `skills._link_prompt`, not by the model.**
+  Same lesson, found the hard way twice. The authorization URL is ~300
+  characters; handing it to the model to retype got it truncated at
+  `...&redirect_uri=http%3A%2F`, and Swiggy answered "client_id and redirect_uri
+  are required" — which reads as an OAuth bug and is not one. The broken link
+  then entered conversation history and was reproduced on later turns with OAuth
+  never running. It now goes out through `payments.notify`, and `_link_prompt`
+  ASSERTS no `http` appears in what the model is handed.
+- **`/auth/send-otp` and `/auth/verify-otp` are Swiggy's OWN endpoints.** Their
+  docs state plainly that the consent UI uses them internally and that they are
+  "not part of the OAuth contract and not callable by third-party clients". If
+  the login page shows "Failed to send OTP", that is Swiggy's SMS step failing
+  AFTER they accepted our request — the page rendering at all is the proof our
+  authorization request was valid. Do NOT implement these endpoints, and do not
+  change OAuth code to chase it. Retry, try another number, then email
+  builders@swiggy.in.
+- **The registered `client_id` is persisted on `oauth_states`.** RFC 6749 4.1.3
+  wants the token request to name the client the code was issued to, and the
+  registration cache lives in memory — so a restart between `begin()` and the
+  callback used to re-register and could present a different client. The DCR
+  cache is keyed `(endpoint, redirect_uri)`, not by endpoint alone: Swiggy runs
+  ONE registration server for both its MCP servers, so keying on the endpoint
+  gave whichever provider registered first its client_id to the other.
 - **The payment link is sent by `skills._await_payment`, not by the model.**
   Swiggy's UPI window was 60s and the local model spent 24 of them writing a
   sentence around the link. It goes out through `payments.notify` the moment the
